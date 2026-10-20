@@ -1,0 +1,119 @@
+# gptel-yatools
+
+Extra [gptel](https://github.com/karthink/gptel) tools — "yet another tools".
+
+The centrepiece is a small, **buffer-local virtual filesystem** layered over
+the real one: the model reads files through it, writes are buffered until you
+review and sync them, and every pending change is shown as a unified diff
+before it touches the disk.  Around it sit the tools a coding assistant needs:
+workspace-relative paths, line-addressed reads, regexp search, shell commands
+and `elisp` evaluation.
+
+Nothing is destructive without a visible step: a write is only buffered, and
+`file_sync` refuses to go to disk while a file changed underneath you.
+
+## Installation
+
+### straight.el
+
+```elisp
+(use-package gptel-yatools
+  :after gptel
+  :straight (:type git :host github :repo "USER/gptel-yatools")
+  :config (gptel-yatools-enable-all))
+```
+
+Until the repository is public, point straight.el at a checkout:
+
+```elisp
+(use-package gptel-yatools
+  :after gptel
+  :straight (:local-repo "/path/to/gptel-yatools")
+  :config (gptel-yatools-enable-all))
+```
+
+### package-vc or plain `load-path`
+
+```elisp
+(package-vc-install '(gptel-yatools :url "https://github.com/USER/gptel-yatools"))
+```
+
+or clone the repository and `(add-to-list 'load-path "/path/to/gptel-yatools")`.
+`gptel` is a hard dependency; nothing else is required.
+
+## Usage
+
+Loading the package registers every tool in gptel's tool registry, so they
+appear in the `gptel-menu` tool picker straight away.  Registration does not
+enable anything: which tools a request sends is `gptel-tools`, and that stays
+untouched until you say otherwise.
+
+```elisp
+(gptel-yatools-enable-all)         ; every tool
+(gptel-yatools-enable "filesystem") ; one category
+(gptel-yatools-enable "write_file" "file_sync") ; by name
+```
+
+Enabled tools are prepended to `gptel-tools` and replace earlier entries with
+the same name, so calling an enable function twice (or re-evaluating your
+config) does not send a tool twice.  Both functions are also commands, so
+`M-x gptel-yatools-enable` lets you pick categories and tools interactively.
+Picking tools in `gptel-menu` works too and is buffer-local; the enable
+functions set the value through `customize-set-variable`, so a chat buffer
+with its own `gptel-tools` keeps it.
+
+### Timeouts
+
+Tool calls run synchronously inside gptel's request handler, so a tool that
+blocks blocks Emacs.  Every tool takes an optional `timeout` argument, and
+carries a deadline that aborts it when it expires; `gptel-yatools-timeout`
+(default 120) sets the default.  Time spent waiting for you — reading a
+`file_sync` diff, confirming `execute_elisp` — does not count against it.
+Timers only run while Emacs waits for input, so the deadline bounds calls that
+block on I/O, not purely CPU-bound Elisp.
+
+## Tools
+
+| Tool | Category | Purpose |
+| --- | --- | --- |
+| `read_workspace_root` | workspace | Absolute path of the workspace root. |
+| `read_path` | filesystem | Read a file, or list a directory; pending VFS copies win over disk. |
+| `read_file_from_offset` | filesystem | Read `lines` lines starting at a 1-based `offset`. |
+| `fetch_lines_from_file_using_regex` | filesystem | Return matching lines, each prefixed with its line number. |
+| `write_file` | filesystem | Replace a file's contents **in the VFS**; the disk is not touched until `file_sync`. |
+| `write_file_diff` | filesystem | Replace one exact occurrence of `old_string` with `new_string`, in the VFS. |
+| `vfs_diff` | filesystem | Unified diff of pending changes, with paging. |
+| `file_sync` | filesystem | Write pending changes to disk, after showing the diff for review. |
+| `vfs_discard` | filesystem | Drop pending changes — the way out of a conflict. |
+| `execute_command` | shell | Run a shell command from the workspace root and return its output. |
+| `execute_elisp` | elisp | Evaluate one Emacs Lisp form; always asks for confirmation first. |
+
+The virtual filesystem is buffer-local, so two chats never see each other's
+pending writes, and a request's tools run in the buffer that owns it rather
+than in whichever buffer happens to be current.  Conflicts — a file that
+changed on disk after it was read, a pending write to a file that is now
+unreadable, a coding system the text cannot be represented in — are reported
+instead of silently resolved.
+
+The review UI is `gptel-yatools-write-diff-mode`, a minor mode with
+<kbd>C-c C-c</kbd> / <kbd>C-c C-k</kbd> bound to accept and reject, active in
+the buffer where `file_sync` shows its diff.
+
+## Tests
+
+93 ERT tests, no network, no prompts, every one of them in a throwaway temp
+directory:
+
+```sh
+emacs -Q --batch -L . -l gptel-yatools.el -l tests/gptel-yatools-tests.el \
+  -f ert-run-tests-batch-and-exit
+```
+
+`gptel` must be on `load-path` (any straight.el/MELPA install is enough).
+
+Interactively: `M-x load-file RET tests/gptel-yatools-tests.el RET`, then
+`M-x ert RET gptel-yatools-test- RET`.
+
+## License
+
+MIT.  See [LICENSE](LICENSE).

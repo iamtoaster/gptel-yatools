@@ -1,0 +1,9 @@
+# Byte-compiled and generated files
+*.elc
+*-autoloads.el
+.dirs
+
+# Emacs noise
+.dir-locals.el
+.#*
+*~

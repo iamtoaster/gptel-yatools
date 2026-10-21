@@ -1284,7 +1284,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
              ((and (null synced) (null failed) (null conflicts) blocked)
               (message "gptel: nothing synced — %d file(s) blocked."
                        (length blocked)))
-             ((and (null synced) (null failed) conflicts)
+             ((and (null synced) (null failed) (null blocked) conflicts)
               (message "gptel: nothing synced — %d file(s) conflict with disk."
                        left))
              ((or conflicts failed blocked)
@@ -1356,7 +1356,10 @@ review could otherwise run against a fresh, empty table and sync nothing."
                   (gptel-yatools-vfs--sync-reason-list blocked))
           :provenance :vfs
           :comment "All pending changes are blocked; nothing synced."))
-        ((and (null synced) (null failed) conflicts)
+        ;; One reason only: say it plainly instead of printing a four-part
+        ;; report with three empty sections.  `blocked' must be empty too,
+        ;; or the blocked files would not be named anywhere.
+        ((and (null synced) (null failed) (null blocked) conflicts)
          (gptel-yatools-ok
           (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
                   (gptel-yatools-vfs--sync-file-list conflicts))

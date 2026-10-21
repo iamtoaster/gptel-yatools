@@ -1471,6 +1471,50 @@ whole purpose is to leave nothing behind."
           (should (equal (gptel-yatools-vfs-discard-pending) (list file)))
           (should-not (gptel-yatools-vfs-get file)))))))
 
+(ert-deftest gptel-yatools-test-sync-reports-blocked-alongside-conflicts ()
+  "A blocked file must not vanish from a report that also has a conflict.
+
+Both \"nothing synced\" shortcuts fired on `conflicts' alone, so a mixed
+set -- one conflict, one unsaved visiting buffer -- was reported as \"All
+pending changes conflict with disk\" and the blocked file was never
+named, neither to the model nor in the echo."
+  (gptel-yatools-test--in-dir
+    (let ((conflict (gptel-yatools-test--root-file "conflict.txt"))
+          (blocked (gptel-yatools-test--root-file "blocked.txt")))
+      (gptel-yatools-test--write conflict "base\n")
+      (gptel-yatools-test--write blocked "orig\n")
+      (gptel-yatools-test--with-open-buffer blocked
+        (goto-char (point-max))
+        (insert "unsaved\n")
+        (with-temp-buffer
+          (gptel-yatools-test--vfs
+            (gptel-yatools-vfs-put conflict "vfs\n")
+            (gptel-yatools-vfs-put blocked "vfs\n")
+            ;; Someone else writes the conflict file after it was read.
+            (gptel-yatools-test--write conflict "external\n")
+            (let ((messages nil)
+                  (gptel-yatools-sync-without-review t))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (push (apply #'format fmt args) messages))))
+                (let ((out (funcall (gptel-yatools-test--tool "file_sync"))))
+                  (should (string-match-p "conflict\\.txt" out))
+                  (should (string-match-p "blocked\\.txt" out))
+                  (should (string-match-p "Blocked" out))
+                  (should-not (string-match-p "All pending changes conflict"
+                                              out))
+                  (gptel-yatools-test--should-be-enveloped out)))
+              ;; The echo names both counts, rather than blaming conflicts
+              ;; for everything.
+              (should (cl-some (lambda (m) (string-match-p "2 NOT synced" m))
+                               messages))
+              (should-not (cl-some (lambda (m)
+                                     (string-match-p "nothing synced" m))
+                                   messages))))
+          (should (equal (gptel-yatools-vfs--disk-content conflict)
+                         "external\n"))
+          (should (equal (gptel-yatools-vfs--disk-content blocked) "orig\n")))))))
+
 (ert-deftest gptel-yatools-test-vfs-discard-reports-what-it-dropped ()
   (gptel-yatools-test--in-dir
     (let ((one (gptel-yatools-test--root-file "one.txt"))

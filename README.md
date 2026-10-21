@@ -139,7 +139,8 @@ with a name and a file it returns one referenced file.
 Skills are looked up in `gptel-yatools-skill-directories`, which defaults to
 `.agents/skills` in the workspace root and `skills/` under your Emacs
 directory (`user-emacs-directory`).  Relative entries are resolved against the
-workspace root; the first directory holding a given skill name wins.  An entry
+workspace root.  Same-named skills in different roots are all kept, never
+merged: the ambiguity is reported, not resolved by picking one.  An entry
 may be a function, and so may the whole list, which makes roots that depend on
 the current project easy to express:
 
@@ -157,7 +158,11 @@ searched further, so a skill's own subdirectories are never mistaken for
 skills.  When the same name occurs in two groups, both are listed by their
 path relative to the root (`engineering/code-review`), and calling that path
 loads the intended one; the bare name then reports the candidates instead of
-picking one.
+picking one.  Two roots holding the same path would still collide, so a handle
+that is itself ambiguous gains its root in parentheses —
+`engineering/code-review (/path/to/root)` — and that whole line is the name to
+call it by.  A skill's absolute directory works as a name too, which is what
+the loaded skill's `Directory:` line hands the model.
 
 The scan is cheap after the first call: the directories are walked every
 time, so a skill added or removed is noticed immediately, but the YAML

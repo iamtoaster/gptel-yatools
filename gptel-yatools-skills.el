@@ -554,19 +554,28 @@ re-deriving which names are ambiguous; see
 (defun gptel-yatools-skills--assign-handles (skills)
   "Return SKILLS with each `:handle' set to the name it is addressed by.
 
-A handle is the bare name, unless that name occurs more than once, in
-which case it is the skill's path relative to its root -- the only
-handle that identifies one skill on its own.  The decision is made once,
-here, rather than by each caller that wants to show or record a name.
+A handle is the skill's bare name, unless that name occurs more than once;
+then it is the skill's path relative to its root; and if that path occurs
+more than once too -- two roots each holding `grp/review' -- it is
+\"RELATIVE (ABSOLUTE ROOT)\".  A handle has to identify one skill and be
+loadable by itself, which is what the third tier buys when two roots
+present the same shape.
 
-The ambiguity test is done against the whole list before rewriting any
-skill, so assigning handles cannot change which names are ambiguous."
-  (let ((ambiguous (gptel-yatools-skills--duplicate-names skills)))
+The ambiguity tests are done against the whole list before any skill is
+rewritten, so assigning handles cannot change which names or paths are
+ambiguous."
+  (let ((ambiguous (gptel-yatools-skills--duplicate-names skills))
+        (ambiguous-paths (gptel-yatools-skills--duplicates skills :relative)))
     (mapcar (lambda (skill)
               (plist-put (copy-sequence skill) :handle
-                         (if (member (plist-get skill :name) ambiguous)
-                             (plist-get skill :relative)
-                           (plist-get skill :name))))
+                         (if (not (member (plist-get skill :name) ambiguous))
+                             (plist-get skill :name)
+                           (let ((relative (plist-get skill :relative)))
+                             (if (member relative ambiguous-paths)
+                                 (format "%s (%s)" relative
+                                         (directory-file-name
+                                          (plist-get skill :root)))
+                               relative)))))
             skills)))
 
 (defun gptel-yatools-skills-handle (skill)
@@ -581,37 +590,56 @@ plist built by hand in a test, say -- falls back on its `name'."
 (defun gptel-yatools-skills--lookup (skills name)
   "Resolve NAME against SKILLS.
 
-NAME is either a bare skill name or a path relative to a root -- the
-path is what the index shows for a name that is not unique.  Returns
-\(:skill SKILL) for a single match, (:ambiguous MATCHES) when a bare
-name matches more than one skill, or nil when nothing matches.
+NAME is what the index shows: a handle (a bare name, a path relative to a
+root, or a path followed by its root in parentheses), or a bare name or
+relative path typed by hand.  As a last resort it may be an absolute
+skill directory, which is what a payload's `Directory:' line and a shell
+listing hand the model.
+
+Returns (:skill SKILL) for a single match, (:ambiguous MATCHES) when the
+text identifies more than one skill, or nil when nothing matches.
 
 An ambiguous name is never resolved to \"the first one\": with skills
 grouped into directories, one name in two groups is a reasonable
 arrangement, and picking silently would hide a whole skill."
   (let* ((wanted (string-trim name))
+         (by-handle (cl-remove-if-not
+                     (lambda (skill)
+                       (equal (gptel-yatools-skills-handle skill) wanted))
+                     skills))
          (by-path (cl-remove-if-not
                    (lambda (skill) (equal (plist-get skill :relative) wanted))
                    skills))
          (by-name (cl-remove-if-not
                    (lambda (skill) (equal (plist-get skill :name) wanted))
                    skills))
-         (matches (if by-path by-path by-name)))
+         (by-directory
+          (when (file-name-absolute-p wanted)
+            (let ((dir (directory-file-name (expand-file-name wanted))))
+              (cl-remove-if-not
+               (lambda (skill)
+                 (equal (directory-file-name (plist-get skill :directory)) dir))
+               skills))))
+         (matches (or by-handle by-path by-name by-directory)))
     (pcase (length matches)
       (0 nil)
       (1 (list :skill (car matches)))
       (_ (list :ambiguous matches)))))
 
-(defun gptel-yatools-skills--duplicate-names (skills)
-  "Return the names that occur more than once in SKILLS."
+(defun gptel-yatools-skills--duplicates (skills key)
+  "Return KEY's values that occur more than once in SKILLS."
   (let ((counts (make-hash-table :test #'equal))
         (duplicates nil))
     (dolist (skill skills)
-      (let ((name (plist-get skill :name)))
-        (if (> (gethash name counts 0) 0)
-            (cl-pushnew name duplicates :test #'equal)
-          (puthash name 1 counts))))
+      (let ((value (plist-get skill key)))
+        (if (> (gethash value counts 0) 0)
+            (cl-pushnew value duplicates :test #'equal)
+          (puthash value 1 counts))))
     duplicates))
+
+(defun gptel-yatools-skills--duplicate-names (skills)
+  "Return the names that occur more than once in SKILLS."
+  (gptel-yatools-skills--duplicates skills :name))
 
 ;;-------------------------------------------------------------------------
 ;; Rendering
@@ -705,7 +733,7 @@ identifies one skill on its own."
             (and skills
                  (mapconcat #'gptel-yatools-skills--index-line skills "\n"))
             (and ambiguous
-                 (format "Some names occur more than once; those skills are shown with their path relative to the skill directory, which is also the name to load them by: %s."
+                 (format "Some names occur more than once; those skills are shown with a longer name that identifies one of them (their path relative to the skill directory, and, when even that repeats, the skill root in parentheses). Load one by the name shown on its line: %s."
                          (mapconcat #'identity ambiguous ", ")))
             (and missing (not skills)
                  (format "These configured directories do not exist: %s"
@@ -719,9 +747,9 @@ identifies one skill on its own."
    #'identity
    (list
     (format "Error: %S matches %d skills, so it does not identify one." name (length matches))
-    (concat "Call this tool again with one of these paths -- each is relative to a skill directory and is usable as `name':\n"
+    (concat "Call this tool again with one of these names:\n"
             (mapconcat (lambda (skill)
-                         (format "  - %s" (plist-get skill :relative)))
+                         (format "  - %s" (gptel-yatools-skills-handle skill)))
                        matches "\n")))
    "\n\n"))
 
@@ -859,12 +887,14 @@ Call it with no arguments for the skill index: one line per installed skill, wit
 
 Call it again with the matching `name' to load that skill. You then get its full instructions, the list of files it ships with, and its absolute directory. The instructions are authoritative: follow them rather than improvising. Run any script it lists from that directory, for example with execute_command and the absolute path as its `directory' argument.
 
-Skills may be grouped into subdirectories, so the same name can exist in more than one group; the index then shows such a skill by its path relative to the skill directory (e.g. \"engineering/code-review\"), and calling it by that path always works.
+Skills may be grouped into subdirectories, so the same name can exist in more than one group; the index then shows such a skill by its path relative to the skill directory (e.g. \"engineering/code-review\"), and calling it by that path always works. If two skill roots hold the same path, the index shows the skill's root in parentheses after it, and that whole line is the name to call.
+
+The `name' argument also accepts a skill's absolute directory, as the loaded skill's `Directory:' line spells it.
 
 Use `file' together with `name' to read one of the files the skill lists, such as \"references/REFERENCE.md\" or \"scripts/extract.py\". The path is relative to the skill directory and may not point outside it."
   :args '((:name "name"
                  :type string
-                 :description "Name of the skill to load, exactly as the index lists it: either a bare skill name or a path relative to the skill directory when the index shows one. Omit it to list the available skills."
+                 :description "Name of the skill to load, exactly as the index lists it: either a bare skill name, a path relative to the skill directory when the index shows one, or that path followed by the skill root in parentheses when two roots hold it. An absolute skill directory is accepted too. Omit it to list the available skills."
                  :optional t)
           (:name "file"
                  :type string
@@ -979,22 +1009,12 @@ to go rather than pile up to be sent twice."
 (defun gptel-yatools-skills--candidates (skills)
   "Return an alist of (DISPLAY . SKILL) for completion over SKILLS.
 
-DISPLAY is the skill's handle, which is unique by construction: a
-handle is a path exactly when a bare name would not identify one skill.
-The root is appended in the pathological case of two roots putting the
-same directory path under different roots, so completion stays usable
-even then."
-  (let ((seen (make-hash-table :test #'equal))
-        (result nil))
-    (dolist (skill skills)
-      (let* ((handle (gptel-yatools-skills-handle skill))
-             (display (if (gethash handle seen)
-                          (format "%s (%s)" handle
-                                  (directory-file-name (plist-get skill :root)))
-                        handle)))
-        (puthash handle t seen)
-        (push (cons display skill) result)))
-    (nreverse result)))
+DISPLAY is the skill's handle, which is unique by construction -- that
+is what `gptel-yatools-skills--assign-handles' decides, so completion
+does not have to disambiguate anything itself."
+  (mapcar (lambda (skill)
+            (cons (gptel-yatools-skills-handle skill) skill))
+          skills))
 
 (defun gptel-yatools-skills--resolve (candidates name)
   "Return the skill NAME refers to, or nil.

@@ -613,6 +613,59 @@ the completion annotation signalled `wrong-type-argument stringp'."
 
 ;;; 6. Sending a skill by hand
 
+(ert-deftest gptel-yatools-skills-test-handles-are-unique-across-roots ()
+  "Two roots holding the same relative path must not produce one handle.
+
+`grp/review' under two roots used to give both skills the handle
+`grp/review': the index showed two identical lines, calling it answered
+\"matches 2 skills\", and the paths it then offered were the same string
+again -- so neither skill could be loaded by name at all."
+  (gptel-yatools-test--in-dir
+    (let ((root-a (gptel-yatools-test--root-file "one"))
+          (root-b (gptel-yatools-test--root-file "two")))
+      (gptel-yatools-skills-test--skill
+       root-a "grp/review" "name: review\ndescription: Review code in group one.\n")
+      (gptel-yatools-skills-test--skill
+       root-b "grp/review" "name: review\ndescription: Review code in group two.\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-skills-test--with-roots (list root-a root-b)
+            (let* ((found (gptel-yatools-skills--discover))
+                   (skills (plist-get found :skills))
+                   (handles (mapcar #'gptel-yatools-skills-handle skills)))
+              (should (= 2 (length skills)))
+              ;; Two skills, two handles.
+              (should (= 2 (length (delete-dups (copy-sequence handles)))))
+              ;; Each handle names its root, so it is one skill on its own.
+              (dolist (skill skills)
+                (should (string-match-p
+                         (regexp-quote (directory-file-name
+                                        (plist-get skill :root)))
+                         (gptel-yatools-skills-handle skill))))
+              ;; Each handle loads exactly the skill it belongs to.
+              (dolist (skill skills)
+                (let ((out (gptel-yatools-skills-test--call
+                            (gptel-yatools-skills-handle skill))))
+                  (should (string-match-p
+                           (regexp-quote
+                            (directory-file-name (plist-get skill :directory)))
+                           out))))
+              ;; The bare relative path is still ambiguous, and the reply
+              ;; offers handles that work rather than repeating itself.
+              (let ((out (gptel-yatools-skills-test--call "grp/review")))
+                (should (string-match-p "matches 2 skills" out))
+                (dolist (handle handles)
+                  (should (string-match-p (regexp-quote handle) out))))
+              ;; An absolute skill directory is accepted too, which is what
+              ;; the payload and a shell listing hand the model.
+              (dolist (skill skills)
+                (let ((out (gptel-yatools-skills-test--call
+                            (directory-file-name (plist-get skill :directory)))))
+                  (should (string-match-p
+                           (regexp-quote
+                            (directory-file-name (plist-get skill :directory)))
+                           out)))))))))))
+
 (ert-deftest gptel-yatools-skills-test-payload-matches-what-the-tool-returns ()
   "The manual payload must be what the tool would have returned."
   (gptel-yatools-test--in-dir

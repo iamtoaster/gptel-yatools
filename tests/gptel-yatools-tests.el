@@ -79,6 +79,74 @@
 
 ;;;; 21/22/23. Response size limits
 
+(ert-deftest gptel-yatools-test-escape-raw-bytes-leaves-clean-text-alone ()
+  "Ordinary text must come back untouched, ASCII or not."
+  (dolist (text '("" "abc" "a\nb\n" "héllo ✓ 日本語"))
+    (should (equal (gptel-yatools--escape-raw-bytes text) text))))
+
+(ert-deftest gptel-yatools-test-escape-raw-bytes-still-escapes-raw-bytes ()
+  "The fast path must not let an undecodable byte through."
+  (should (equal (gptel-yatools--escape-raw-bytes
+                  (string-to-multibyte (unibyte-string 97 255 98)))
+                 "a\\xffb"))
+  (should (equal (gptel-yatools--escape-raw-bytes
+                  (string-to-multibyte (unibyte-string 97 128 98)))
+                 "a\\x80b"))
+  (let ((out (gptel-yatools--escape-raw-bytes
+              (concat "héllo "
+                      (string-to-multibyte (unibyte-string 233))))))
+    ;; The text around the raw byte survives, and the result serialises.
+    (should (string-prefix-p "héllo " out))
+    (should (string-match-p "\\\\xe9" out))
+    (should (condition-case nil (progn (json-serialize out) t)
+              (error nil)))))
+
+(ert-deftest gptel-yatools-test-truncate-fast-path-matches-the-general-path ()
+  "The cheap path must return exactly what the full walk returns.
+
+`gptel-yatools--truncate-slow' is the reference implementation: every
+response used to take that path, so the fast path is only correct if
+the two agree on every shape of input."
+  (let* ((line-limit gptel-yatools--output-line-limit)
+         (char-limit gptel-yatools--output-char-limit)
+         (cases (list ""
+                       "abc\n"
+                       "héllo ✓\n"
+                       (make-string 10 ?x)
+                       (make-string char-limit ?x)
+                       (make-string (1+ char-limit) ?x)
+                       (mapconcat #'number-to-string
+                                  (number-sequence 1 line-limit) "\n")
+                       (mapconcat #'number-to-string
+                                  (number-sequence 1 (1+ line-limit)) "\n")
+                       (concat (make-string 100 ?x) "\n"
+                               (string-to-multibyte (unibyte-string 255))))))
+    (dolist (case cases)
+      (should (equal (gptel-yatools--truncate case)
+                     (gptel-yatools--truncate-slow case))))))
+
+(ert-deftest gptel-yatools-test-large-read-is-not-slow ()
+  "Reading a large file must not rewalk bytes that need no escaping.
+
+Escaping used to cost about a microsecond per character, so a 64 kB
+read spent ~55 ms before its response even existed -- a visible pause
+between tool calls, repeated for every large read.  The bound is loose
+and takes the best of five runs, so a loaded machine does not make it
+flake: the escaping alone now takes a fraction of a millisecond, while
+the old code missed the bound by a factor of two."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "big.txt" default-directory)))
+      (gptel-yatools-test--write
+       file (make-string 64000 ?x))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (let ((best most-positive-fixnum))
+            (dotimes (_ 5)
+              (let ((start (float-time)))
+                (funcall (gptel-yatools-test--tool "read_path") file)
+                (setq best (min best (- (float-time) start)))))
+            (should (< best 0.025))))))))
+
 (ert-deftest gptel-yatools-test-truncate-caps-lines ()
   "Long output must be capped and say how much was withheld."
   (let* ((text (mapconcat #'number-to-string (number-sequence 1 3000) "\n"))

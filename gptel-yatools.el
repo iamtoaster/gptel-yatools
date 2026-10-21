@@ -298,6 +298,16 @@ Only clearly-false values are false: nil, `:json-false', the number
                       ("&" "&amp;") ("\"" "&quot;")))
    s))
 
+(defconst gptel-yatools--raw-byte-regexp "[\x3FFF80-\x3FFFFF]"
+  "Regexp matching an undecodable raw byte in a multibyte string.
+
+A byte 0x80-0xFF read by `string-to-multibyte' becomes the character
+#x3FFF00+BYTE, whose charset is `eight-bit'.  Detecting them with a
+regexp costs one C-level pass over the text, where the character loop
+in `gptel-yatools--escape-raw-bytes' costs roughly a microsecond per
+character -- 60 ms for a 60 kB tool response, paid on every single
+call.")
+
 (defun gptel-yatools--escape-raw-bytes (string)
   "Return STRING with undecodable raw bytes escaped as \\xNN.
 
@@ -307,18 +317,25 @@ bit) characters: `json-serialize' signals
 \"Wrong type argument: json-value-p\" and the whole request dies.
 Raw bytes appear whenever a command prints binary or non-UTF-8
 data (`cat' of an ISO-8859-1 file, `od', a PDF, ...), so every
-tool response is passed through this before it is returned."
+tool response is passed through this before it is returned.
+
+Almost every response is ordinary text, which needs no escaping at
+all, so that case is detected first and returned as it is: the
+character loop below is only for the rare string that really does
+carry raw bytes."
   (let ((s (if (multibyte-string-p string)
                string
-             (string-to-multibyte string)))
-        (parts nil))
-    (dotimes (i (length s))
-      (let ((c (aref s i)))
-        (push (if (eq (char-charset c) 'eight-bit)
-                  (format "\\x%02x" (logand c #xFF))
-                (char-to-string c))
-              parts)))
-    (apply #'concat (nreverse parts))))
+             (string-to-multibyte string))))
+    (if (null (string-match-p gptel-yatools--raw-byte-regexp s))
+        s
+      (let (parts)
+        (dotimes (i (length s))
+          (let ((c (aref s i)))
+            (push (if (eq (char-charset c) 'eight-bit)
+                      (format "\\x%02x" (logand c #xFF))
+                    (char-to-string c))
+                  parts)))
+        (apply #'concat (nreverse parts))))))
 
 (defun gptel-yatools--binary-p (string)
   "Return non-nil if STRING looks like binary content.
@@ -379,6 +396,33 @@ escape keeps the text unambiguous for the reader."
         (substring cut 0 (match-beginning 0))
       cut)))
 
+(defun gptel-yatools--within-limits-p (string)
+  "Return non-nil if STRING needs no truncation.
+
+That is: it is within `gptel-yatools--output-char-limit' characters and
+holds at most `gptel-yatools--output-line-limit' lines.
+
+Counting the lines is itself bounded: the scan stops as soon as the
+line limit is passed, so a large response costs one C-level
+`string-search' per line up to the limit rather than a
+`split-string' over the whole text."
+  (and (<= (length string) gptel-yatools--output-char-limit)
+       (let ((limit gptel-yatools--output-line-limit)
+             (newlines 0)
+             (pos 0)
+             (more t))
+         (while (and more (<= newlines limit))
+           (let ((next (string-search "\n" string pos)))
+             (if next
+                 (setq newlines (1+ newlines)
+                       pos (1+ next))
+               (setq more nil))))
+         ;; `more' is still t when the limit was passed, which means the
+         ;; count is a lower bound and the answer is no.
+         (and (not more)
+              (<= (if (string-suffix-p "\n" string) newlines (1+ newlines))
+                  limit)))))
+
 (defun gptel-yatools--truncate (string)
   "Return STRING made safe and bounded for a tool response.
 
@@ -389,9 +433,28 @@ reader, and again after escaping, because one raw byte becomes four
 characters and would otherwise blow past the limit by up to 4x.
 
 A note is appended whenever anything was cut, so a truncated reply is
-never mistaken for the whole file."
-  (let* ((string (if (stringp string) string ""))
-         (total-chars (length string))
+never mistaken for the whole file.
+
+A response that is already within both limits and carries no raw bytes
+is returned as it is.  That is the case for nearly every tool call, and
+skipping the `split-string'/`mapconcat' round trip keeps it cheap: a
+60 kB read costs a few hundred microseconds instead of tens of
+milliseconds, which is time the user spends waiting between tool
+calls."
+  (let ((string (if (stringp string) string "")))
+    (if (gptel-yatools--within-limits-p string)
+        (let ((escaped (gptel-yatools--escape-raw-bytes string)))
+          (if (= (length escaped) (length string))
+              escaped
+            (gptel-yatools--truncate-slow string)))
+      (gptel-yatools--truncate-slow string))))
+
+(defun gptel-yatools--truncate-slow (string)
+  "Return STRING cut to the response limits, with a note saying what was cut.
+
+This is the general path behind `gptel-yatools--truncate'; it assumes
+nothing about STRING and walks all of it."
+  (let* ((total-chars (length string))
          ;; `split-string' keeps a trailing empty field when the text
          ;; ends with a newline, so that the pieces rejoin into the
          ;; original text.  That field is not a line: counting it made a

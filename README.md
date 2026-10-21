@@ -113,7 +113,10 @@ the tool's edge, so a write and the read that follows it cannot disagree.
 Every reply says where it came from.  A read of a pending copy, a diff, a
 directory listing that merges disk with VFS-only entries — each carries that
 fact to the model, and a merged listing marks the rows that are not on disk
-yet.  Conflicts — a file that changed on disk after it was read, a target
+yet.  A pending copy the disk catches up with stops being pending: it is
+reaped the next time that file is read or the pending changes are listed, so
+nothing keeps shadowing disk with a copy that says nothing new.
+Conflicts — a file that changed on disk after it was read, a target
 that has become a FIFO, a pending write to a file whose parent is now a
 regular file, a coding system the text cannot be represented in — are
 reported instead of silently resolved, and are decided by one function, so

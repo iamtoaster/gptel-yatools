@@ -137,7 +137,10 @@ _Avoid_: Write helper, put function
 **Pending change**:
 A file's VFS content when it differs from disk, in text or in encoding.
 Not every VFS entry is one: writing back what the disk already holds
-leaves nothing pending.
+leaves nothing pending, and an entry that stops differing -- disk
+caught up with it -- is reaped the next time that file is read or
+pending changes are enumerated, rather than lingering as a shadow of
+disk.
 _Avoid_: Dirty file, buffered file
 
 **Review**:

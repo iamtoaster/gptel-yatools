@@ -1413,8 +1413,65 @@ tool's edge; nil is not a way to spell \"delete\"."
           (should-not (gptel-yatools-vfs-get file))
           (should (equal (gptel-yatools-vfs--disk-content file) "alpha\n")))))))
 
+(ert-deftest gptel-yatools-test-stale-entry-does-not-shadow-disk ()
+  "An entry whose content disk now holds is not a pending change.
+
+Disk caught up with the VFS copy -- an external writer, usually.  The
+read kept serving the entry anyway and labelled the reply pending, so
+the model was told a file differed from disk when it did not."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "same.txt")))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          ;; Someone else writes the same bytes to disk.
+          (gptel-yatools-test--write file "new\n")
+          (let ((out (funcall (gptel-yatools-test--tool "read_path") file)))
+            (should (string-match-p "vfs=\"false\"" out))
+            (should (string-match-p "new" out)))
+          ;; The read that found the entry stale did not keep it.
+          (should-not (gptel-yatools-vfs-get file)))))))
+
+(ert-deftest gptel-yatools-test-stale-entry-is-reaped-when-enumerated ()
+  "Enumerating pending changes must drop the entries that no longer are.
+
+`vfs_diff' and the header line ask what is pending.  The enumeration
+already reads every file to answer, so it is also the place where an
+entry that stopped being a change is noticed and dropped, instead of
+lingering to be found by something cheaper and less careful."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "stale.txt")))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          (gptel-yatools-test--write file "new\n")
+          ;; `vfs-pending-p' asks the cheap question -- "is there an
+          ;; entry?" -- and the answer is still yes.
+          (should (gptel-yatools-vfs-pending-p file))
+          (should-not (gptel-yatools-vfs--changed-paths))
+          (should-not (gptel-yatools-vfs-get file))
+          (let ((out (funcall (gptel-yatools-test--tool "vfs_diff"))))
+            (should (string-match-p "no pending changes" out))))))))
+
+(ert-deftest gptel-yatools-test-vfs-discard-clears-stale-entries ()
+  "Discarding everything must leave no entry behind, stale or not.
+
+Discarding with no path used to go through the pending-change list, so
+an entry that had stopped being a change survived the one command whose
+whole purpose is to leave nothing behind."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "stale2.txt")))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          (gptel-yatools-test--write file "new\n")
+          (should (equal (gptel-yatools-vfs-discard-pending) (list file)))
+          (should-not (gptel-yatools-vfs-get file)))))))
+
 (ert-deftest gptel-yatools-test-vfs-discard-reports-what-it-dropped ()
-  "Discarding must name what it discarded, and say when there was nothing."
   (gptel-yatools-test--in-dir
     (let ((one (gptel-yatools-test--root-file "one.txt"))
           (two (gptel-yatools-test--root-file "two.txt")))

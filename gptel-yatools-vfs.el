@@ -286,12 +286,25 @@ turned into LF) also counts as a change."
                         (cdr-safe disk-info))))))))
 
 (defun gptel-yatools-vfs--changed-paths ()
-  "Return a list of paths whose VFS content differs from disk."
-  (let (result)
+  "Return a list of paths whose VFS content differs from disk.
+
+Entries that no longer differ are dropped on the way: disk caught up
+with the pending copy, so there is nothing left to sync.  This is the
+one place that already reads every pending file to answer, which is why
+the reaping is here and not in the callers -- and why `vfs_discard' does
+not rely on this list to find entries, only `vfs-pending-p' -- the cheap
+\"is there an entry?\" question -- still answers about them.
+
+The removal happens after the walk: `maphash' must not see its table
+change underneath it."
+  (let (result stale)
     (maphash (lambda (path _entry)
-               (when (gptel-yatools-vfs--changed-p path)
-                 (push path result)))
+               (if (gptel-yatools-vfs--changed-p path)
+                   (push path result)
+                 (push path stale)))
              (gptel-yatools-vfs--table))
+    (dolist (path stale)
+      (gptel-yatools-vfs-remove path))
     (sort result #'string-lessp)))
 
 (defun gptel-yatools-vfs--has-children-p (full)
@@ -621,6 +634,16 @@ directory, refuse to read a device) checks for that case first, and a
 caller that cannot gets a message the model can act on."
   (let* ((full (gptel-yatools-vfs--key path))
          (vfs (gptel-yatools-vfs-get full)))
+    ;; An entry whose content disk now holds is not a pending change, so
+    ;; it must not shadow what disk holds -- and since finding that out
+    ;; costs the same disk read the fallthrough below would make, the
+    ;; stale entry is dropped here too.  See
+    ;; `gptel-yatools-vfs--changed-paths' for the other place this
+    ;; happens, and `gptel-yatools-vfs-pending-p' for why the cheap
+    ;; "entry exists" question has a different answer.
+    (when (and vfs (not (gptel-yatools-vfs--changed-p full)))
+      (gptel-yatools-vfs-remove full)
+      (setq vfs nil))
     (cond
      (vfs (list :content vfs :from-vfs t))
      ((file-directory-p full)
@@ -778,10 +801,17 @@ match with that character, while nil is not a way to spell \"delete\" --
           (gptel-yatools-vfs-write path new-content overwrite coding)))))))
 
 (defun gptel-yatools-vfs-pending-p (path)
-  "Return non-nil if PATH has a pending change in this buffer's VFS.
+  "Return non-nil if PATH has a VFS entry in this buffer's VFS.
 
-Unlike `gptel-yatools-vfs-read', this answers only about the pending
-change: it never looks at disk, and never reads a file to find out."
+This answers the cheap question -- \"is there an entry?\" -- and not the
+pending-change question the name suggests: an entry whose content disk
+already holds is still an entry until a read or an enumeration notices
+and drops it (see `gptel-yatools-vfs--changed-paths').  Callers that
+need to know whether something would be synced want
+`gptel-yatools-vfs-pending-paths', which looks at disk.
+
+Unlike `gptel-yatools-vfs-read', this never looks at disk, and never
+reads a file to find out."
   (and (gptel-yatools-vfs-get (gptel-yatools-vfs--key path)) t))
 
 (defun gptel-yatools-vfs-pending-paths ()
@@ -801,13 +831,21 @@ I/O and cannot know that."
   (gptel-yatools-vfs--invalidate-header-line))
 
 (defun gptel-yatools-vfs-discard-pending (&optional path)
-  "Drop PATH's pending change, or every pending change when PATH is nil.
+  "Drop PATH's pending change, or every VFS entry when PATH is nil.
+
+With no PATH the table is emptied rather than filtered through the
+pending-change list: an entry that disk has caught up with is still an
+entry, and \"discard everything\" is the one command that must leave
+nothing behind to surprise a later reader.
 
 PATH must be absolute when given: resolution happens at the tool's edge."
   (let ((paths (if path
                    (let ((full (gptel-yatools-vfs--key path)))
                      (and (gptel-yatools-vfs-get full) (list full)))
-                 (gptel-yatools-vfs--changed-paths))))
+                 (let (all)
+                   (maphash (lambda (full _entry) (push full all))
+                            (gptel-yatools-vfs--table))
+                   (sort all #'string-lessp)))))
     (dolist (full paths) (gptel-yatools-vfs-remove full))
     paths))
 
@@ -1369,6 +1407,13 @@ review could otherwise run against a fresh, empty table and sync nothing."
   (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
          (vfs  (gptel-yatools-vfs-get full)))
+    ;; An entry that no longer differs from disk is not a pending change:
+    ;; drop it and read what disk holds, so the reply's provenance is the
+    ;; truth rather than a leftover.  `gptel-yatools-vfs-read' does the
+    ;; same for the other read tools.
+    (when (and vfs (not (gptel-yatools-vfs--changed-p full)))
+      (gptel-yatools-vfs-remove full)
+      (setq vfs nil))
     (cond
      ;; VFS-only file (shadows disk if any)
      (vfs
@@ -1699,7 +1744,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                         :comment "No pending VFS changes."))
      (t
       (gptel-yatools-ok
-       (format "Discarded pending VFS changes for %d file(s):\n%s"
+       (format "Discarded VFS entries for %d file(s):\n%s"
                (length discarded)
                (mapconcat (lambda (f)
                             (format "  %s" (gptel-yatools--display-path f)))

@@ -156,13 +156,14 @@ yourself:
 - `M-x gptel-yatools-skills-remove` — stop sending them (empty input removes
   all).
 
-While skills are attached, the header line shows `[Skills: …]` next to the VFS
-pending count; clicking it lists them.  Removing the context through gptel's
-own commands works too — the indicator reflects `gptel-context`, not a copy.
+While skills are attached, the header line shows `[Skills: N]` next to the
+VFS pending count, where `N` is how many are attached; clicking it lists
+their names.  Removing the context through gptel's own commands works too —
+the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-129 ERT tests, no network, no prompts, every one of them in a throwaway temp
+130 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

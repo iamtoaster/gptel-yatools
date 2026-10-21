@@ -1010,16 +1010,23 @@ NAMES is a list of skills, completed from everything
                    (if left (mapconcat #'identity left ", ") "none")))))))
 
 (defun gptel-yatools-skills--header-line-label ()
-  "Return the header-line label naming the skills attached to the context."
+  "Return the header-line label counting the skills attached to the context.
+
+The names used to be spelled out here, which cost more room the more
+skills were attached.  Only the count is shown now; the names are one
+click, or one `help-echo', away."
   (when-let* ((names (gptel-yatools-skills--attached-names)))
-    (propertize
-     (buttonize
-      (format "[Skills: %s]" (mapconcat #'identity names ", "))
-      (lambda (&rest _)
-        (message "Skills sent with each request: %s"
-                 (mapconcat #'identity (gptel-yatools-skills--attached-names) ", "))))
-     'mouse-face 'highlight
-     'help-echo "Skills attached to the gptel context; click to list them")))
+    (let ((count (length names)))
+      (propertize
+       (buttonize
+        (format "[Skills: %d]" count)
+        (lambda (&rest _)
+          (message "Skills sent with each request: %s"
+                   (mapconcat #'identity (gptel-yatools-skills--attached-names)
+                              ", "))))
+       'mouse-face 'highlight
+       'help-echo (format "%d skill%s attached to the gptel context; click to list them"
+                          count (if (= count 1) "" "s"))))))
 
 (unless (memq #'gptel-yatools-skills--header-line-label
               gptel-yatools-header-line-extra-functions)

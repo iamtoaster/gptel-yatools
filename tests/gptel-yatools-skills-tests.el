@@ -535,14 +535,42 @@ library stays loaded."
                        (text (with-current-buffer buffer (buffer-string))))
                   (should (buffer-live-p buffer))
                   (should (string-match-p "Follow the sent procedure." text))
-                  ;; The indicator follows gptel's own state.
+                  ;; The indicator follows gptel's own state, and shows the
+                  ;; count rather than the names, which can be long.
                   (should (equal (gptel-yatools-skills--attached-names)
                                  '("sent")))
-                  (should (string-match-p "\\[Skills: sent\\]"
-                                          (gptel-yatools-skills--header-line-label))))
+                  (let ((label (gptel-yatools-skills--header-line-label)))
+                    (should (equal label "[Skills: 1]"))
+                    ;; The names are still reachable through the tooltip.
+                    (should (string-match-p "1 skill attached"
+                                            (get-text-property 0 'help-echo
+                                                               label)))))
                 ;; Adding it again replaces the copy instead of doubling it.
                 (should (gptel-yatools-skills-test--add "sent"))
                 (should (= 1 (length gptel-context))))
+            (dolist (entry gptel-context)
+              (when (buffer-live-p (car entry)) (kill-buffer (car entry))))))))))
+
+(ert-deftest gptel-yatools-skills-test-header-line-counts-skills ()
+  "The header-line label must show how many skills are attached, not their names."
+  (gptel-yatools-test--in-dir
+    (let ((root (expand-file-name "skills" default-directory)))
+      (gptel-yatools-skills-test--skill root "first")
+      (gptel-yatools-skills-test--skill root "second")
+      (gptel-yatools-skills-test--indexed root
+        (let ((gptel-context nil))
+          (unwind-protect
+              (progn
+                (gptel-yatools-test--silencing-message
+                  (gptel-yatools-skills--add-names (list "first" "second")))
+                (let ((label (gptel-yatools-skills--header-line-label)))
+                  (should (equal label "[Skills: 2]"))
+                  ;; Neither name survives in the label itself.
+                  (should-not (string-match-p "first" label))
+                  (should-not (string-match-p "second" label))
+                  (should (string-match-p "2 skills attached"
+                                          (get-text-property 0 'help-echo
+                                                             label)))))
             (dolist (entry gptel-context)
               (when (buffer-live-p (car entry)) (kill-buffer (car entry))))))))))
 

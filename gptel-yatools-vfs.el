@@ -1118,7 +1118,7 @@ guard and the response boundary; `gptel-yatools.el' appends this list to
            :comment "Directory listing synthesized from the virtual filesystem; no such directory exists on disk yet."))
          (t (error "Path does not exist: %s"
                    (gptel-yatools--display-path full))))))
-    :description "Read a path relative to the workspace root. If PATH is a directory, return a listing (merged with VFS entries). If PATH is a file, return its contents. Pending VFS changes take precedence over disk contents; the response is wrapped in XML indicating provenance."
+    :description "Read a path relative to the workspace root. If PATH is a directory, return a listing (merged with VFS entries). If PATH is a file, return its contents. Pending VFS changes take precedence over disk contents; the reply says whether it describes pending changes or disk."
     :args (list '(:name "path"
                         :type string
                         :description "Path to read, relative to the workspace root or absolute."))
@@ -1167,7 +1167,7 @@ guard and the response boundary; `gptel-yatools.el' appends this list to
                      (format "(no text in %s after line %d.)"
                              (gptel-yatools--display-path full) offset)))
                    :vfs (plist-get read :from-vfs)))))))))
-    :description "Read LINES lines from a file starting at 1-based line OFFSET. Returns the raw text of those lines. Pending VFS changes shadow disk content. The result is wrapped in XML indicating provenance. Binary files (containing NUL bytes) are reported, not returned."
+    :description "Read LINES lines from a file starting at 1-based line OFFSET. Returns the raw text of those lines. Pending VFS changes shadow disk content; the reply says which it came from. Binary files (containing NUL bytes) are reported, not returned."
     :args (list '(:name "path"
                         :type string
                         :description "File path to read.")
@@ -1224,7 +1224,7 @@ guard and the response boundary; `gptel-yatools.el' appends this list to
                          (gptel-yatools--display-path full)
                          regex))
                :vfs (plist-get read :from-vfs))))))))
-    :description "Return lines from a file that match an Emacs regexp. Each match is prefixed with its 1-based line number. Pending VFS changes shadow disk content. The result is wrapped in XML indicating provenance. Binary files (containing NUL bytes) are reported, not searched."
+    :description "Return lines from a file that match an Emacs regexp. Each match is prefixed with its 1-based line number. Pending VFS changes shadow disk content; the reply says which it came from. Binary files (containing NUL bytes) are reported, not searched."
     :args (list '(:name "path"
                         :type string
                         :description "File path to search.")

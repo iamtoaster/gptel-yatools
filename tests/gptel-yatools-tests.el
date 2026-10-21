@@ -859,6 +859,18 @@ is a signal the boundary has to render like any other failure."
                  (lambda () (sleep-for 5)) nil 1)
                 :type 'gptel-yatools-timeout-error))
 
+(ert-deftest gptel-yatools-test-an-error-is-not-prefixed-twice ()
+  "A tool that writes \"Error: ...\" must not reach the model as \"Error: Error: ...\"."
+  (let ((out (gptel-yatools--call-tool
+              "probe" (lambda (&rest _) (error "Error: nothing was written")) nil)))
+    (should (string-match-p "Error: nothing was written" out))
+    (should-not (string-match-p "Error: Error:" out))
+    (gptel-yatools-test--should-be-enveloped out))
+  ;; A condition that does not phrase itself as an error still gets the word.
+  (let ((out (gptel-yatools--call-tool
+              "probe" (lambda (&rest _) (error "Wrong type argument: listp, 5")) nil)))
+    (should (string-match-p "Error: Wrong type argument: listp, 5" out))))
+
 (ert-deftest gptel-yatools-test-asynchronous-tools-are-refused ()
   "An asynchronous tool cannot cross the boundary, so building one must fail."
   (gptel-yatools-test--noninteractive

@@ -592,14 +592,25 @@ the request serialisable."
      (format "Error: internal error: the tool returned %S where a result was expected. This is a bug in gptel-yatools; nothing was changed."
              result))))
 
+(defun gptel-yatools--error-text (err)
+  "Return ERR's message without a redundant leading \"Error:\".
+
+Tool functions write \"Error: ...\" because that is the text the model
+reads; the boundary prefixes the same word, so stripping it here keeps a
+failure from arriving as \"Error: Error: ...\"."
+  (let ((text (error-message-string err)))
+    (if (string-match "\\`Error: +\\(.+\\)\\'" text)
+        (match-string 1 text)
+      text)))
+
 (defun gptel-yatools--call-tool (name function args)
   "Call FUNCTION with positional ARGS and render the outcome for the model.
 
-NAME labels the tool in the envelope.  This is the tool boundary: a
-signalled error, an expired deadline and a tool that returned the wrong
-shape all become the same envelope here, sized, truncated and escaped,
-so the model never receives bare text and never receives text that
-cannot be serialised back to JSON.
+NAME labels the tool in the body when it runs out of time.  This is the
+tool boundary: a signalled error, an expired deadline and a tool that
+returned the wrong shape all become the same envelope here, sized,
+truncated and escaped, so the model never receives bare text and never
+receives text that cannot be serialised back to JSON.
 
 `quit' passes through untouched, and so does anything the user asked to
 debug: `condition-case-unless-debug' leaves the signal alone while
@@ -610,11 +621,11 @@ debug: `condition-case-unless-debug' leaves the signal alone while
      (gptel-yatools--envelope
       nil "Tool call timed out."
       (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
-                                      (plist-get (cdr err) :tool))))
+                                      (or (plist-get (cdr err) :tool) name))))
     (error
      (gptel-yatools--envelope
-      nil (format "The %s tool reported an error." name)
-      (format "Error: %s" (error-message-string err))))))
+      nil "The tool reported an error."
+      (format "Error: %s" (gptel-yatools--error-text err))))))
 
 (defun gptel-yatools--page-text (text offset lines)
   "Return a page of TEXT, described by a plist.

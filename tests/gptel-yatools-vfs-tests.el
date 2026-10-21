@@ -1354,6 +1354,27 @@ a budget, not a benchmark: it fails only if the old slow path returns."
             (should (< (- (float-time) start) 0.5))
             (should (string-match-p "REPLACED HERE" (gptel-yatools-vfs-get file)))))))))
 
+(ert-deftest gptel-yatools-test-vfs-edit-match-case-fold-search ()
+  "An edit must match the exact text the model was shown.
+
+The search ran under the ambient `case-fold-search', which is t by
+default, so `old_string' \"hello\" matched a file's \"Hello\" and the
+tool's promise of an exact match was false."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "case.txt")))
+      (gptel-yatools-test--write file "Hello world\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; The model asked for lowercase; the file has none, so nothing
+          ;; may change.
+          (should-error (gptel-yatools-vfs-edit file "hello" "bye") :type 'error)
+          (should-not (gptel-yatools-vfs-get file))
+          (should (equal (gptel-yatools-vfs--disk-content file)
+                         "Hello world\n"))
+          ;; The exact text still edits.
+          (gptel-yatools-vfs-edit file "Hello" "bye")
+          (should (equal (gptel-yatools-vfs-get file) "bye world\n")))))))
+
 (ert-deftest gptel-yatools-test-vfs-discard-reports-what-it-dropped ()
   "Discarding must name what it discarded, and say when there was nothing."
   (gptel-yatools-test--in-dir

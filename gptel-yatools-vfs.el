@@ -708,26 +708,32 @@ unambiguous.  The search runs over the decoded text the caller already
 has, so it sees the same characters the model saw -- where an external
 grep would only ever see bytes -- and it runs in a temp buffer, so
 `search-forward' does the scanning at C speed instead of walking the
-string in Lisp."
+string in Lisp.
+
+The match is literal: `case-fold-search' is bound to nil, so `old_string'
+either occurs in CONTENT as written or it does not.  Left ambient it
+defaults to t, and an edit for \"hello\" would silently land on \"Hello\"
+-- the opposite of the exact match this function promises."
   (with-temp-buffer
-    (insert content)
-    (goto-char (point-min))
-    (let ((count 0)
-          (first nil))
-      (while (search-forward old nil t)
-        (setq count (1+ count))
-        (unless first (setq first (match-beginning 0))))
-      (cond
-       ((zerop count)
-        (error "Error: the text to replace was not found. Read the file again and copy the exact text, including whitespace and indentation."))
-       ((> count 1)
-        (error "Error: the text to replace occurs %d times. It must be unique; include more surrounding context in old_string."
-               count))
-       (t
-        (goto-char first)
-        (delete-region first (+ first (length old)))
-        (insert new)
-        (buffer-substring-no-properties (point-min) (point-max)))))))
+    (let ((case-fold-search nil))
+      (insert content)
+      (goto-char (point-min))
+      (let ((count 0)
+            (first nil))
+        (while (search-forward old nil t)
+          (setq count (1+ count))
+          (unless first (setq first (match-beginning 0))))
+        (cond
+         ((zerop count)
+          (error "Error: the text to replace was not found. Read the file again and copy the exact text, including whitespace and indentation."))
+         ((> count 1)
+          (error "Error: the text to replace occurs %d times. It must be unique; include more surrounding context in old_string."
+                 count))
+         (t
+          (goto-char first)
+          (delete-region first (+ first (length old)))
+          (insert new)
+          (buffer-substring-no-properties (point-min) (point-max))))))))
 
 (defun gptel-yatools-vfs-edit (path old new &optional overwrite coding)
   "Replace the one occurrence of OLD with NEW in PATH, and return what changed.

@@ -402,7 +402,11 @@ the tools return."
      (t (gptel-yatools-vfs--validate-insertable ancestor)))))
 
 ;;-------------------------------------------------------------------------
-;; Header-line indicator for pending VFS changes
+;; The VFS label for the header line
+;;
+;; The drawing lives in `gptel-yatools.el', with the rest of the gptel
+;; adaptation.  This module contributes one label and caches the number it
+;; shows, because recomputing it reads every pending file from disk.
 ;;-------------------------------------------------------------------------
 (defconst gptel-yatools-vfs--header-line-cache-seconds 1.0
   "How long the header-line pending list may be reused before recomputing.")
@@ -441,80 +445,12 @@ happens through the `vfs_diff' and `file_sync' tools."
        'help-echo (format "Pending VFS changes: %s"
                           (mapconcat #'gptel-yatools--display-path paths ", "))))))
 
-(defun gptel-yatools-vfs--header-line-extras ()
-  "Return the labels other tool modules want in the header line.
-
-Each function in `gptel-yatools-header-line-extra-functions' is called
-with no arguments; nil results are dropped and the rest are joined with
-a single space.  A failing function is ignored rather than breaking
-redisplay, which is what a header line that signals would do."
-  (let (labels)
-    (dolist (function gptel-yatools-header-line-extra-functions)
-      (let ((label (ignore-errors (funcall function))))
-        (when (and (stringp label) (not (string-empty-p label)))
-          (push label labels))))
-    (when labels (mapconcat #'identity (nreverse labels) " "))))
-
-(defvar gptel-yatools-vfs--header-line-segment
-  '(:eval (gptel-yatools-vfs--header-line-with-vfs))
-  "Header-line segment: gptel's right-hand indicators plus our labels.")
-
-(defun gptel-yatools-vfs--header-line-rhs ()
-  "Return gptel's right-hand indicator group, without its alignment pad."
-  (let ((info (ignore-errors (eval (cadr gptel--header-line-info)))))
-    (when (stringp info)
-      (if (> (length info) 0) (substring info 1) info))))
-
-(defun gptel-yatools-vfs--header-line-with-vfs ()
-  "Render gptel's indicator group, prefixed by the VFS pending label.
-
-gptel's own group starts with a `:align-to' space whose target is
-computed from the group's text alone, so the label can be neither
-glued in front of that space (it would be stranded on the left) nor
-placed behind it (it would be drawn past the right edge, invisible).
-Rendering both as one right-aligned string keeps the label with the
-other indicators and keeps the alignment arithmetic honest.
-
-The offset must be parenthesised: `incorrect (space :align-to (- right N))'
-is silently ignored and the whole group collapses to the left, next
-to the backend name.  gptel's own template writes `(,(width))' for
-this reason, so do the same."
-  (let* ((rhs   (or (gptel-yatools-vfs--header-line-rhs) ""))
-         (labels (delq nil (list (gptel-yatools-vfs--header-line-label)
-                                 (gptel-yatools-vfs--header-line-extras))))
-         (label (and labels (mapconcat #'identity labels " ")))
-         (text  (if label (concat label " " rhs) rhs))
-         (align (if (and (fboundp 'string-pixel-width)
-                         (display-graphic-p))
-                    `(space :align-to
-                            (- right (,(string-pixel-width text))))
-                  `(space :align-to
-                          (- right (,(+ 5 (string-width text))))))))
-    (concat (propertize " " 'display align) text)))
-
-(defun gptel-yatools-vfs--extend-header-line (&rest _)
-  "Put the VFS count in gptel's right-hand indicator group.
-
-`gptel-use-header-line' builds `header-line-format' as
-\(BACKEND STATUS INFO), and INFO right-aligns itself.  Appending a
-segment after INFO drew it past the right edge, outside the window;
-inserting one before INFO left it stranded next to the status text.
-Instead the INFO element itself is replaced by
-`gptel-yatools-vfs--header-line-segment', which renders the VFS label
-together with gptel's indicators as a single aligned group.
-
-Element 1 is the status indicator, which gptel rewrites in place
-with `(setf (nth 1 header-line-format) ...)'; element 2 is ours."
-  (when (and gptel-use-header-line (consp header-line-format))
-    (let ((fmt (cl-remove-if (lambda (elt)
-                               (equal elt gptel-yatools-vfs--header-line-segment))
-                             header-line-format)))
-      (when (>= (length fmt) 3)
-        (setf (nth 2 fmt) gptel-yatools-vfs--header-line-segment))
-      (setq header-line-format fmt)))
-  (force-mode-line-update))
-
-(advice-add 'gptel-use-header-line :after #'gptel-yatools-vfs--extend-header-line)
+;; Registered like any other module's label: the drawer in
+;; `gptel-yatools.el' asks the registry, so the VFS is not a special case.
+(unless (memq #'gptel-yatools-vfs--header-line-label
+              gptel-yatools-header-line-extra-functions)
+  (add-to-list 'gptel-yatools-header-line-extra-functions
+               #'gptel-yatools-vfs--header-line-label t))
 
 ;;-------------------------------------------------------------------------
 ;; Unified diff via external `diff'

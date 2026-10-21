@@ -96,9 +96,12 @@ duplicates its tools nor moves them to the end of the list.")
 
 Each is called with no arguments while the header line is being rendered
 and should return a propertized string, or nil to contribute nothing.
-This is how a tool module reports its own state next to the VFS pending
-count without the module that draws the header line having to know about
-it.
+This is how a tool module reports its own state without the module that
+draws the header line having to know about it: the drawer iterates this
+list and renders what it finds, so no module is a special case.
+
+Modules append rather than prepend, so the labels appear in the order
+their modules load -- the VFS count before the attached-skill count.
 
 The functions are called on every redisplay, so they must be cheap: the
 VFS count, for example, is what the header-line cache exists for.")

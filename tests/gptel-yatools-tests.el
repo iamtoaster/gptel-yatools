@@ -901,6 +901,57 @@ the status slot that gptel rewrites in place."
         (should (equal (nth 1 header-line-format)
                        " Executing command..."))))))
 
+;;;; 44b. One place draws the header line, and modules only contribute labels
+
+(ert-deftest gptel-yatools-test-header-line-draws-from-the-registry ()
+  "The drawer must render whatever the registry holds, and nothing else.
+
+Label-drawing belongs with the rest of the gptel adaptation, not in a
+tool module: it reads gptel's own `:align-to' layout.  Modules take part
+by adding a function to
+`gptel-yatools-header-line-extra-functions', which is exactly what the
+VFS and the skills module now do -- neither is a special case."
+  (let ((gptel-yatools-header-line-extra-functions
+         (list (lambda () "[one]")
+               (lambda () nil)                  ; contributes nothing
+               (lambda () (error "broken"))      ; must not break redisplay
+               (lambda () "[two]"))))
+    (cl-letf (((symbol-function 'gptel-yatools--header-line-rhs)
+               (lambda () "info")))
+      (let ((rendered (gptel-yatools--header-line-rendered)))
+        (should (string-match-p "\\[one\\] \\[two\\] info" rendered))
+        ;; The alignment offset is parenthesised, or the group collapses.
+        (should (string-match-p "(- right" (format "%S" (get-text-property
+                                                        0 'display rendered))))))))
+
+(ert-deftest gptel-yatools-test-vfs-contributes-a-label-not-a-drawer ()
+  "The VFS must join the registry, and no longer draw the header line."
+  (should (memq #'gptel-yatools-vfs--header-line-label
+                gptel-yatools-header-line-extra-functions))
+  (should (fboundp 'gptel-yatools--header-line-rendered))
+  ;; The drawing functions are the glue file's, not the filesystem module's.
+  (dolist (name '(gptel-yatools--header-line-rendered
+                  gptel-yatools--extend-header-line))
+    (should (equal (file-name-nondirectory
+                    (or (symbol-file name 'defun) ""))
+                   "gptel-yatools.el")))
+  (dolist (gone '(gptel-yatools-vfs--header-line-with-vfs
+                  gptel-yatools-vfs--header-line-rhs
+                  gptel-yatools-vfs--extend-header-line))
+    (should-not (fboundp gone)))
+  ;; And the advice is installed, by the glue file, exactly once.
+  (should (advice-member-p #'gptel-yatools--extend-header-line
+                           'gptel-use-header-line))
+  (with-temp-buffer
+    (gptel-yatools-test--chat-with-header-line)
+    (let ((gptel-use-header-line t))
+      (gptel-yatools--extend-header-line)
+      (gptel-yatools--extend-header-line)
+      (should (= 1 (cl-count gptel-yatools--header-line-segment
+                             header-line-format :test #'equal)))
+      (should (equal (nth 2 header-line-format)
+                     gptel-yatools--header-line-segment)))))
+
 
 ;;;; Tool boundary: one response shape, one place that renders it
 

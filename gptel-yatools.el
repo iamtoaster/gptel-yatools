@@ -156,6 +156,97 @@ more."
               #'gptel-yatools--forget-inspection-vfs))
 
 ;;-------------------------------------------------------------------------
+;; Drawing the header line
+;;
+;; gptel builds `header-line-format' as (BACKEND STATUS INFO), and INFO
+;; right-aligns itself with a `:align-to' space.  Labels from this package
+;; have to join that group rather than sit beside it: appended after INFO
+;; they are drawn past the right edge, inserted before it they are stranded
+;; next to the backend name.  So the INFO element is replaced wholesale by a
+;; segment that renders every label and gptel's own indicators as one
+;; right-aligned string.
+;;
+;; This lives here, with the other gptel adaptation, and not in a tool
+;; module: it touches gptel private state (`gptel--header-line-info') and
+;; nothing about the filesystem.  Modules contribute labels through
+;; `gptel-yatools-header-line-extra-functions' and never draw.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools--header-line-extras ()
+  "Return the labels the tool modules want in the header line.
+
+Each function in `gptel-yatools-header-line-extra-functions' is called
+with no arguments; nil results are dropped and the rest are joined with
+a single space.  A failing function is ignored rather than breaking
+redisplay, which is what a header line that signals would do."
+  (let (labels)
+    (dolist (function gptel-yatools-header-line-extra-functions)
+      (let ((label (ignore-errors (funcall function))))
+        (when (and (stringp label) (not (string-empty-p label)))
+          (push label labels))))
+    (when labels (mapconcat #'identity (nreverse labels) " "))))
+
+(defvar gptel-yatools--header-line-segment
+  '(:eval (gptel-yatools--header-line-rendered))
+  "Header-line segment: gptel's right-hand indicators plus our labels.")
+
+(defun gptel-yatools--header-line-rhs ()
+  "Return gptel's right-hand indicator group, without its alignment pad."
+  (let ((info (ignore-errors (eval (cadr gptel--header-line-info)))))
+    (when (stringp info)
+      (if (> (length info) 0) (substring info 1) info))))
+
+(defun gptel-yatools--header-line-rendered ()
+  "Render gptel's indicator group, prefixed by this package's labels.
+
+The offset must be parenthesised: `incorrect (space :align-to (- right N))'
+is silently ignored and the whole group collapses to the left, next
+to the backend name.  gptel's own template writes `(,(width))' for
+this reason, so do the same."
+  (let* ((rhs   (or (gptel-yatools--header-line-rhs) ""))
+         (label (gptel-yatools--header-line-extras))
+         (text  (if label (concat label " " rhs) rhs))
+         (align (if (and (fboundp 'string-pixel-width)
+                         (display-graphic-p))
+                    `(space :align-to
+                            (- right (,(string-pixel-width text))))
+                  `(space :align-to
+                          (- right (,(+ 5 (string-width text))))))))
+    (concat (propertize " " 'display align) text)))
+
+(defun gptel-yatools--extend-header-line (&rest _)
+  "Put this package's labels in gptel's right-hand indicator group.
+
+`gptel-use-header-line' builds `header-line-format' as
+\(BACKEND STATUS INFO).  The INFO element is replaced by
+`gptel-yatools--header-line-segment', which renders the labels together
+with gptel's indicators as a single aligned group.
+
+Element 1 is the status indicator, which gptel rewrites in place with
+`(setf (nth 1 header-line-format) ...)'.  Element 2 is the one replaced
+here.
+
+Replacing in place, rather than dropping the segment and appending it,
+is what makes a second run harmless: removing it first shortens the list
+below the length the replacement is guarded on, so the segment would be
+dropped for good.  gptel rebuilds the list on every request, but this
+also has to survive being run twice."
+  (when (and gptel-use-header-line (consp header-line-format))
+    (let* ((fmt (copy-sequence header-line-format))
+           (existing (cl-position gptel-yatools--header-line-segment fmt
+                                  :test #'equal)))
+      (cond
+       (existing
+        (setf (nth existing fmt) gptel-yatools--header-line-segment))
+       ((>= (length fmt) 3)
+        (setf (nth 2 fmt) gptel-yatools--header-line-segment))
+       (t
+        (setq fmt (append fmt (list gptel-yatools--header-line-segment)))))
+      (setq header-line-format fmt)))
+  (force-mode-line-update))
+
+(advice-add 'gptel-use-header-line :after #'gptel-yatools--extend-header-line)
+
+;;-------------------------------------------------------------------------
 ;; The tools
 ;;
 ;; Each module defines its own tools with `gptel-yatools-define-tool', which

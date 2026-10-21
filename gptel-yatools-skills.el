@@ -1111,7 +1111,7 @@ click, or one `help-echo', away."
 (unless (memq #'gptel-yatools-skills--header-line-label
               gptel-yatools-header-line-extra-functions)
   (add-to-list 'gptel-yatools-header-line-extra-functions
-               #'gptel-yatools-skills--header-line-label))
+               #'gptel-yatools-skills--header-line-label t))
 
 ;;-------------------------------------------------------------------------
 ;; Interactive browsing

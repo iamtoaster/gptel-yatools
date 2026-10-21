@@ -325,13 +325,13 @@ them as characters and make sync expand each LF into another CRLF."
             (should (string-match-p "NOT SYNCED"
                                     (gptel-yatools-vfs--format-one-diff file)))))))))
 
-(ert-deftest gptel-yatools-test-blocker-reasons ()
-  "`gptel-yatools-vfs--sync-blocker' must explain itself or return nil."
+(ert-deftest gptel-yatools-test-refusal-reasons ()
+  "`gptel-yatools-vfs--refusal' must explain itself, or return nil."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "blk.txt")))
       (gptel-yatools-test--write file "orig\n")
       (gptel-yatools-test--with-open-buffer file
-        ;; Dirty the visiting buffer itself: that is what the blocker
+        ;; Dirty the visiting buffer itself: that is what the refusal
         ;; detects.  Doing this inside `with-temp-buffer' below would
         ;; modify the scratch buffer instead and leave the file clean.
         (goto-char (point-max))
@@ -339,8 +339,89 @@ them as characters and make sync expand each LF into another CRLF."
         (with-temp-buffer
           (gptel-yatools-test--vfs
             (gptel-yatools-vfs-put file "vfs\n")
-            (should (string-match-p "unsaved changes"
-                                    (gptel-yatools-vfs--sync-blocker file)))))))))
+            (let ((refusal (gptel-yatools-vfs--refusal file)))
+              (should (eq (plist-get refusal :kind) :blocked))
+              (should (string-match-p "unsaved changes"
+                                      (plist-get refusal :reason))))))))))
+
+(ert-deftest gptel-yatools-test-refusal-names-every-reason ()
+  "Each way a pending file can be unwritable has its own reason.
+
+Two predicates used to answer this question -- one for the review, a
+weaker one -- so a file could be shown as syncable and then refused by
+the write.  There is one answer now, and it must cover the cases the
+write used to catch on its own."
+  (gptel-yatools-test--in-dir
+    (let ((conflicted (gptel-yatools-test--root-file "c.txt"))
+          (fifo (gptel-yatools-test--root-file "f.fifo"))
+          (behind-file (gptel-yatools-test--root-file "afile/child.txt"))
+          (clean (gptel-yatools-test--root-file "ok.txt")))
+      (gptel-yatools-test--write conflicted "base\n")
+      (gptel-yatools-test--write clean "base\n")
+      (gptel-yatools-test--write (gptel-yatools-test--root-file "afile") "x\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; A conflict: disk moved on after the baseline was captured.
+          (gptel-yatools-vfs-put conflicted "vfs\n")
+          (gptel-yatools-test--write conflicted "external\n")
+          (should (eq (plist-get (gptel-yatools-vfs--refusal conflicted) :kind)
+                      :conflict))
+          ;; A target replaced by a FIFO: writing it can block forever.
+          (gptel-yatools-vfs-put fifo "vfs\n")
+          (delete-file fifo)
+          (call-process "mkfifo" nil nil nil fifo)
+          (should (eq (plist-get (gptel-yatools-vfs--refusal fifo) :kind) :blocked))
+          (should (string-match-p
+                   "no longer a regular file"
+                   (plist-get (gptel-yatools-vfs--refusal fifo) :reason)))
+          ;; An ancestor that is a file: the write cannot land at all.
+          (gptel-yatools-vfs-put behind-file "vfs\n")
+          (should (string-match-p
+                   "ancestor"
+                   (plist-get (gptel-yatools-vfs--refusal behind-file) :reason)))
+          ;; A plain pending change has nothing to refuse.
+          (gptel-yatools-vfs-put clean "vfs\n")
+          (should-not (gptel-yatools-vfs--refusal clean)))))))
+
+(ert-deftest gptel-yatools-test-partition-and-write-agree ()
+  "What the review shows as syncable is what the write accepts.
+
+The two used to be decided by different predicates, so a file could pass
+the review and then fail the write -- the user approving a change set
+that was not the one applied."
+  (gptel-yatools-test--in-dir
+    (let ((conflicted (gptel-yatools-test--root-file "c.txt"))
+          (fifo (gptel-yatools-test--root-file "f.fifo"))
+          (blocked-file (gptel-yatools-test--root-file "afile/child.txt"))
+          (clean (gptel-yatools-test--root-file "ok.txt")))
+      (gptel-yatools-test--write conflicted "base\n")
+      (gptel-yatools-test--write clean "base\n")
+      (gptel-yatools-test--write (gptel-yatools-test--root-file "afile") "x\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (dolist (file (list conflicted fifo blocked-file clean))
+            (gptel-yatools-vfs-put file "vfs\n"))
+          (gptel-yatools-test--write conflicted "external\n")
+          (delete-file fifo)
+          (call-process "mkfifo" nil nil nil fifo)
+          (let ((partition (gptel-yatools-vfs--sync-partition
+                            (gptel-yatools-vfs-pending-paths))))
+            (should (equal (plist-get partition :syncable) (list clean)))
+            (should (equal (plist-get partition :conflicts) (list conflicted)))
+            (should (equal (sort (mapcar #'car (plist-get partition :blocked))
+                                 #'string-lessp)
+                           (sort (list fifo blocked-file) #'string-lessp)))
+            ;; The diff and the review both say the same thing about the
+            ;; files that will not land.
+            (dolist (file (plist-get partition :conflicts))
+              (should (string-match-p "CONFLICT"
+                                      (gptel-yatools-vfs--format-one-diff file))))
+            (dolist (file (mapcar #'car (plist-get partition :blocked)))
+              (should (string-match-p "NOT SYNCED"
+                                      (gptel-yatools-vfs--format-one-diff file))))
+            (should-not (string-match-p
+                         "NOT SYNCED"
+                         (gptel-yatools-vfs--format-one-diff clean)))))))))
 
 
 ;;;; 15. Sync reverted the visiting buffer and destroyed unsaved edits
@@ -389,7 +470,7 @@ them as characters and make sync expand each LF into another CRLF."
         (gptel-yatools-test--write file "external\n")
         (let ((result (gptel-yatools-vfs--sync-one file)))
           (should (eq (car result) :failed))
-          (should (string-match-p "conflict" (cadr result)))
+          (should (string-match-p "changed on disk" (cadr result)))
           (should (equal (gptel-yatools-vfs--disk-content file) "external\n")))))))
 
 (ert-deftest gptel-yatools-test-sync-skips-blocked-but-syncs-the-rest ()

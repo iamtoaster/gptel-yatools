@@ -636,9 +636,9 @@ with overwrite=true to force the VFS version.\n\n\
               label
               ;; Say up front when file_sync will refuse this file, so
               ;; vfs_diff and the sync review buffer never disagree.
-              (let ((why (gptel-yatools-vfs--sync-blocker path)))
-                (if why
-                    (format "NOT SYNCED: %s\n" why)
+              (let ((refusal (gptel-yatools-vfs--refusal path)))
+                (if refusal
+                    (format "NOT SYNCED: %s\n" (plist-get refusal :reason))
                   ""))
               (gptel-yatools-vfs--coding-change-note path)
               (gptel-yatools-vfs--unified-diff (or disk "") (or vfs "") label))))))
@@ -947,25 +947,71 @@ alist of (PATH . REASON)."
       (goto-char (point-min)))
     diff-buf))
 
-(defun gptel-yatools-vfs--sync-blocker (full)
-  "Return a short human-readable reason why FULL cannot be synced, or nil.
+(defun gptel-yatools-vfs--refusal (full)
+  "Return nil if FULL can be synced now, or say why it cannot.
 
-This is checked BEFORE the review buffer is shown and again before
-each write, so the preview and the write can never disagree about
-which files will land.
+The value is a plist of :kind and :reason.  :kind is `:conflict' when
+disk has moved on since the VFS captured its baseline -- the case where
+syncing would destroy somebody else's work -- and `:blocked' for every
+other refusal.
 
-The visiting buffer is the important case: reverting it would throw
-the user's unsaved edits away."
-  (let ((existing (get-file-buffer full)))
+This is the single answer to \"can this file be written right now?\".
+It is asked by the partition that decides what the user is shown, by the
+diff header that says so file by file, and again by the write itself
+immediately before it writes.  Asking one function is what keeps the
+review honest: the set of files the user approves is the set that will
+be applied, because there is no second opinion to disagree with.  The
+write still re-asks, because the review sits in `recursive-edit' for as
+long as the user likes and a file can become a FIFO while they read.
+
+The order is the order in which the reasons matter: a conflict is
+reported as a conflict even when the file would also fail an encoding
+test, and a target that is no longer a regular file is caught before
+`write-region' blocks on it forever."
+  (let ((entry-coding (gptel-yatools-vfs--entry-coding full))
+        (content (or (gptel-yatools-vfs-get full) ""))
+        (existing (get-file-buffer full)))
     (cond
+     ((gptel-yatools-vfs--conflict-p full)
+      (list :kind :conflict
+            :reason "changed on disk since the VFS captured it"))
+     ((let ((ancestor (gptel-yatools-vfs--file-ancestor full)))
+        (and ancestor
+             (list :kind :blocked
+                   :reason (format "ancestor %s is a file, not a directory"
+                                   (gptel-yatools--display-path ancestor))))))
+     ((and (file-exists-p full) (not (file-regular-p full)))
+      (list :kind :blocked
+            :reason "target is no longer a regular file (device, FIFO or socket)"))
      ((and existing (buffer-modified-p existing))
-      (format "buffer %s has unsaved changes" (buffer-name existing)))
-     ((let ((coding (gptel-yatools-vfs--resolve-coding
-                     (gptel-yatools-vfs--entry-coding full))))
-        (not (gptel-yatools-vfs--encodable-p (or (gptel-yatools-vfs-get full) "") coding)))
-      (format "content cannot be represented in %s"
-              (gptel-yatools-vfs--resolve-coding (gptel-yatools-vfs--entry-coding full))))
+      (list :kind :blocked
+            :reason (format "buffer %s has unsaved changes"
+                            (buffer-name existing))))
+     ((let ((coding (gptel-yatools-vfs--resolve-coding entry-coding)))
+        (not (gptel-yatools-vfs--encodable-p content coding)))
+      (list :kind :blocked
+            :reason (format "content cannot be represented in %s"
+                            (gptel-yatools-vfs--resolve-coding entry-coding))))
      (t nil))))
+
+(defun gptel-yatools-vfs--file-ancestor (full)
+  "Return FULL's nearest ancestor that is a file, or nil.
+
+An ancestor that is a file -- on disk or as a VFS entry -- makes the
+target unwritable without deleting it first.  Checked here so that the
+review never offers a file whose write is certain to fail."
+  (let ((ancestor (directory-file-name (file-name-directory full)))
+        (found nil))
+    (while (and (not found)
+                ancestor
+                (not (equal ancestor ""))
+                (not (equal ancestor "/"))
+                (not (equal ancestor full)))
+      (when (or (gptel-yatools-vfs-get ancestor)
+                (file-regular-p ancestor))
+        (setq found ancestor))
+      (setq ancestor (directory-file-name (file-name-directory ancestor))))
+    found))
 
 (defun gptel-yatools-vfs--confirm-sync (paths &optional skipped)
   "Show a diff of PATHS (VFS vs disk) and ask the user to accept or reject.
@@ -1045,54 +1091,47 @@ expansion for DOS-style codings)."
 (defun gptel-yatools-vfs--sync-one (full)
   "Sync FULL from VFS to disk.
 
-FULL is expected to have a pending VFS entry.  The conflict check and
-the blocker check are repeated here, immediately before the write:
-the review buffer sits in `recursive-edit' for as long as the user
-likes, and anything that changes the file meanwhile must not be
-silently overwritten.  Callers may pre-filter for a nicer message,
-but correctness does not depend on them doing so.
+FULL is expected to have a pending VFS entry.  `--refusal' is asked
+again here, immediately before the write: the review buffer sits in
+`recursive-edit' for as long as the user likes, and anything that
+changes the file meanwhile must not be silently overwritten.  Callers
+may pre-filter for a nicer message, but correctness does not depend on
+them doing so.
 
 Returns (STATUS MESSAGE) where STATUS is `:ok' or `:failed'."
   (let ((content (gptel-yatools-vfs-get full)))
     (cond
      ((null content)
       (list :failed "no VFS entry"))
-     ((gptel-yatools-vfs--conflict-p full)
-      (list :failed "conflict: file changed on disk since the VFS captured it; not synced"))
-     ;; The target may have been replaced by a FIFO or device since the VFS
-     ;; captured it; writing to one can block forever.
-     ((and (file-exists-p full) (not (file-regular-p full)))
-      (list :failed "target is no longer a regular file (device, FIFO or socket)"))
+     ((let ((refusal (gptel-yatools-vfs--refusal full)))
+        (and refusal
+             (list :failed (plist-get refusal :reason)))))
      (t
-      (let ((blocker (gptel-yatools-vfs--sync-blocker full)))
-        (cond
-         (blocker (list :failed blocker))
-         (t
-          (let ((coding (gptel-yatools-vfs--resolve-coding
-                         (gptel-yatools-vfs--entry-coding full)))
-                (existing (get-file-buffer full)))
-            (condition-case err
-                (progn
-                  (make-directory (file-name-directory full) t)
-                  (let ((coding-system-for-write coding))
-                    (with-temp-file full (insert content)))
-                  ;; Remove the entry as soon as the bytes are on disk.
-                  ;; If refreshing the visiting buffer fails afterwards,
-                  ;; the sync has still happened; keeping the entry would
-                  ;; leave a zombie that `vfs_diff' never reports (the
-                  ;; content now equals disk) and `file_sync' can never
-                  ;; clear.
-                  (gptel-yatools-vfs-remove full)
-                  (when existing
-                    (condition-case err
-                        (with-current-buffer existing
-                          (revert-buffer t t t))
-                      (error
-                       (message "gptel: synced %s but could not refresh buffer %s: %s"
-                                full (buffer-name existing)
-                                (error-message-string err)))))
-                  (list :ok "synced"))
-              (error (list :failed (error-message-string err))))))))))))
+      (let ((coding (gptel-yatools-vfs--resolve-coding
+                     (gptel-yatools-vfs--entry-coding full)))
+            (existing (get-file-buffer full)))
+        (condition-case err
+            (progn
+              (make-directory (file-name-directory full) t)
+              (let ((coding-system-for-write coding))
+                (with-temp-file full (insert content)))
+              ;; Remove the entry as soon as the bytes are on disk.
+              ;; If refreshing the visiting buffer fails afterwards,
+              ;; the sync has still happened; keeping the entry would
+              ;; leave a zombie that `vfs_diff' never reports (the
+              ;; content now equals disk) and `file_sync' can never
+              ;; clear.
+              (gptel-yatools-vfs-remove full)
+              (when existing
+                (condition-case err
+                    (with-current-buffer existing
+                      (revert-buffer t t t))
+                  (error
+                   (message "gptel: synced %s but could not refresh buffer %s: %s"
+                            full (buffer-name existing)
+                            (error-message-string err)))))
+              (list :ok "synced"))
+          (error (list :failed (error-message-string err)))))))))
 
 ;;-------------------------------------------------------------------------
 ;; The sync operation
@@ -1136,19 +1175,21 @@ TARGETS is a list of paths with pending changes.  Returns a plist of
 \(alist of PATH . REASON for files that cannot be written right now) and
 :syncable (the rest, in their original order).
 
-The reason strings are produced here, once, so the diff the user reviews
-and the report the model reads cannot disagree about why a file is being
-skipped."
-  (let* ((conflicts (cl-remove-if-not #'gptel-yatools-vfs--conflict-p targets))
-         (eligible (cl-set-difference targets conflicts :test #'equal))
-         (blocked (delq nil (mapcar (lambda (file)
-                                      (let ((why (gptel-yatools-vfs--sync-blocker file)))
-                                        (and why (cons file why))))
-                                    eligible))))
-    (list :conflicts conflicts
-          :blocked blocked
-          :syncable (cl-set-difference eligible (mapcar #'car blocked)
-                                       :test #'equal))))
+Every file is classified by `--refusal', so the set shown to the user,
+the reasons printed beside each file, and the set the write will accept
+all come from one answer.  Splitting conflicts out is only a matter of
+which section of the report they appear in, not a second opinion about
+whether they can be written."
+  (let (conflicts blocked syncable)
+    (dolist (file targets)
+      (let ((refusal (gptel-yatools-vfs--refusal file)))
+        (pcase (plist-get refusal :kind)
+          ('nil (push file syncable))
+          (:conflict (push file conflicts))
+          (_ (push (cons file (plist-get refusal :reason)) blocked)))))
+    (list :conflicts (nreverse conflicts)
+          :blocked (nreverse blocked)
+          :syncable (nreverse syncable))))
 
 (defun gptel-yatools-vfs--sync-approve (syncable skipped review)
   "Return `:approved', `:rejected' or `:noninteractive' for SYNCABLE.
@@ -1227,7 +1268,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
              (syncable (plist-get partition :syncable))
              (skipped (append blocked
                               (mapcar (lambda (file)
-                                        (cons file "conflict: changed on disk since the VFS captured it"))
+                                        (cons file (plist-get (gptel-yatools-vfs--refusal file)
+                                                              :reason)))
                                       conflicts)))
              (approval (and syncable
                             (gptel-yatools-vfs--sync-approve

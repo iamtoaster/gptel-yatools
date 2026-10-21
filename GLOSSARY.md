@@ -125,3 +125,13 @@ the files refused with the reason for each.  The tool reply and the review
 buffer are both renderings of it, so neither can describe a sync the other
 did not perform.
 _Avoid_: Sync result, report
+
+**Refusal**:
+The one answer to "can this file be written right now?": nil, or a kind
+\(`:conflict` when disk moved on since the baseline, `:blocked` for every
+other reason) and a reason in words.  Every consumer asks it -- the
+partition that decides what the review shows, the diff header that says
+so per file, and the write itself, which asks again because a review can
+sit open for minutes.  One answer is what makes the set the user
+approves the set that is applied.
+_Avoid_: Sync blocker, check, validation

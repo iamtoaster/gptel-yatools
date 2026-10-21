@@ -1537,6 +1537,15 @@ review could otherwise run against a fresh, empty table and sync nothing."
         (goto-char (point-min))
         (let ((line-num 0)
               (matches '()))
+          ;; Known and deliberate: `string-match-p' honours the ambient
+          ;; `case-fold-search' (t by default), so a regexp with no case
+          ;; construct matches case-insensitively.  A model that wants an
+          ;; exact case writes one into the regexp ([A-Z], \\`...\\'); the
+          ;; alternative -- binding `case-fold-search' here -- would make
+          ;; the tool's matching disagree with Emacs, which is the model's
+          ;; mental model of an "Emacs regexp".  Deferred, not overlooked;
+          ;; see `gptel-yatools-vfs--replace-once', which must be exact and
+          ;; binds it.
           (while (not (eobp))
             (setq line-num (1+ line-num))
             (let ((line (buffer-substring-no-properties

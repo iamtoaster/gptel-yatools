@@ -1,4 +1,4 @@
-;;; gptel-yatools-tools.el --- Shell, Elisp and workspace tools  -*- lexical-binding: t; -*-
+;;; gptel-yatools-tools.el --- Shell and workspace tools  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025  Vladislav Slobodenyuk
 
@@ -8,11 +8,11 @@
 ;;; Commentary:
 
 ;; The tools that are neither filesystem nor skill tools: locating the
-;; workspace root, running a shell command in it, and evaluating one Emacs
-;; Lisp form.  The VFS lives in `gptel-yatools-vfs.el' and Agent Skills in
-;; `gptel-yatools-skills.el'; what holds the three together -- the shared
-;; response envelope, the path and argument helpers, the timeout guard -- is
-;; in `gptel-yatools.el', which loads this file and collects its tools.
+;; workspace root, and running a shell command in it.  The VFS lives in
+;; `gptel-yatools-vfs.el' and Agent Skills in `gptel-yatools-skills.el'; what
+;; joins the modules -- the tool boundary, the path and argument helpers, the
+;; timeout guard -- is in `gptel-yatools.el', which loads this file and
+;; collects its tools.
 ;;
 ;; The command runner is here rather than with the VFS because a command
 ;; runs against the disk and only *reports* on the VFS: when changes are
@@ -234,86 +234,6 @@ guard and the response boundary; `gptel-yatools.el' appends this list to
                         :optional t))
     :confirm t
     :category "shell")
-
-
-   ;; 11. Execute arbitrary Elisp
-   (gptel-yatools--make-tool
-    :name "execute_elisp"
-    :function
-    (lambda (code)
-      (cond
-       ((not (stringp code))
-        (error "Error: code must be a string."))
-       ((string-empty-p (string-trim code))
-        (error "Error: code is empty."))
-       (t
-        (let ((outbuf (generate-new-buffer " *gptel-elisp-output*"))
-              (result nil)
-              (error-msg nil)
-              (printed ""))
-          (unwind-protect
-              (progn
-                (condition-case err
-                    (with-temp-buffer
-                      (insert code)
-                      (goto-char (point-min))
-                      (read (current-buffer))
-                      (skip-chars-forward " \t\n\r")
-                      (unless (eobp)
-                        (error "Trailing content after the first Lisp form")))
-                  (error
-                   (setq error-msg
-                         (format "Parse error: %s"
-                                 (error-message-string err)))))
-                (unless error-msg
-                  (gptel-yatools--update-tool-status
-                   " Evaluating Elisp..." 'mode-line-emphasis)
-                  (condition-case err
-                      (let ((standard-output outbuf)
-                            (default-directory
-                             (gptel-yatools--workspace-root)))
-                        (setq result
-                              (save-excursion
-                                (with-temp-buffer
-                                  (insert code)
-                                  (goto-char (point-min))
-                                  (eval (read (current-buffer)) t)))))
-                    (error
-                     (setq error-msg
-                           (format "Eval error: %s"
-                                   (error-message-string err))))))
-                (setq printed
-                      (with-current-buffer outbuf
-                        (buffer-substring-no-properties
-                         (point-min) (point-max))))
-                ;; The boundary truncates and escapes this body like any
-                ;; other: an unbounded `princ' loop must not blow up the
-                ;; request, and a raw byte must not break serialisation.
-                (gptel-yatools-ok
-                 (cond
-                   (error-msg
-                    (format "%s\n\nPrinted output:\n%s\n(no value returned)"
-                            error-msg
-                            (if (string-empty-p printed) "(none)" printed)))
-                   (t
-                    (format "Elisp evaluation succeeded.\n\nPrinted output:\n%s\n\nReturn value:\n%s"
-                            (if (string-empty-p printed) "(none)" printed)
-                            (condition-case err
-                                (let ((print-length 200)
-                                      (print-level 30))
-                                  (prin1-to-string result))
-                              (error
-                               (format "<unprintable value: %s>"
-                                       (error-message-string err)))))))))
-            (when (buffer-live-p outbuf)
-              (kill-buffer outbuf)))))))
-    :description
-    "Evaluate a single Emacs Lisp form in the running Emacs. The user is ALWAYS prompted to confirm the exact form before it runs. The form is read with `read', so write it as Lisp source (e.g. `(buffer-name)' or `(+ 1 2)'), not as a quoted string. Returns the printed value of the form plus anything written to `standard-output' by the form. Parse errors, evaluation errors, and unprintable return values are reported as plain text (not signaled), so you can read the error and adapt. `default-directory' is bound to the workspace root during evaluation. Only one form is allowed per call."
-    :args (list '(:name "code"
-                        :type string
-                        :description "A single Emacs Lisp form to evaluate, e.g. \"(buffer-list)\" or \"(+ 1 2)\"."))
-    :confirm t
-    :category "elisp")
 
 ))
 

@@ -203,19 +203,19 @@ see is a raw condition string such as `error Wrong type argument'."
           (gptel-yatools-test--should-be-enveloped out))))))
 
 
-;;;; 40. `execute_elisp' output was unbounded
+;;;; 40. A tool's output was unbounded
 
-(ert-deftest gptel-yatools-test-execute-elisp-output-is-truncated ()
-  "A `princ' loop must not return a 300k-character tool response."
+(ert-deftest gptel-yatools-test-command-output-is-truncated ()
+  "A command printing megabytes must not return a 300k-character response."
+  (skip-unless (executable-find "sh"))
   (with-temp-buffer
     (gptel-yatools-test--vfs
-      (let ((out (funcall (gptel-yatools-test--tool "execute_elisp")
-                          "(dotimes (_ 30000) (princ \"abcdefghij\"))")))
+      (let ((out (funcall (gptel-yatools-test--tool "execute_command")
+                          "i=0; while [ $i -lt 30000 ]; do printf 0123456789; i=$((i+1)); done")))
         (should (stringp out))
         (should (<= (length out) (+ gptel-yatools--output-char-limit 1000)))
         (should (string-match-p "truncated" out))
-        (should (condition-case nil (progn (json-serialize out) t)
-                  (error nil)))))))
+        (gptel-yatools-test--should-be-enveloped out)))))
 
 
 ;;;; 42. Loading the package must not depend on how gptel was loaded
@@ -225,21 +225,24 @@ see is a raw condition string such as `error Wrong type argument'."
 
 The tools have to be listed by `gptel-menu', which reads gptel's
 registry, but nothing may be added to `gptel-tools': which tools a chat
-sends is the user's decision, made with `gptel-yatools-enable'."
+sends is the user's decision, made with `gptel-yatools-enable'.
+
+The probe reports whether every tool is registered and carries a
+deadline, rather than how many there are: a count pins the number of
+tools, so adding or removing one would fail a test about something else."
   (skip-unless (executable-find "emacs"))
   (let ((result
          (gptel-yatools-test--run-batch
           `(progn
              (require 'cl-lib)
              (require 'gptel-yatools)
-             (princ (format "tools=%d enabled=%s registered=%d timeouts=%d\n"
+             (princ (format "tools=%d enabled=%s all-registered=%s all-timeouts=%s\n"
                             (length gptel-yatools--tools)
                             gptel-tools
-                            (length (cl-remove-if-not
-                                     (lambda (tool)
-                                       (gptel-get-tool (gptel-tool-name tool)))
-                                     gptel-yatools--tools))
-                            (cl-count-if
+                            (cl-every (lambda (tool)
+                                        (gptel-get-tool (gptel-tool-name tool)))
+                                      gptel-yatools--tools)
+                            (cl-every
                              (lambda (tool)
                                (equal (plist-get
                                        (car (last (gptel-tool-args tool)))
@@ -247,8 +250,10 @@ sends is the user's decision, made with `gptel-yatools-enable'."
                                       "timeout"))
                              gptel-yatools--tools)))))))
     (should (equal (car result) 0))
-    (should (string-match-p "tools=12 enabled=nil registered=12 timeouts=12"
-                            (cdr result)))))
+    (should (string-match-p "enabled=nil all-registered=t all-timeouts=t"
+                            (cdr result)))
+    ;; Not vacuous: an empty tool list would satisfy the two `every' checks.
+    (should (string-match-p "tools=[1-9][0-9]*" (cdr result)))))
 
 (ert-deftest gptel-yatools-test-package-compiles-without-warnings ()
   "The package must byte-compile, without a single warning.
@@ -386,7 +391,7 @@ the real (buffer-local or global) value untouched."
   (dolist (name '("read_workspace_root" "read_path" "read_file_from_offset"
                   "fetch_lines_from_file_using_regex" "execute_command"
                   "write_file" "write_file_diff" "file_sync" "vfs_diff"
-                  "vfs_discard" "execute_elisp" "skill"))
+                  "vfs_discard" "skill"))
     (should (cl-find name gptel-yatools--tools
                      :key #'gptel-tool-name :test #'equal))))
 
@@ -429,15 +434,6 @@ the real (buffer-local or global) value untouched."
     (should (string-match-p "started" out))
     (should-not (string-match-p "finished" out))
     (should (< (- (float-time) start) 10))))
-
-(ert-deftest gptel-yatools-test-timeout-aborts-elisp ()
-  "A form that outlives the timeout must be abandoned."
-  (let ((out (funcall (gptel-yatools-test--tool "execute_elisp")
-                      "(progn (sleep-for 20) 'finished)" 1)))
-    (should (string-match-p "did not finish within its 1 second timeout" out))
-    ;; The form never ran to completion: no evaluation report is returned.
-    (should-not (string-match-p "Return value:" out))
-    (should-not (string-match-p "Printed output:" out))))
 
 (ert-deftest gptel-yatools-test-timeout-ignores-user-wait ()
   "Time the tool spends waiting for the user must not count."
@@ -779,24 +775,13 @@ the status slot that gptel rewrites in place."
         (should (equal (nth 1 header-line-format)
                        " Executing command..."))))))
 
-(ert-deftest gptel-yatools-test-execute-elisp-announces-itself ()
-  "`execute_elisp' must say that it is evaluating before it does."
-  (with-temp-buffer
-    (gptel-yatools-test--vfs
-      (gptel-yatools-test--chat-with-header-line)
-      (let ((out (funcall (gptel-yatools-test--tool "execute_elisp")
-                          "(+ 1 2)")))
-        (should (string-match-p "3" out))
-        (should (equal (nth 1 header-line-format)
-                       " Evaluating Elisp..."))))))
-
 
 ;;;; Tool boundary: one response shape, one place that renders it
 
 (ert-deftest gptel-yatools-test-every-tool-returns-an-envelope ()
   "No tool may return bare text, and every reply must survive JSON.
 
-Calling each tool for real would run shell commands and evaluate Elisp,
+Calling each tool for real would run shell commands and touch the disk,
 so this checks the boundary itself: whatever a tool returns or signals,
 the function installed in the registry renders an envelope."
   (with-temp-buffer

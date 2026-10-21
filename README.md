@@ -6,8 +6,8 @@ The centrepiece is a small, **buffer-local virtual filesystem** layered over
 the real one: the model reads files through it, writes are buffered until you
 review and sync them, and every pending change is shown as a unified diff
 before it touches the disk.  Around it sit the tools a coding assistant needs:
-workspace-relative paths, line-addressed reads, regexp search, shell commands
-and `elisp` evaluation.
+workspace-relative paths, line-addressed reads, regexp search and shell
+commands.
 
 Nothing is destructive without a visible step: a write is only buffered, and
 `file_sync` refuses to go to disk while a file changed underneath you.
@@ -68,9 +68,9 @@ Tool calls run synchronously inside gptel's request handler, so a tool that
 blocks blocks Emacs.  Every tool takes an optional `timeout` argument, and
 carries a deadline that aborts it when it expires; `gptel-yatools-timeout`
 (default 120) sets the default.  Time spent waiting for you — reading a
-`file_sync` diff, confirming `execute_elisp` — does not count against it.
+`file_sync` diff, confirming `execute_command` — does not count against it.
 Timers only run while Emacs waits for input, so the deadline bounds calls that
-block on I/O, not purely CPU-bound Elisp.
+block on I/O, not purely CPU-bound work.
 
 ## Tools
 
@@ -86,7 +86,6 @@ block on I/O, not purely CPU-bound Elisp.
 | `vfs_discard` | filesystem | Drop pending changes — the way out of a conflict. |
 | `read_workspace_root` | workspace | Absolute path of the workspace root. |
 | `execute_command` | shell | Run a shell command from the workspace root and return its output. |
-| `execute_elisp` | elisp | Evaluate one Emacs Lisp form; always asks for confirmation first. |
 | `skill` | skills | List the installed [Agent Skills](https://agentskills.io), load one, or read a file it references. |
 
 The virtual filesystem is buffer-local, so two chats never see each other's
@@ -163,7 +162,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-149 ERT tests, no network, no prompts, every one of them in a throwaway temp
+147 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

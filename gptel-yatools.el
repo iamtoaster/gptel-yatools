@@ -15,9 +15,9 @@
 ;; buffered copy exists, writes are buffered until the user reviews and
 ;; syncs them, and every pending change is shown as a unified diff before
 ;; it lands.  Around it sit the tools a coding assistant needs: workspace
-;; paths, line-addressed reads, regexp search, shell commands, Elisp
-;; evaluation, and Agent Skills -- directories of instructions and scripts
-;; that the model loads on demand.
+;; paths, line-addressed reads, regexp search, shell commands, and Agent
+;; Skills -- directories of instructions and scripts that the model loads
+;; on demand.
 ;;
 ;; This file holds what every tool shares, and nothing else:
 ;;
@@ -38,7 +38,7 @@
 ;;
 ;; The tools themselves live in the file that owns their subject:
 ;; `gptel-yatools-vfs.el' for the filesystem, `gptel-yatools-tools.el' for
-;; the shell, Elisp and workspace tools, and `gptel-yatools-skills.el' for
+;; the shell and workspace tools, and `gptel-yatools-skills.el' for
 ;; Agent Skills.  Those files are loaded from here at the bottom of this
 ;; file, once the helpers they build on exist; they cannot be loaded
 ;; before this one.
@@ -116,15 +116,9 @@ VFS count, for example, is what the header-line cache exists for.")
 ;; never sees -- and a `file_sync' accepted from there reports that the VFS
 ;; has no pending changes even though the chat has plenty.
 ;;
-;; Two limits are recorded rather than fixed:
-;;
-;; - A request whose chat buffer was killed dies inside gptel itself
-;;   ("Selecting deleted buffer"); we only make the failure readable when
-;;   we are the ones to notice it.
-;; - `execute_elisp' evaluates inside `with-temp-buffer', so the chat
-;;   buffer's `gptel-yatools-vfs' is invisible to the form being evaluated even
-;;   when the tool runs in the chat buffer.  That is a property of the
-;;   tool, not of buffer switching, and is left as it is.
+;; One limit is recorded rather than fixed: a request whose chat buffer was
+;; killed dies inside gptel itself ("Selecting deleted buffer"); we only
+;; make the failure readable when we are the ones to notice it.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--tool-owner-buffer (&optional overlay)
   "Return the buffer the tool call in OVERLAY belongs to.
@@ -155,9 +149,8 @@ whole batch of calls, whichever buffer the user is looking at when the
 call is confirmed.
 
 The batch is anchored once, not once per call: no registered tool leaves
-another buffer current, and `execute_elisp' structurally cannot, because
-the form it evaluates runs inside `with-temp-buffer'.  A tool that did
-switch buffers would still leak into the later calls of its batch."
+another buffer current.  A tool that did switch buffers would still leak
+into the later calls of its batch."
   (let ((owner (gptel-yatools--tool-owner-buffer overlay)))
     (cond
      ((not (buffer-live-p owner))
@@ -670,8 +663,8 @@ line) and :partial (the page is not the whole of TEXT)."
 ;; Tool call timeouts
 ;;
 ;; Tool calls run synchronously inside gptel's request handler, so a tool
-;; that blocks -- a hung shell command, a read from a FIFO, an Elisp form
-;; that sleeps -- blocks Emacs itself.  Every tool below therefore gets a
+;; that blocks -- a hung shell command, a read from a FIFO -- blocks Emacs
+;; itself.  Every tool below therefore gets a
 ;; deadline (120 seconds by default) plus an optional TIMEOUT argument for
 ;; the rare call that genuinely needs longer, and its description tells
 ;; the model not to raise that timeout unless it truly has to.
@@ -784,7 +777,7 @@ because `with-timeout' cannot interrupt `call-process' anyway.
 
 Timers only run while Emacs waits for input, so this bounds calls that
 block on I/O -- the case that matters -- but cannot interrupt a purely
-CPU-bound Elisp form.
+CPU-bound form.
 
 The timer can only `throw': a `signal' raised inside a timer callback is
 consumed by Emacs's timer loop and the call would carry on running.  So

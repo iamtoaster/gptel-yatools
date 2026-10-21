@@ -325,10 +325,17 @@ without reading it first."
   "Return STRING cut to LIMIT characters, without splitting a \\xNN escape.
 
 `gptel-yatools--escape-raw-bytes' turns one raw byte into four characters,
-so a cut can land in the middle of an escape.  Dropping the partial
-escape keeps the text unambiguous for the reader."
+so a cut can land inside an escape.  Dropping the partial escape keeps the
+text unambiguous for the reader.
+
+That includes a bare trailing backslash and the prefixes \"\\x\" and
+\"\\xa\": an escape cut to one or two of its four characters reads as an
+escape with no byte behind it, which is exactly the ambiguity this
+function exists to avoid.  A legitimate backslash at the cut is lost
+with it -- truncation has already lost text, and an unambiguous cut is
+worth one character."
   (let ((cut (substring string 0 (min limit (length string)))))
-    (if (string-match "\\\\x[0-9a-f]?\\'" cut)
+    (if (string-match "\\\\\\(x[0-9a-f]?\\)?\\'" cut)
         (substring cut 0 (match-beginning 0))
       cut)))
 

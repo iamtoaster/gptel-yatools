@@ -177,6 +177,16 @@ the old code missed the bound by a factor of two."
   (should (equal (gptel-yatools--hard-cut "ab\\xffcd" 6) "ab\\xff"))
   (should (equal (gptel-yatools--hard-cut "abc" 2) "ab")))
 
+(ert-deftest gptel-yatools-test-hard-cut-drops-a-dangling-escape-prefix ()
+  "A cut must not leave a bare backslash or an incomplete \\x prefix.
+
+The old guard only recognised a complete-looking escape, so cutting
+after the backslash or after `\\x'/`\\xN' left text that reads as an
+escape with no byte behind it."
+  (dolist (case '((3 . "ab") (4 . "ab") (5 . "ab")))
+    (should (equal (gptel-yatools--hard-cut "ab\\xffcd" (car case))
+                   (cdr case)))))
+
 
 ;;;; 37. Missing/wrong-typed required tool arguments
 

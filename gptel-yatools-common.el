@@ -290,15 +290,20 @@ compiled artifacts almost always do."
 (defun gptel-yatools--binary-notice (path content from-vfs)
   "Return a tool response reporting that PATH is binary and withheld.
 
-CONTENT is the file's text as decoded by the read tool, used only to
-fall back on a size when the file does not exist on disk (a pending
-VFS file).  FROM-VFS says where the content came from."
-  (let* ((size (or (file-attribute-size (file-attributes path))
-                   ;; A pending file has no disk size yet; its bytes under
-                   ;; `no-conversion' are the size it will be written at.
-                   (condition-case nil
-                       (string-bytes (encode-coding-string content 'no-conversion))
-                     (error nil))))
+CONTENT is the file's text as decoded by the read tool.  FROM-VFS says
+where the content came from, and so which size the reader is told: a
+pending copy is sized by the bytes it will be written as, not by the
+disk file it will replace."
+  (let* ((pending-size
+          (condition-case nil
+              (string-bytes (encode-coding-string content 'no-conversion))
+            (error nil)))
+         (size (if from-vfs
+                   pending-size
+                 (or (file-attribute-size (file-attributes path))
+                     ;; The file is gone or unreadable; the text that
+                     ;; was read is still the best size available.
+                     pending-size)))
          (body (format "\
 %s is a binary file (%s), so its contents are not returned.
 

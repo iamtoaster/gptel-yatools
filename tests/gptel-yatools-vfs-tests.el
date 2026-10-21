@@ -282,6 +282,26 @@ them as characters and make sync expand each LF into another CRLF."
                    "binary file"
                    (funcall (gptel-yatools-test--tool "read_path") file))))))))
 
+(ert-deftest gptel-yatools-test-binary-notice-reports-the-pending-size ()
+  "A pending binary file must be sized as it will be written, not as disk is.
+
+The notice preferred the disk size even when the content withheld was the
+pending copy, so the model was told the size of the bytes it is not
+looking at."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "sized.bin")))
+      (gptel-yatools-test--write file (concat "PNG" "\0" (make-string 2 ?z)))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; No pending copy yet: the size is the disk's (6 bytes).
+          (should (string-match-p
+                   "binary file (6 bytes)"
+                   (funcall (gptel-yatools-test--tool "read_path") file)))
+          ;; 20 pending bytes, 6 on disk: the pending size is what counts.
+          (gptel-yatools-vfs-put file (concat (make-string 19 ?x) "\0"))
+          (let ((out (funcall (gptel-yatools-test--tool "read_path") file)))
+            (should (string-match-p "binary file (20 bytes)" out))))))))
+
 (ert-deftest gptel-yatools-test-binary-diff-edit-is-refused ()
   "Editing binary content as text must be refused."
   (gptel-yatools-test--in-dir

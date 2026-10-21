@@ -1,4 +1,4 @@
-;;; gptel-yatools-tools.el --- Shell and workspace tools  -*- lexical-binding: t; -*-
+;;; gptel-yatools-shell.el --- Shell and workspace tools  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025  Vladislav Slobodenyuk
 
@@ -8,11 +8,11 @@
 ;;; Commentary:
 
 ;; The tools that are neither filesystem nor skill tools: locating the
-;; workspace root, and running a shell command in it.  The VFS lives in
-;; `gptel-yatools-vfs.el' and Agent Skills in `gptel-yatools-skills.el'; what
-;; joins the modules -- the tool boundary, the path and argument helpers, the
-;; timeout guard -- is in `gptel-yatools.el', which loads this file and
-;; collects its tools.
+;; workspace root, and running a shell command in it.  The kit these tools
+;; are built from -- the Result, the boundary, the deadline, and the macro
+;; that writes both functions -- is `gptel-yatools-common.el'.  The VFS
+;; lives in `gptel-yatools-vfs.el' and Agent Skills in
+;; `gptel-yatools-skills.el'.
 ;;
 ;; The command runner is here rather than with the VFS because a command
 ;; runs against the disk and only *reports* on the VFS: when changes are
@@ -22,21 +22,12 @@
 
 (require 'cl-lib)
 (require 'gptel)
+(require 'gptel-yatools-common)
+(require 'gptel-yatools-vfs)
 
-;; Defined in `gptel-yatools.el', which loads this file: see the comment
-;; there about the direction of the dependency.
-(defvar gptel-yatools--current-timeout)
-(declare-function gptel-yatools--workspace-root "gptel-yatools" ())
-(declare-function gptel-yatools--display-path "gptel-yatools" (path))
-(declare-function gptel-yatools--resolve-timeout "gptel-yatools" (value))
-(declare-function gptel-yatools--require-string "gptel-yatools" (value what))
-(declare-function gptel-yatools--make-tool "gptel-yatools" (&rest slots))
-(declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
 (declare-function gptel-yatools--update-tool-status "gptel-yatools" (message &optional face))
-(declare-function gptel-yatools-vfs-pending-paths "gptel-yatools-vfs" ())
-(declare-function gptel-yatools-vfs-forget-pending-cache "gptel-yatools-vfs" ())
 
-(defun gptel-yatools-tools--command-result (output)
+(defun gptel-yatools-shell--command-result (output)
   "Return the result for a finished command whose combined output is OUTPUT.
 
 When any VFS entries are pending, the envelope's comment warns the model
@@ -58,7 +49,7 @@ VFS flag, since the output itself always describes the disk."
 ;;-------------------------------------------------------------------------
 ;; Command runner
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools-tools--run-command (command directory)
+(defun gptel-yatools-shell--run-command (command directory)
   "Run COMMAND (in DIRECTORY if non-empty) and return a result.
 
 The result always carries a body: the command's exit code and combined
@@ -84,11 +75,11 @@ uses a real process and polls it instead."
          (default-directory target-directory))
     (cond
      ((not (file-directory-p default-directory))
-      (gptel-yatools-tools--command-result
+      (gptel-yatools-shell--command-result
        (format "Error: working directory does not exist: %s"
                shown-directory)))
      ((string-empty-p (string-trim command))
-      (gptel-yatools-tools--command-result "Error: command is empty."))
+      (gptel-yatools-shell--command-result "Error: command is empty."))
      (t
       (let ((outbuf (generate-new-buffer " *gptel-exec-output*")))
         (unwind-protect
@@ -163,7 +154,7 @@ uses a real process and polls it instead."
                 ;; change which pending entries still differ, so the cached
                 ;; header-line count must not outlive it.
                 (gptel-yatools-vfs-forget-pending-cache)
-                (gptel-yatools-tools--command-result
+                (gptel-yatools-shell--command-result
                  (cond
                   (start-error
                    (format "Failed to start command in %s.\nError: %s"
@@ -195,47 +186,32 @@ uses a real process and polls it instead."
 ;;-------------------------------------------------------------------------
 ;; The tools
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools-tools--tools ()
-  "Return the tools defined in this file, in declaration order.
+(gptel-yatools-define-tool gptel-yatools-read-workspace-root
+  :name "read_workspace_root"
+  :category "workspace"
+  :description
+  "Return the absolute path of the current workspace root. Use it to resolve relative paths."
+  :args nil
+  (gptel-yatools-ok (gptel-yatools--workspace-root)))
 
-Each one already carries the shared TIMEOUT argument, the deadline
-guard and the response boundary; `gptel-yatools.el' appends this list to
-`gptel-yatools--tools'."
-  (list
-   ;; 1. Read workspace root
-   (gptel-yatools--make-tool
-    :name "read_workspace_root"
-    :function (lambda ()
-                (gptel-yatools-ok (gptel-yatools--workspace-root)))
-    :description "Return the absolute path of the current workspace root. Use it to resolve relative paths."
-    :args nil
-    :category "workspace")
+(gptel-yatools-define-tool gptel-yatools-execute-command
+  :name "execute_command"
+  :category "shell"
+  :confirm t
+  :description
+  "Execute a shell command and return its exit status and combined stdout/stderr output. The user is ALWAYS prompted to confirm the exact command before it runs. The command runs against DISK, not the VFS. If any VFS files have uncommitted changes, a warning is prepended to the XML context (listing the pending paths): missing files or stale content in the output may be because changes are pending in the VFS. Use vfs_diff to inspect pending changes and file_sync to apply them. On failure the exit code and output are returned as plain text (not signaled as an Elisp error), so you can read the failure and adapt. If the command outlives the tool timeout it is killed and its partial output is returned instead."
+  :args '((:name "command"
+                :type string
+                :description "The shell command to run. Executed via `shell-file-name' with `shell-command-switch' (typically /bin/sh -c).")
+          (:name "directory"
+                 :type string
+                 :description "Optional working directory, relative to the workspace root or absolute. Defaults to the workspace root."
+                 :optional t))
+  (gptel-yatools--require-string command "command")
+  (when directory
+    (gptel-yatools--require-string directory "directory"))
+  (gptel-yatools--update-tool-status " Executing command..." 'mode-line-emphasis)
+  (gptel-yatools-shell--run-command command directory))
 
-
-   ;; 5. Execute a shell command (always against disk)
-   (gptel-yatools--make-tool
-    :name "execute_command"
-    :function
-    (lambda (command &optional directory)
-      (gptel-yatools--require-string command "command")
-      (when directory
-        (gptel-yatools--require-string directory "directory"))
-      (gptel-yatools--update-tool-status " Executing command..."
-                                         'mode-line-emphasis)
-      (gptel-yatools-tools--run-command command directory))
-    :description
-    "Execute a shell command and return its exit status and combined stdout/stderr output. The user is ALWAYS prompted to confirm the exact command before it runs. The command runs against DISK, not the VFS. If any VFS files have uncommitted changes, a warning is prepended to the XML context (listing the pending paths): missing files or stale content in the output may be because changes are pending in the VFS. Use vfs_diff to inspect pending changes and file_sync to apply them. On failure the exit code and output are returned as plain text (not signaled as an Elisp error), so you can read the failure and adapt. If the command outlives the tool timeout it is killed and its partial output is returned instead."
-    :args (list '(:name "command"
-                        :type string
-                        :description "The shell command to run. Executed via `shell-file-name' with `shell-command-switch' (typically /bin/sh -c).")
-                '(:name "directory"
-                        :type string
-                        :description "Optional working directory, relative to the workspace root or absolute. Defaults to the workspace root."
-                        :optional t))
-    :confirm t
-    :category "shell")
-
-))
-
-(provide 'gptel-yatools-tools)
-;;; gptel-yatools-tools.el ends here
+(provide 'gptel-yatools-shell)
+;;; gptel-yatools-shell.el ends here

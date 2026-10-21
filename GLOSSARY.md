@@ -1,7 +1,7 @@
 # gptel-yatools
 
-Tools that give gptel's model a buffer-local virtual filesystem, a shell and
-Emacs Lisp, and Agent Skills it can discover and load.
+Tools that give gptel's model a buffer-local virtual filesystem, a shell, and
+Agent Skills it can discover and load.
 
 ## Language
 
@@ -44,12 +44,30 @@ whether it reflects pending VFS state, and an optional context comment.
 Never formatted text, and never a half-rendered envelope.
 _Avoid_: Response, output, return value
 
+**Tool function**:
+The implementation half of a tool, named `gptel-yatools-<name>-tool`.  It
+takes the tool's own arguments, including their optional ones, and returns
+a Result.  It is the half to advise when what should change is what the
+tool computes or reports.
+_Avoid_: Tool handler, tool callback
+
 **Tool boundary**:
 The one adapter that renders a Result into the envelope the model sees.
 It sizes, truncates and escapes the text, and turns a signalled error or
 an expired deadline into that same envelope, so a tool that fails and a
 tool that succeeds reach the model the same way.
+
+Concretely it is the other half of a tool, the function named
+`gptel-yatools-<name>`: the one gptel calls, the one that takes the
+trailing `timeout` argument.  Advise it to observe or replace a whole call,
+including its timing and its wire format.
 _Avoid_: Response builder, wrapper, formatter
+
+**Tool definition**:
+The single form that writes both halves and registers the tool, so that
+the tool's model-facing description, its argument list and its Lisp
+functions cannot drift apart.  `C-h f` on a tool shows the description the
+model reads, generated from it.
 
 ### Pending changes
 

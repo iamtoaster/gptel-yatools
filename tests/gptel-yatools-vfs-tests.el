@@ -1237,10 +1237,10 @@ a budget, not a benchmark: it fails only if the old slow path returns."
         (gptel-yatools-test--vfs
           (gptel-yatools-vfs-write one "a\n")
           (gptel-yatools-vfs-write two "b\n")
-          (should (equal (gptel-yatools-vfs-discard two) (list two)))
+          (should (equal (gptel-yatools-vfs-discard-pending two) (list two)))
           (should (equal (gptel-yatools-vfs-pending-paths) (list one)))
-          (should (equal (gptel-yatools-vfs-discard) (list one)))
-          (should-not (gptel-yatools-vfs-discard)))))))
+          (should (equal (gptel-yatools-vfs-discard-pending) (list one)))
+          (should-not (gptel-yatools-vfs-discard-pending)))))))
 
 
 (provide 'gptel-yatools-vfs-tests)

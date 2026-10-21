@@ -275,8 +275,9 @@ the just-compiled modules rather than the source ones."
              (require 'bytecomp)
              (let* ((dir (make-temp-file "gptel-yatools-elc-" t))
                     (package-dir (file-name-directory ,gptel-yatools-test--file))
-                    (files '("gptel-yatools-vfs.el"
-                             "gptel-yatools-tools.el"
+                    (files '("gptel-yatools-common.el"
+                             "gptel-yatools-vfs.el"
+                             "gptel-yatools-shell.el"
                              "gptel-yatools-skills.el"
                              "gptel-yatools.el")))
                (unwind-protect
@@ -465,24 +466,25 @@ request, and had to be re-appended on every reload to stay in step."
         (funcall (gptel-yatools-test--tool "read_workspace_root")))
       (should (= (length timer-list) before)))))
 
-(ert-deftest gptel-yatools-test-timeout-install-is-idempotent ()
-  "Installing the timeout twice must not duplicate the argument.
+(ert-deftest gptel-yatools-test-timeout-arg-is-added-once ()
+  "A registered tool must carry exactly one TIMEOUT argument.
 
-`gptel--make-tool' is used instead of `gptel-make-tool' because the
-latter also registers the tool in `gptel--known-tools', which the
-suite must not pollute."
-  (let ((tool (gptel--make-tool
-               :name "probe_tool"
-               :description "Probe."
-               :function (lambda (x) x)
-               :args (list (list :name "x" :type 'string :description "x")))))
-    (gptel-yatools--install-timeout tool)
-    (gptel-yatools--install-timeout tool)
-    (should (= 1 (cl-count-if (lambda (arg)
-                                (equal (plist-get arg :name) "timeout"))
-                              (gptel-tool-args tool))))
-    ;; The guard must still pass the real arguments through.
-    (should (equal (funcall (gptel-tool-function tool) "value" 5) "value"))))
+`gptel--make-tool' plus `gptel-yatools--register-tool' is used instead of
+the macro so a probe tool can be registered and then removed again
+without leaving it in gptel's registry for the rest of the run."
+  (let ((gptel-yatools--tools nil))
+    (unwind-protect
+        (let ((tool (gptel-yatools--register-tool
+                     :name "probe_tool"
+                     :category "probe"
+                     :description "Probe."
+                     :function (lambda (x) x)
+                     :args (list (list :name "x" :type 'string :description "x")))))
+          (should (= 1 (cl-count-if (lambda (arg)
+                                      (equal (plist-get arg :name) "timeout"))
+                                    (gptel-tool-args tool))))
+          (should (equal gptel-yatools--tools (list tool))))
+      (setf (alist-get "probe" gptel--known-tools nil nil #'equal) nil))))
 
 (ert-deftest gptel-yatools-test-timeout-arg-tracks-the-setting ()
   "Changing the timeout must update what the model is told, without reloading.
@@ -495,39 +497,35 @@ user takes; a plain `setq' deliberately does not go through it."
                :name "probe_tool"
                :description "Probe."
                :function (lambda (x) x)
-               :args (list (list :name "x" :type 'string :description "x"))))
+               :args (list (list :name "x" :type 'string :description "x")
+                           (gptel-yatools--timeout-arg))))
         (original gptel-yatools-timeout))
     (unwind-protect
-        (progn
-          (gptel-yatools--install-timeout tool)
-          (let ((gptel-yatools--tools (list tool)))
-            (customize-set-variable 'gptel-yatools-timeout 30)
-            (should (string-match-p
-                     "default (30 seconds)"
-                     (plist-get (car (last (gptel-tool-args tool)))
-                                :description))))
-          ;; The description itself must not grow a second copy.
-          (should-not (string-match-p "Timeouts: "
-                                      (gptel-tool-description tool))))
+        (let ((gptel-yatools--tools (list tool)))
+          (customize-set-variable 'gptel-yatools-timeout 30)
+          (should (string-match-p
+                   "default (30 seconds)"
+                   (plist-get (car (last (gptel-tool-args tool)))
+                              :description))))
       (customize-set-variable 'gptel-yatools-timeout original))))
 
-(ert-deftest gptel-yatools-test-timeout-skips-async-tools ()
-  "An asynchronous tool must be left exactly as it was.
+(ert-deftest gptel-yatools-test-registering-an-async-tool-is-refused ()
+  "An asynchronous tool cannot cross the boundary, so registering one must fail.
 
-Its result arrives long after the call returns, so wrapping it in a
-deadline would only mislabel it as timed out while it still runs."
-  (let* ((function (lambda (callback x) (funcall callback x)))
-         (tool (gptel--make-tool
-                :name "async_probe_tool"
-                :async t
-                :description "Probe."
-                :function function
-                :args (list (list :name "x" :type 'string :description "x")))))
-    (gptel-yatools--install-timeout tool)
-    (should (eq (gptel-tool-function tool) function))
-    (should (equal (mapcar (lambda (arg) (plist-get arg :name))
-                           (gptel-tool-args tool))
-                   '("x")))))
+Its result arrives long after the call returns, so there is no Result for
+the boundary to render -- and a deadline around the call would only
+mislabell it as timed out while it still runs."
+  (gptel-yatools-test--noninteractive
+    (let ((gptel-yatools--tools nil))
+      (unwind-protect
+          (should-error (gptel-yatools--register-tool
+                         :name "probe_async"
+                         :category "probe"
+                         :description "Probe."
+                         :async t
+                         :function (lambda (_callback) nil))
+                        :type 'error)
+        (setf (alist-get "probe" gptel--known-tools nil nil #'equal) nil)))))
 
 
 ;;;; 50. Tool calls must run in the buffer that owns the request
@@ -864,22 +862,86 @@ boundary exists to prevent."
 (ert-deftest gptel-yatools-test-timeout-is-an-envelope-and-a-condition ()
   "An expired deadline must reach the model in the same envelope.
 
-The deadline guard sits inside the response boundary -- the boundary is
-what the registry calls, and the guard is what it calls -- so a timeout
-is a signal the boundary has to render like any other failure."
-  (let* ((probe (gptel-yatools--install-response
-                 (gptel-yatools--install-timeout
-                  (gptel--make-tool
-                   :name "probe_timeout"
-                   :description "Probe."
-                   :function (lambda (&rest _) (sleep-for 5) "done")
-                   :args nil))))
-         (out (funcall (gptel-tool-function probe) 1)))
-    (should (string-match-p "did not finish within its 1 second timeout" out))
-    (gptel-yatools-test--should-be-enveloped out))
+A real tool is used rather than a probe, so the deadline is exercised
+through the same boundary the model's calls go through: the boundary
+renders the timeout like any other failure."
+  (skip-unless (executable-find "sh"))
+  (with-temp-buffer
+    (gptel-yatools-test--vfs
+      ;; Two arguments: the command and its working directory, then the
+      ;; boundary's own TIMEOUT.
+      (let ((out (funcall #'gptel-yatools-execute-command
+                          "sleep 5" nil 1)))
+        (should (string-match-p "1 second timeout" out))
+        (gptel-yatools-test--should-be-enveloped out))))
   (should-error (gptel-yatools--call-with-timeout
                  (lambda () (sleep-for 5)) nil 1)
                 :type 'gptel-yatools-timeout-error))
+
+(ert-deftest gptel-yatools-test-tool-functions-are-named-and-adviseable ()
+  "Both halves of a tool must be named functions, not closures.
+
+An anonymous closure cannot be advised, cannot be found with `C-h f' and
+does not appear by name in a backtrace, which is what a tool's definition
+has to support."
+  (dolist (tool gptel-yatools--tools)
+    (let ((name (gptel-tool-name tool)))
+      (should (fboundp (gptel-tool-function tool)))
+      (should (symbolp (gptel-tool-function tool)))
+      ;; The implementation the boundary calls, derived from the same name.
+      (should (fboundp (intern (format "%s-tool"
+                                       (gptel-tool-function tool)))))))
+  ;; And the boundary is what gptel is registered with.
+  (should (eq (gptel-tool-function (cl-find "read_path" gptel-yatools--tools
+                                            :key #'gptel-tool-name :test #'equal))
+              #'gptel-yatools-read-path)))
+
+(ert-deftest gptel-yatools-test-advice-survives-a-reload ()
+  "Advice on a tool function must survive reloading its module.
+
+Advice attaches to the symbol, so it outlives the `defun' that a reload
+re-evaluates; a closure built at load time would silently lose it."
+  ;; `let*' so the advice closes over CALLS: in a plain `let' its
+  ;; initialiser is evaluated before the binding exists, and the counter
+  ;; becomes a free variable.
+  (let* ((calls 0)
+         (advice (lambda (fn &rest args)
+                   (setq calls (1+ calls))
+                   (apply fn args))))
+    (advice-add 'gptel-yatools-read-workspace-root-tool :around advice)
+    (unwind-protect
+        (progn
+          (gptel-yatools-test--in-dir
+            (should (stringp (gptel-yatools-read-workspace-root)))
+            (should (= calls 1))
+            ;; Reload the module that defines it: the advice is still there.
+            (load (expand-file-name "gptel-yatools-shell.el"
+                                    (file-name-directory gptel-yatools-test--file))
+                  nil t)
+            (should (stringp (gptel-yatools-read-workspace-root)))
+            (should (= calls 2))))
+      (advice-remove 'gptel-yatools-read-workspace-root-tool advice))))
+
+(ert-deftest gptel-yatools-test-tool-docstrings-show-the-model-text ()
+  "`C-h f' on a tool must show the description the model is given.
+
+The docstring is generated from the definition, so it cannot drift from
+what the model reads, and it is the same words rather than a summary of
+them."
+  (dolist (tool gptel-yatools--tools)
+    (let* ((symbol (gptel-tool-function tool))
+           (doc (documentation symbol))
+           (description (gptel-tool-description tool)))
+      (should (stringp doc))
+      ;; Whole description present, modulo the whitespace filling adds.
+      (should (string-match-p
+               (regexp-quote (car (split-string description "[.]")))
+               (replace-regexp-in-string "[ \t\n]+" " " doc)))
+      ;; Every argument is documented, including the deadline.
+      (dolist (arg (gptel-tool-args tool))
+        (should (string-match-p (regexp-quote (plist-get arg :name)) doc)))
+      ;; And it points at the macro that wrote it.
+      (should (string-match-p "gptel-yatools-define-tool" doc)))))
 
 (ert-deftest gptel-yatools-test-an-error-is-not-prefixed-twice ()
   "A tool that writes \"Error: ...\" must not reach the model as \"Error: Error: ...\"."
@@ -892,16 +954,6 @@ is a signal the boundary has to render like any other failure."
   (let ((out (gptel-yatools--call-tool
               "probe" (lambda (&rest _) (error "Wrong type argument: listp, 5")) nil)))
     (should (string-match-p "Error: Wrong type argument: listp, 5" out))))
-
-(ert-deftest gptel-yatools-test-asynchronous-tools-are-refused ()
-  "An asynchronous tool cannot cross the boundary, so building one must fail."
-  (gptel-yatools-test--noninteractive
-    (should-error (gptel-yatools--make-tool
-                   :name "probe_async"
-                   :description "Probe."
-                   :async t
-                   :function (lambda (_callback) nil))
-                  :type 'error)))
 
 (ert-deftest gptel-yatools-test-page-text-stops-at-the-size-budget ()
   "A page must fit the response budget, and say what it showed."

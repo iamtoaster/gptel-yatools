@@ -43,25 +43,13 @@
 (require 'gptel)
 (require 'subr-x)
 (require 'yaml)
+(require 'gptel-yatools-common)
+(require 'gptel-yatools-vfs)
 
-;; `gptel-yatools.el' requires this file, so requiring it back would be a
-;; cycle.  These declarations tell the byte compiler what the helpers are;
-;; at runtime they are already defined, because the tool is only built once
-;; the rest of the package has been loaded.
-(declare-function gptel-yatools--make-tool "gptel-yatools" (&rest slots))
-(declare-function gptel-yatools--workspace-root "gptel-yatools" ())
-(declare-function gptel-yatools-vfs-read "gptel-yatools-vfs" (path))
-(declare-function gptel-yatools-vfs-pending-p "gptel-yatools-vfs" (path))
-(declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
-(declare-function gptel-yatools--require-string "gptel-yatools" (value what))
-(declare-function gptel-yatools--binary-p "gptel-yatools" (string))
-(declare-function gptel-yatools--binary-notice "gptel-yatools" (path content from-vfs))
+;; The tool is defined here with `gptel-yatools-define-tool', which needs
+;; `gptel-yatools-common' at compile time; the VFS is where a skill whose
+;; `SKILL.md' is still a pending change is read from.
 (defvar gptel-context)
-;; Declared with a value as well as its definition in `gptel-yatools.el':
-;; this file is loaded both after that one and, at compile time, on its own,
-;; and `add-to-list' below needs the variable to be bound either way.
-(defvar gptel-yatools-header-line-extra-functions nil
-  "See `gptel-yatools.el'.")
 
 (defcustom gptel-yatools-skill-directories
   (list ".agents/skills"
@@ -722,8 +710,27 @@ a truename."
 ;;-------------------------------------------------------------------------
 ;; The tool
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools-skills--run (&optional name file)
-  "Implement the `skill' tool: index, load one skill, or read one of its files."
+(gptel-yatools-define-tool gptel-yatools-skill
+  :name "skill"
+  :category "skills"
+  :description
+  "List, load and read Agent Skills: directories that package instructions, scripts and reference files for one kind of task.
+
+Call it with no arguments for the skill index: one line per installed skill, with its name and a description of what it does and when to use it. The index is cheap, so consult it whenever a task might already have a skill; load only the skills whose description actually matches.
+
+Call it again with the matching `name' to load that skill. You then get its full instructions, the list of files it ships with, and its absolute directory. The instructions are authoritative: follow them rather than improvising. Run any script it lists from that directory, for example with execute_command and the absolute path as its `directory' argument.
+
+Skills may be grouped into subdirectories, so the same name can exist in more than one group; the index then shows such a skill by its path relative to the skill directory (e.g. \"engineering/code-review\"), and calling it by that path always works.
+
+Use `file' together with `name' to read one of the files the skill lists, such as \"references/REFERENCE.md\" or \"scripts/extract.py\". The path is relative to the skill directory and may not point outside it."
+  :args '((:name "name"
+                 :type string
+                 :description "Name of the skill to load, exactly as the index lists it: either a bare skill name or a path relative to the skill directory when the index shows one. Omit it to list the available skills."
+                 :optional t)
+          (:name "file"
+                 :type string
+                 :description "Optional file inside the named skill, relative to the skill directory, e.g. \"references/REFERENCE.md\". Requires `name'."
+                 :optional t))
   (when name (gptel-yatools--require-string name "name"))
   (when file (gptel-yatools--require-string file "file"))
   (let* ((present (and (stringp name) (not (string-empty-p (string-trim name)))))
@@ -753,36 +760,6 @@ a truename."
       (gptel-yatools-skills--file-result (plist-get resolved :skill) file))
      (t
       (gptel-yatools-skills--skill-result (plist-get resolved :skill))))))
-
-(defun gptel-yatools-skills--tool ()
-  "Return the `skill' tool.
-
-A function rather than a variable so that `gptel-yatools.el' can build
-it inside its own tool list: reloading that file re-evaluates the list
-from scratch, and a tool this file pushed onto it as a side effect would
-not come back."
-  (gptel-yatools--make-tool
-   :name "skill"
-   :function #'gptel-yatools-skills--run
-   :description
-   "List, load and read Agent Skills: directories that package instructions, scripts and reference files for one kind of task.
-
-Call it with no arguments for the skill index: one line per installed skill, with its name and a description of what it does and when to use it. The index is cheap, so consult it whenever a task might already have a skill; load only the skills whose description actually matches.
-
-Call it again with the matching `name' to load that skill. You then get its full instructions, the list of files it ships with, and its absolute directory. The instructions are authoritative: follow them rather than improvising. Run any script it lists from that directory, for example with execute_command and the absolute path as its `directory' argument.
-
-Skills may be grouped into subdirectories, so the same name can exist in more than one group; the index then shows such a skill by its path relative to the skill directory (e.g. \"engineering/code-review\"), and calling it by that path always works.
-
-Use `file' together with `name' to read one of the files the skill lists, such as \"references/REFERENCE.md\" or \"scripts/extract.py\". The path is relative to the skill directory and may not point outside it."
-   :args (list '(:name "name"
-                       :type string
-                       :description "Name of the skill to load, exactly as the index lists it: either a bare skill name or a path relative to the skill directory when the index shows one. Omit it to list the available skills."
-                       :optional t)
-               '(:name "file"
-                       :type string
-                       :description "Optional file inside the named skill, relative to the skill directory, e.g. \"references/REFERENCE.md\". Requires `name'."
-                       :optional t))
-   :category "skills"))
 
 ;;-------------------------------------------------------------------------
 ;; Sending a skill by hand

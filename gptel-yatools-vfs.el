@@ -744,8 +744,15 @@ encoding rules and the baseline bookkeeping are the same as a write.
 OLD must occur exactly once; otherwise nothing is changed and an error
 says why.
 
-The value is that of `gptel-yatools-vfs-write', with :changed nil when
-the edit leaves the content as it was."
+OLD and NEW must be strings.  The write interface owns the write rules,
+so the check is made here and not only at the tool's edge: `insert'
+accepts a character, and a JSON number reaching it would replace the
+match with that character, while nil is not a way to spell \"delete\" --
+\"\" is."
+  (unless (stringp old)
+    (error "Error: old_string must be a string."))
+  (unless (stringp new)
+    (error "Error: new_string must be a string. Use \"\" to delete the matched text."))
   (when (string-empty-p old)
     (error "Error: old_string must not be empty."))
   (let* ((read (gptel-yatools-vfs-read path))
@@ -1558,6 +1565,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "Optional Emacs coding system to write the file with on sync, e.g. \"utf-8\". Use this to convert the file to another encoding when the edit needs characters the current encoding cannot represent."
                  :optional t))
   (gptel-yatools--require-string path "path")
+  (gptel-yatools--require-string old_string "old_string")
+  (gptel-yatools--require-string new_string "new_string")
   (let* ((edited (gptel-yatools-vfs-edit (gptel-yatools--resolve-path path)
                                          old_string new_string overwrite coding))
          (full (plist-get edited :full)))

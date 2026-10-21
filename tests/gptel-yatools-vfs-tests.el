@@ -1375,6 +1375,44 @@ tool's promise of an exact match was false."
           (gptel-yatools-vfs-edit file "Hello" "bye")
           (should (equal (gptel-yatools-vfs-get file) "bye world\n")))))))
 
+(ert-deftest gptel-yatools-test-vfs-edit-rejects-non-string-arguments ()
+  "A wrong-typed old/new string must be refused, never reinterpreted.
+
+`insert' accepts a character, so `new_string' 65 silently replaced the
+match with \"A\", and nil signalled a raw `wrong-type-argument'.  The VFS
+write interface owns the rule, so it is enforced there as well as at the
+tool's edge; nil is not a way to spell \"delete\"."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "typed.txt")))
+      (gptel-yatools-test--write file "alpha beta\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (dolist (case '((nil "x") (65 "x") ("alpha" nil) ("alpha" 65)
+                          (65 nil)))
+            (let ((err (should-error (apply #'gptel-yatools-vfs-edit file case)
+                                     :type 'error)))
+              (should (string-match-p "must be a string"
+                                      (error-message-string err)))))
+          (should-not (gptel-yatools-vfs-get file))
+          ;; "" is the one spelling of delete.
+          (gptel-yatools-vfs-edit file "beta" "")
+          (should (equal (gptel-yatools-vfs-get file) "alpha \n")))))))
+
+(ert-deftest gptel-yatools-test-write-file-diff-names-a-wrong-typed-argument ()
+  "The model must read which argument was wrong, not a Lisp condition."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "typed-tool.txt")))
+      (gptel-yatools-test--write file "alpha\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (let ((out (funcall (gptel-yatools-test--tool "write_file_diff")
+                              file "alpha" 65)))
+            (should (string-match-p "new_string must be a string" out))
+            (should-not (string-match-p "Wrong type argument" out))
+            (gptel-yatools-test--should-be-enveloped out))
+          (should-not (gptel-yatools-vfs-get file))
+          (should (equal (gptel-yatools-vfs--disk-content file) "alpha\n")))))))
+
 (ert-deftest gptel-yatools-test-vfs-discard-reports-what-it-dropped ()
   "Discarding must name what it discarded, and say when there was nothing."
   (gptel-yatools-test--in-dir

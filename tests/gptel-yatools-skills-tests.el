@@ -576,7 +576,42 @@ library stays loaded."
           (let ((kill-buffer-query-functions nil))
             (kill-buffer "*gptel skills*")))))))
 
-;;;; 6. Sending a skill by hand
+(ert-deftest gptel-yatools-skills-test-malformed-description-does-not-crash ()
+  "A description that is not a string must not break the views that show it.
+
+`description: [one, two]' is a YAML list: validation correctly marks the
+skill invalid, but the browser is where an invalid skill is meant to be
+seen.  `tabulated-list-print' signalled `wrong-type-argument listp' and
+the completion annotation signalled `wrong-type-argument stringp'."
+  (gptel-yatools-test--in-dir
+    (let ((root (gptel-yatools-test--root-file "skills")))
+      (gptel-yatools-skills-test--skill
+       root "listy" "name: listy\ndescription: [one, two]\n")
+      (gptel-yatools-skills-test--indexed root
+        (let* ((found (gptel-yatools-skills--discover))
+               (skill (car (plist-get found :skills)))
+               (candidates (gptel-yatools-skills--candidates
+                            (plist-get found :skills))))
+          ;; The field is malformed, and validation says so.
+          (should (plist-get skill :problems))
+          ;; Every rendering of it survives.
+          (should (stringp (gptel-yatools-skills--payload skill)))
+          (should (stringp (gptel-yatools-skills--index-line skill)))
+          (let* ((table (gptel-yatools-skills--completion-table candidates))
+                 (annotate (cdr (assq 'annotation-function
+                                      (funcall table "" nil 'metadata)))))
+            (should (stringp (or (funcall annotate (caar candidates)) ""))))))
+      ;; And the browser prints the invalid skill instead of erroring.
+      (gptel-yatools-skills-test--indexed root
+        (gptel-yatools-skills)
+        (unwind-protect
+            (with-current-buffer "*gptel skills*"
+              (should (string-match-p "listy" (buffer-string)))
+              (should (string-match-p "invalid" (buffer-string))))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer "*gptel skills*")))))))
+
+;;; 6. Sending a skill by hand
 
 (ert-deftest gptel-yatools-skills-test-payload-matches-what-the-tool-returns ()
   "The manual payload must be what the tool would have returned."

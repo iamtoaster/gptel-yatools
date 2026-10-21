@@ -207,6 +207,18 @@ signals on anything but a list."
   (when (and (listp frontmatter) (cl-every #'consp frontmatter))
     (alist-get key frontmatter nil nil #'equal)))
 
+(defun gptel-yatools-skills--description-string (skill)
+  "Return SKILL's description when it is a string, or nil.
+
+Frontmatter comes from YAML, so `description' can be a list, a number or
+a table -- validation marks such a skill invalid, but the browser exists
+to *show* invalid skills, and every view of one has to survive the field
+it was given.  Returning the value only when it is text is what makes
+that possible: a view can render nil, not a list, where a string belongs."
+  (let ((value (gptel-yatools-skills--field (plist-get skill :frontmatter)
+                                            "description")))
+    (and (stringp value) value)))
+
 (defun gptel-yatools-skills--validate (frontmatter dirname)
   "Return a plist of :problems and :warnings for FRONTMATTER in DIRNAME.
 
@@ -657,12 +669,11 @@ crowding every other one out of the list.")
 The line is headed by the skill's handle, which is its path rather than
 its bare name when the name is not unique -- the only heading that
 identifies one skill on its own."
-  (let ((description (gptel-yatools-skills--field (plist-get skill :frontmatter)
-                                                  "description"))
+  (let ((description (gptel-yatools-skills--description-string skill))
         (problems (plist-get skill :problems)))
     (concat (gptel-yatools-skills-handle skill)
             " — "
-            (if (and (stringp description)
+            (if (and description
                      (not (string-empty-p (string-trim description))))
                 (let ((text (string-trim description)))
                   (if (> (length text) gptel-yatools-skills--index-description-limit)
@@ -754,13 +765,17 @@ cannot drift apart."
   (let* ((frontmatter (plist-get skill :frontmatter))
          (body (or (plist-get skill :body) ""))
          (header (list (format "Skill: %s" (plist-get skill :name)))))
-    (dolist (field '(("description" . "Description")
-                     ("license" . "License")
-                     ("compatibility" . "Compatibility")
-                     ("allowed-tools" . "Allowed tools")))
-      (let ((value (gptel-yatools-skills--field frontmatter (car field))))
+    (dolist (pair (list (cons "Description"
+                              (gptel-yatools-skills--description-string skill))
+                        (cons "License"
+                              (gptel-yatools-skills--field frontmatter "license"))
+                        (cons "Compatibility"
+                              (gptel-yatools-skills--field frontmatter "compatibility"))
+                        (cons "Allowed tools"
+                              (gptel-yatools-skills--field frontmatter "allowed-tools"))))
+      (let ((value (cdr pair)))
         (when (and (stringp value) (not (string-empty-p (string-trim value))))
-          (setq header (append header (list (format "%s: %s" (cdr field) value)))))))
+          (setq header (append header (list (format "%s: %s" (car pair) value)))))))
     (setq header (append header
                          (gptel-yatools-skills--metadata-lines frontmatter)
                          (list (format "Directory: %s"
@@ -1038,8 +1053,7 @@ the list is allowed: the caller resolves it the way the tool does."
            . ,(lambda (candidate)
                 (when-let* ((skill (cdr (assoc candidate candidates)))
                             (description
-                             (gptel-yatools-skills--field
-                              (plist-get skill :frontmatter) "description")))
+                             (gptel-yatools-skills--description-string skill)))
                   (concat "  " (truncate-string-to-width
                                 description 80 nil nil t))))))
       (complete-with-action action (mapcar #'car candidates) string predicate))))
@@ -1161,9 +1175,8 @@ Each skill is listed with its validation status; RET visits its
                     (list skill
                           (vector (gptel-yatools-skills-handle skill)
                                   (gptel-yatools-skills--status skill)
-                                  (or (gptel-yatools-skills--field
-                                       (plist-get skill :frontmatter)
-                                       "description")
+                                  (or (gptel-yatools-skills--description-string
+                                       skill)
                                       "")
                                   (directory-file-name
                                    (plist-get skill :directory)))))

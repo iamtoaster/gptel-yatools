@@ -81,6 +81,15 @@ at the tool boundary, so a tool never describes its own provenance in
 prose and cannot forget to.
 _Avoid_: VFS flag, dirty flag, source
 
+**Header-line label**:
+The text a module contributes to gptel's right-hand indicator group: the
+pending VFS count, the attached-skill count.  A module returns a string
+from a function in `gptel-yatools-header-line-extra-functions` and never
+touches `header-line-format`; the drawer in `gptel-yatools.el` renders
+whatever the registry holds, because the alignment arithmetic is gptel's
+own and belongs with the rest of the gptel adaptation.
+_Avoid_: Header-line segment, indicator
+
 **Tool function**:
 The implementation half of a tool, named `gptel-yatools-<name>-tool`.  It
 takes the tool's own arguments, including their optional ones, and returns

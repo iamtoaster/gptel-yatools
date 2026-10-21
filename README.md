@@ -106,10 +106,18 @@ the model still has to call `file_sync`.
 
 The virtual filesystem is buffer-local, so two chats never see each other's
 pending writes, and a request's tools run in the buffer that owns it rather
-than in whichever buffer happens to be current.  Conflicts — a file that
-changed on disk after it was read, a pending write to a file that is now
-unreadable, a coding system the text cannot be represented in — are reported
-instead of silently resolved.
+than in whichever buffer happens to be current.  A relative path means the
+same file in every tool: it is resolved against the workspace root once, at
+the tool's edge, so a write and the read that follows it cannot disagree.
+
+Every reply says where it came from.  A read of a pending copy, a diff, a
+directory listing that merges disk with VFS-only entries — each carries that
+fact to the model, and a merged listing marks the rows that are not on disk
+yet.  Conflicts — a file that changed on disk after it was read, a target
+that has become a FIFO, a pending write to a file whose parent is now a
+regular file, a coding system the text cannot be represented in — are
+reported instead of silently resolved, and are decided by one function, so
+the files the review offers to sync are exactly the files the sync writes.
 
 The review UI is `gptel-yatools-write-diff-mode`, a minor mode with
 <kbd>C-c C-c</kbd> / <kbd>C-c C-k</kbd> bound to accept and reject, active in
@@ -186,7 +194,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-156 ERT tests, no network, no prompts, every one of them in a throwaway temp
+169 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

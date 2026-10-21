@@ -796,13 +796,27 @@ An asynchronous tool is refused rather than accepted and quietly left
 outside the boundary: gptel calls such a tool with a callback and the
 tool returns before its work is done, so there is no Result for the
 boundary to render.  This package defines none, and a tool that needs to
-be asynchronous needs a different interface, not an exception."
+be asynchronous needs a different interface, not an exception.
+
+The refusal happens before `gptel-make-tool', because that call is what
+registers the tool in `gptel--known-tools': a tool refused afterwards
+would stay visible to the model, callable, and unable to return a
+Result.  The check is repeated once the tool exists as a safety net, and
+that path unregisters it again if it ever fires."
+  (when (plist-get slots :async)
+    (error "gptel-yatools: %s cannot be asynchronous: an asynchronous tool returns before its work is done, so its response cannot be rendered at the tool boundary"
+           (plist-get slots :name)))
   (let* ((slots (plist-put slots :args
                            (append (plist-get slots :args)
                                    (list (gptel-yatools--timeout-arg)))))
          (tool (apply #'gptel-make-tool slots))
          (name (gptel-tool-name tool)))
     (when (gptel-tool-async tool)
+      (setf (alist-get name
+                       (alist-get (or (gptel-tool-category tool) "misc")
+                                  gptel--known-tools nil nil #'equal)
+                       nil nil #'equal)
+            nil)
       (error "gptel-yatools: %s cannot be asynchronous: an asynchronous tool returns before its work is done, so its response cannot be rendered at the tool boundary"
              name))
     (let ((existing (cl-position name gptel-yatools--tools

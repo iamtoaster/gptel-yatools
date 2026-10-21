@@ -609,13 +609,21 @@ mislabell it as timed out while it still runs."
   (gptel-yatools-test--noninteractive
     (let ((gptel-yatools--tools nil))
       (unwind-protect
-          (should-error (gptel-yatools--register-tool
-                         :name "probe_async"
-                         :category "probe"
-                         :description "Probe."
-                         :async t
-                         :function (lambda (_callback) nil))
-                        :type 'error)
+          (progn
+            (should-error (gptel-yatools--register-tool
+                           :name "probe_async"
+                           :category "probe"
+                           :description "Probe."
+                           :async t
+                           :function (lambda (_callback) nil))
+                          :type 'error)
+            ;; The refusal must happen before the tool reaches gptel's
+            ;; registry; otherwise the model can still call a tool that
+            ;; cannot return a Result.
+            (should-not (alist-get "probe_async"
+                                   (alist-get "probe" gptel--known-tools
+                                              nil nil #'equal)
+                                   nil nil #'equal)))
         (setf (alist-get "probe" gptel--known-tools nil nil #'equal) nil)))))
 
 

@@ -941,51 +941,44 @@ NOT be synced (conflicts, blocked files).  They are listed in the
 review buffer so the user sees the full picture instead of approving
 a change set that is not the one that will be applied.
 
-Return non-nil if the user accepted, nil otherwise.
+Return non-nil if the user accepted, nil otherwise.  This is the
+interactive adapter for the review; whether a review happens at all is
+`gptel-yatools-vfs-sync''s decision, not this function's.
 
 The caller's window layout and current buffer are restored afterwards:
 the caller keeps using buffer-local state (its VFS, its
 `default-directory') and the review buffer is killed, so leaving the
 user -- and the tool -- in whatever buffer replaced it in a window
-would be a correctness problem, not just a cosmetic one.
-
-In a non-interactive Emacs (`noninteractive', e.g. batch or
-org-babel) `recursive-edit' would block forever, so the review is
-refused instead of hanging: nothing is ever written without the
-user actually seeing the diff."
-  (if noninteractive
-      (progn
-        (message "gptel: cannot show the sync review in a non-interactive Emacs; nothing synced.")
-        nil)
-    (let ((diff-buf (gptel-yatools-vfs--build-sync-diff-buffer paths skipped))
-          (decision nil))
-      (unwind-protect
-          ;; `save-window-excursion' puts the caller's window layout and
-          ;; current buffer back when the review ends.  Without it, killing
-          ;; the review buffer leaves its window showing whatever buffer
-          ;; Emacs falls back to -- not necessarily the one the tool was
-          ;; called from, whose buffer-local VFS the caller is about to use.
-          ;; Only the window layout is restored, so the user can still
-          ;; scroll, fold and inspect the diff freely while it is shown.
-          (save-window-excursion
-            (pop-to-buffer diff-buf '((display-buffer-same-window)))
-            (message "Review VFS sync.  C-c C-c accept, C-c C-k reject.%s"
-                     (if skipped
-                         (format "  WARNING: %d file(s) will NOT be synced."
-                                 (length skipped))
-                       ""))
-            ;; The user may study the diff for minutes; that time must not
-            ;; count against the tool timeout.
-            (let ((gptel-yatools--timeout-suspended t))
-              (condition-case nil
-                  (recursive-edit)
-                (quit nil)))
-            (setq decision
-                  (and (buffer-live-p diff-buf)
-                       (buffer-local-value 'gptel-yatools-write-diff--decision
-                                           diff-buf))))
-        (when (buffer-live-p diff-buf) (kill-buffer diff-buf)))
-      (eq decision 'accept))))
+would be a correctness problem, not just a cosmetic one."
+  (let ((diff-buf (gptel-yatools-vfs--build-sync-diff-buffer paths skipped))
+        (decision nil))
+    (unwind-protect
+        ;; `save-window-excursion' puts the caller's window layout and
+        ;; current buffer back when the review ends.  Without it, killing
+        ;; the review buffer leaves its window showing whatever buffer
+        ;; Emacs falls back to -- not necessarily the one the tool was
+        ;; called from, whose buffer-local VFS the caller is about to use.
+        ;; Only the window layout is restored, so the user can still
+        ;; scroll, fold and inspect the diff freely while it is shown.
+        (save-window-excursion
+          (pop-to-buffer diff-buf '((display-buffer-same-window)))
+          (message "Review VFS sync.  C-c C-c accept, C-c C-k reject.%s"
+                   (if skipped
+                       (format "  WARNING: %d file(s) will NOT be synced."
+                               (length skipped))
+                     ""))
+          ;; The user may study the diff for minutes; that time must not
+          ;; count against the tool timeout.
+          (let ((gptel-yatools--timeout-suspended t))
+            (condition-case nil
+                (recursive-edit)
+              (quit nil)))
+          (setq decision
+                (and (buffer-live-p diff-buf)
+                     (buffer-local-value 'gptel-yatools-write-diff--decision
+                                         diff-buf))))
+      (when (buffer-live-p diff-buf) (kill-buffer diff-buf)))
+    (eq decision 'accept)))
 
 (defun gptel-yatools-vfs--encodable-p (string coding)
   "Return non-nil if STRING survives a round trip through CODING.
@@ -1067,6 +1060,270 @@ Returns (STATUS MESSAGE) where STATUS is `:ok' or `:failed'."
                   (list :ok "synced"))
               (error (list :failed (error-message-string err))))))))))))
 
+;;-------------------------------------------------------------------------
+;; The sync operation
+;;
+;; What a sync does, as opposed to how it reads to the model or how the
+;; review looks to a human: partition the pending files, ask for approval,
+;; write the ones that can be written, and report what happened to the rest.
+;; Both callers are adapters over this -- `file_sync' renders the outcome as
+;; a tool response, and the review buffer renders it as a diff -- which is
+;; why nothing here formats a sentence for the model.
+;;
+;; The partition is computed once, before anything is written, so the diff
+;; the user approves is the change set that is applied.  `--sync-one' still
+;; re-checks each file immediately before writing it: the review runs inside
+;; `recursive-edit', and a file can change while someone reads a diff.
+;;-------------------------------------------------------------------------
+(defcustom gptel-yatools-sync-without-review nil
+  "If non-nil, `file_sync' writes without showing a diff for review.
+
+For unattended use -- a script, org-babel, a batch Emacs -- where nobody is
+present to press a key.  The files are still checked: a file that changed
+on disk since the VFS captured it, one whose visiting buffer has unsaved
+changes, and content the file's encoding cannot represent are all refused
+and reported exactly as they are when a review is shown.  This waives the
+review, not the checks.
+
+It does not make writes automatic: the model still has to call `file_sync'.
+Nothing is written because `write_file' was called.
+
+The model is never told about this option and no tool description mentions
+it, so switching it on cannot change what the model does; it only changes
+what you are asked."
+  :type 'boolean
+  :group 'gptel-yatools)
+
+(defun gptel-yatools-vfs--sync-partition (targets)
+  "Split TARGETS into what can be synced and what cannot.
+
+TARGETS is a list of paths with pending changes.  Returns a plist of
+:conflicts (changed on disk since the VFS captured them), :blocked
+\(alist of PATH . REASON for files that cannot be written right now) and
+:syncable (the rest, in their original order).
+
+The reason strings are produced here, once, so the diff the user reviews
+and the report the model reads cannot disagree about why a file is being
+skipped."
+  (let* ((conflicts (cl-remove-if-not #'gptel-yatools-vfs--conflict-p targets))
+         (eligible (cl-set-difference targets conflicts :test #'equal))
+         (blocked (delq nil (mapcar (lambda (file)
+                                      (let ((why (gptel-yatools-vfs--sync-blocker file)))
+                                        (and why (cons file why))))
+                                    eligible))))
+    (list :conflicts conflicts
+          :blocked blocked
+          :syncable (cl-set-difference eligible (mapcar #'car blocked)
+                                       :test #'equal))))
+
+(defun gptel-yatools-vfs--sync-approve (syncable skipped review)
+  "Return `:approved', `:rejected' or `:noninteractive' for SYNCABLE.
+
+SKIPPED is shown alongside the diff so the user approves the change set
+that will actually be applied.  `gptel-yatools-sync-without-review'
+answers for the user, and does so before anything else.
+
+REVIEW, when non-nil, is the adapter that asks the user; it is
+authoritative, including in a non-interactive Emacs, because a caller
+that passes one is not a user at a keyboard.  Only the *default* review
+needs refusing in batch: `recursive-edit' would block forever there, so
+nothing is written without the option or an explicit adapter."
+  (cond
+   (gptel-yatools-sync-without-review :approved)
+   (review (if (funcall review syncable skipped) :approved :rejected))
+   (noninteractive :noninteractive)
+   ((gptel-yatools-vfs--confirm-sync syncable skipped) :approved)
+   (t :rejected)))
+
+(defun gptel-yatools-vfs--sync-write (syncable)
+  "Write SYNCABLE from the VFS to disk and return (SYNCED . FAILED).
+
+SYNCED is the list of paths written, in order; FAILED is an alist of
+PATH . REASON.  Also tells the user, when anything was left behind: the
+model's reply is not the only reader, and it is the one that may be
+skipped."
+  (let (synced failed)
+    (dolist (file syncable)
+      (pcase-let ((`(,status ,message) (gptel-yatools-vfs--sync-one file)))
+        (pcase status
+          (:ok (push file synced))
+          (:failed (push (cons file message) failed)))))
+    (cons (nreverse synced) (nreverse failed))))
+
+(defun gptel-yatools-vfs-sync (&optional path review)
+  "Sync the VFS to disk, and return what happened as a plist.
+
+PATH, when non-nil, limits the sync to that one file.  REVIEW is the
+adapter that asks the user to approve the change set; when non-nil it is
+authoritative, and when nil the interactive review is used, or the sync is
+refused in a non-interactive Emacs.  Nothing is written without either an
+accepted review or `gptel-yatools-sync-without-review'.
+
+Returns a plist:
+
+  :status     `:nothing' (nothing pending at all), `:no-target' (PATH has
+              no pending change), `:declined' (the review was not
+              approved) or `:done'.
+  :requested  PATH as given, or nil.
+  :reason     for `:declined', either `:noninteractive' or `:user'.
+  :synced     paths written, in order.
+  :conflicts  paths changed on disk since the VFS captured them.
+  :blocked    alist of PATH . REASON for files that cannot be written.
+  :failed     alist of PATH . REASON for files that could not be written.
+
+The vfs-buffer the operation started in is re-entered before anything is
+written: the review shows a buffer of its own, and a killed buffer leaves
+its window showing whatever Emacs falls back to, so a VFS lookup after the
+review could otherwise run against a fresh, empty table and sync nothing."
+  (let* ((vfs-buffer (current-buffer))
+         (all (gptel-yatools-vfs-pending-paths))
+         (targets (if path
+                      (let ((full (gptel-yatools--resolve-path path)))
+                        (and (member full all) (list full)))
+                    all)))
+    (cond
+     ((null all)
+      (list :status :nothing :requested path))
+     ((null targets)
+      (list :status :no-target :requested path))
+     (t
+      (let* ((partition (gptel-yatools-vfs--sync-partition targets))
+             (conflicts (plist-get partition :conflicts))
+             (blocked (plist-get partition :blocked))
+             (syncable (plist-get partition :syncable))
+             (skipped (append blocked
+                              (mapcar (lambda (file)
+                                        (cons file "conflict: changed on disk since the VFS captured it"))
+                                      conflicts)))
+             (approval (and syncable
+                            (gptel-yatools-vfs--sync-approve
+                             syncable skipped review))))
+        (cond
+         ((eq approval :noninteractive)
+          ;; The hint names the option, so it goes to the user and not to
+          ;; the model: `gptel-yatools-sync-without-review' must stay
+          ;; invisible to the model, which cannot set it anyway.
+          (message "gptel: cannot show the sync review in a non-interactive Emacs; nothing synced. Set `gptel-yatools-sync-without-review' to sync unattended.")
+          (list :status :declined :reason :noninteractive :requested path
+                :conflicts conflicts :blocked blocked))
+         ((eq approval :rejected)
+          (list :status :declined :reason :user :requested path
+                :conflicts conflicts :blocked blocked))
+         (t
+          (let* ((written (with-current-buffer vfs-buffer
+                            (gptel-yatools-vfs--sync-write syncable)))
+                 (synced (car written))
+                 (failed (cdr written))
+                 (left (length conflicts))
+                 (not-written (+ (length blocked) (length failed))))
+            (cond
+             ;; Nothing could even be attempted.
+             ((and (null synced) (null failed) (null conflicts) blocked)
+              (message "gptel: nothing synced — %d file(s) blocked."
+                       (length blocked)))
+             ((and (null synced) (null failed) conflicts)
+              (message "gptel: nothing synced — %d file(s) conflict with disk."
+                       left))
+             ((or conflicts failed blocked)
+              (message "gptel: synced %d file(s); %d NOT synced (conflicts: %d, blocked: %d, failed: %d). See the tool result for details."
+                       (length synced) (+ left not-written)
+                       left (length blocked) (length failed))))
+            (list :status :done :requested path
+                  :synced synced :conflicts conflicts
+                  :blocked blocked :failed failed)))))))))
+
+
+;;-------------------------------------------------------------------------
+;; The sync tool's rendering
+;;
+;; `gptel-yatools-vfs-sync' decides what happens; this turns its outcome into
+;; the reply the model reads.  Keeping the two apart is what lets the sync
+;; operation be tested by calling it, instead of by pretending to be a user
+;; looking at a diff.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-vfs--sync-file-list (paths)
+  "Return PATHS as an indented, one-per-line list of display paths."
+  (mapconcat (lambda (file)
+               (format "  %s" (gptel-yatools--display-path file)))
+             paths "\n"))
+
+(defun gptel-yatools-vfs--sync-reason-list (pairs)
+  "Return PAIRS, an alist of PATH . REASON, as an indented list."
+  (mapconcat (lambda (pair)
+               (format "  %s: %s"
+                       (gptel-yatools--display-path (car pair))
+                       (cdr pair)))
+             pairs "\n"))
+
+(defun gptel-yatools-vfs--render-sync (outcome)
+  "Render OUTCOME, from `gptel-yatools-vfs-sync', as a tool result."
+  (let* ((status (plist-get outcome :status))
+         (path (plist-get outcome :requested))
+         (synced (plist-get outcome :synced))
+         (conflicts (plist-get outcome :conflicts))
+         (blocked (plist-get outcome :blocked))
+         (failed (plist-get outcome :failed)))
+    (pcase status
+      (:nothing
+       (gptel-yatools-ok "The virtual filesystem has no pending changes."
+                         :comment "Nothing to sync."))
+      (:no-target
+       (gptel-yatools-ok
+        (format "%s has no pending VFS change."
+                (gptel-yatools--resolve-path path))
+        :comment "Nothing to sync for the requested path."))
+      (:declined
+       (if (eq (plist-get outcome :reason) :noninteractive)
+           (gptel-yatools-ok
+          "This Emacs is running non-interactively (e.g. batch), so the review diff cannot be shown and NOTHING was written to disk. The pending VFS changes are intact; run file_sync from an interactive Emacs session."
+          :vfs t
+          :comment "Sync needs an interactive user; nothing synced.")
+         (gptel-yatools-ok
+          "User rejected the sync. Pending VFS changes are intact; call file_sync again after the user changes their mind."
+          :vfs t
+          :comment "Sync rejected by user. VFS still holds the changes.")))
+      (:done
+       (cond
+        ;; Nothing could even be attempted, for one reason only: say it
+        ;; plainly instead of printing a four-part report with three empty
+        ;; sections.
+        ((and (null synced) (null failed) (null conflicts) blocked)
+         (gptel-yatools-ok
+          (format "These files could not be synced:\n%s\n"
+                  (gptel-yatools-vfs--sync-reason-list blocked))
+          :vfs t
+          :comment "All pending changes are blocked; nothing synced."))
+        ((and (null synced) (null failed) conflicts)
+         (gptel-yatools-ok
+          (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
+                  (gptel-yatools-vfs--sync-file-list conflicts))
+          :vfs t
+          :comment "All pending changes conflict with disk; nothing synced."))
+        (t
+         (let ((has-problems (or conflicts failed blocked)))
+           (gptel-yatools-ok
+            (concat
+             (if synced
+                 (format "Synced %d file(s) to disk:\n%s\n"
+                         (length synced)
+                         (gptel-yatools-vfs--sync-file-list synced))
+               "No files were synced.\n")
+             (when conflicts
+               (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
+                       (length conflicts)
+                       (gptel-yatools-vfs--sync-file-list conflicts)))
+             (when blocked
+               (format "\nBlocked (%d file(s), NOT synced):\n%s\n"
+                       (length blocked)
+                       (gptel-yatools-vfs--sync-reason-list blocked)))
+             (when failed
+               (format "\nFailed (%d file(s), NOT synced):\n%s\n"
+                       (length failed)
+                       (gptel-yatools-vfs--sync-reason-list failed))))
+            :vfs has-problems
+            :comment (if has-problems
+                         "Sync partial: some files were not synced."
+                       "VFS synced to disk.")))))))))
 
 ;;-------------------------------------------------------------------------
 ;; The filesystem tools
@@ -1323,136 +1580,7 @@ guard and the response boundary; `gptel-yatools.el' appends this list to
     (lambda (&optional path)
       (when path
         (gptel-yatools--require-string path "path"))
-      ;; `gptel-yatools-vfs' (and `gptel-yatools-vfs--header-line-cache' and
-      ;; `default-directory', which every display path is relative to)
-      ;; are buffer-local.  The review below shows a diff buffer in a
-      ;; window and kills it afterwards; a killed buffer leaves its
-      ;; window showing whatever buffer Emacs falls back to, which need
-      ;; not be this one.  Anything that then looked up the VFS would go
-      ;; to a *fresh, empty* table -- and report "no VFS entry" for
-      ;; every file that was pending a moment ago, so nothing got
-      ;; synced at all.  Remember the buffer that owns the VFS and
-      ;; re-enter it for the work that happens after the review.
-      (let* ((vfs-buffer (current-buffer))
-             (all (gptel-yatools-vfs-pending-paths))
-             (targets (if path
-                          (let ((full (gptel-yatools--resolve-path path)))
-                            (and (member full all) (list full)))
-                        all))
-             (conflict-paths (cl-remove-if-not #'gptel-yatools-vfs--conflict-p targets))
-             (eligible (cl-set-difference targets conflict-paths :test #'equal))
-             ;; Files that cannot be written right now (unsaved visiting
-             ;; buffer, unrepresentable content).  Computed BEFORE the
-             ;; review buffer so the preview and the write agree.
-             (blocked (delq nil (mapcar (lambda (f)
-                                          (let ((why (gptel-yatools-vfs--sync-blocker f)))
-                                            (and why (cons f why))))
-                                        eligible)))
-             (syncable (cl-set-difference
-                        eligible (mapcar #'car blocked) :test #'equal)))
-        (cond
-         ((null all)
-          (gptel-yatools-ok "The virtual filesystem has no pending changes."
-                            :comment "Nothing to sync."))
-         ((null targets)
-          (gptel-yatools-ok
-           (format "%s has no pending VFS change."
-                   (gptel-yatools--resolve-path path))
-           :comment "Nothing to sync for the requested path."))
-         ((and (null syncable) (null conflict-paths))
-          (message "gptel: nothing synced — %d file(s) blocked." (length blocked))
-          (gptel-yatools-ok
-           (format "These files could not be synced:\n%s\n"
-                   (mapconcat (lambda (pair)
-                                (format "  %s: %s"
-                                        (gptel-yatools--display-path (car pair))
-                                        (cdr pair)))
-                              blocked "\n"))
-           :vfs t
-           :comment "All pending changes are blocked; nothing synced."))
-         ((null syncable)
-          (message "gptel: nothing synced — %d file(s) conflict with disk."
-                   (length conflict-paths))
-          (gptel-yatools-ok
-           (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
-                   (mapconcat (lambda (f)
-                                (format "  %s" (gptel-yatools--display-path f)))
-                              conflict-paths "\n"))
-           :vfs t
-           :comment "All pending changes conflict with disk; nothing synced."))
-         ((not (gptel-yatools-vfs--confirm-sync
-                syncable
-                (append blocked
-                        (mapcar (lambda (f)
-                                  (cons f "conflict: changed on disk since the VFS captured it"))
-                                conflict-paths))))
-          (if noninteractive
-              (gptel-yatools-ok
-               "This Emacs is running non-interactively (e.g. batch), so the review diff cannot be shown and NOTHING was written to disk. The pending VFS changes are intact; run file_sync from an interactive Emacs session."
-               :vfs t
-               :comment "Sync needs an interactive user; nothing synced.")
-            (gptel-yatools-ok
-             "User rejected the sync. Pending VFS changes are intact; call file_sync again after the user changes their mind."
-             :vfs t
-             :comment "Sync rejected by user. VFS still holds the changes.")))
-         (t
-          ;; The review ran in another buffer and may have left it
-          ;; current.  Re-enter the VFS owner before every lookup and
-          ;; write, so the sync cannot silently hit an empty VFS.
-          (with-current-buffer vfs-buffer
-            (let (sync-ok sync-fail)
-              (dolist (file syncable)
-                (pcase-let ((`(,status ,msg) (gptel-yatools-vfs--sync-one file)))
-                  (pcase status
-                    (:ok (push file sync-ok))
-                    (:failed (push (cons file msg) sync-fail)))))
-              ;; Tell the USER, not just the model, whenever anything was
-              ;; left behind: the review buffer is gone by now.
-              (when (or conflict-paths sync-fail blocked)
-                (message "gptel: synced %d file(s); %d NOT synced (conflicts: %d, blocked: %d, failed: %d). See the tool result for details."
-                         (length sync-ok) (+ (length conflict-paths)
-                                             (length blocked) (length sync-fail))
-                         (length conflict-paths) (length blocked)
-                         (length sync-fail)))
-              (let* ((has-problems (or conflict-paths sync-fail blocked))
-                     (comment (if has-problems
-                                  "Sync partial: some files were not synced."
-                                "VFS synced to disk.")))
-                (gptel-yatools-ok
-                 (concat
-                  (if sync-ok
-                      (format "Synced %d file(s) to disk:\n%s\n"
-                              (length sync-ok)
-                              (mapconcat (lambda (f)
-                                           (format "  %s"
-                                                   (gptel-yatools--display-path f)))
-                                         (nreverse sync-ok) "\n"))
-                    "No files were synced.\n")
-                  (when conflict-paths
-                    (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
-                            (length conflict-paths)
-                            (mapconcat (lambda (f)
-                                         (format "  %s"
-                                                 (gptel-yatools--display-path f)))
-                                       conflict-paths "\n")))
-                  (when blocked
-                    (format "\nBlocked (%d file(s), NOT synced):\n%s\n"
-                            (length blocked)
-                            (mapconcat (lambda (pair)
-                                         (format "  %s: %s"
-                                                 (gptel-yatools--display-path (car pair))
-                                                 (cdr pair)))
-                                       blocked "\n")))
-                  (when sync-fail
-                    (format "\nFailed (%d file(s), NOT synced):\n%s\n"
-                            (length sync-fail)
-                            (mapconcat (lambda (pair)
-                                         (format "  %s: %s"
-                                                 (gptel-yatools--display-path (car pair))
-                                                 (cdr pair)))
-                                       (nreverse sync-fail) "\n"))))
-                 :vfs has-problems
-                 :comment comment))))))))
+      (gptel-yatools-vfs--render-sync (gptel-yatools-vfs-sync path)))
     :description
     "Sync the buffer-local virtual filesystem to real files on disk. Shows the user a unified diff for each syncable file and writes only after acceptance. Files whose disk contents have changed since the VFS captured them are NOT synced and are reported as conflicts (see vfs_discard and write_file overwrite=true to resolve). On success, the synced entries are removed from the VFS and subsequent reads come from disk. Pass PATH to sync a single file; omit PATH to sync everything."
     :args (list '(:name "path"

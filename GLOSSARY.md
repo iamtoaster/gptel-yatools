@@ -66,3 +66,17 @@ A file's VFS content when it differs from disk, in text or in encoding.
 Not every VFS entry is one: writing back what the disk already holds
 leaves nothing pending.
 _Avoid_: Dirty file, buffered file
+
+**Review**:
+The step between deciding to sync and writing: the pending changes are
+shown as a diff, and the user accepts or rejects them.  Waived by
+`gptel-yatools-sync-without-review`; the checks that refuse a conflicting
+or unrepresentable file are not part of it and cannot be waived.
+_Avoid_: Confirmation, approval (both also name gptel's own tool prompt)
+
+**Sync outcome**:
+What `gptel-yatools-vfs-sync` returns: a status, plus the files written and
+the files refused with the reason for each.  The tool reply and the review
+buffer are both renderings of it, so neither can describe a sync the other
+did not perform.
+_Avoid_: Sync result, report

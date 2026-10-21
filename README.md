@@ -72,6 +72,22 @@ carries a deadline that aborts it when it expires; `gptel-yatools-timeout`
 Timers only run while Emacs waits for input, so the deadline bounds calls that
 block on I/O, not purely CPU-bound work.
 
+### Syncing unattended
+
+`file_sync` shows you a diff and waits for you to accept it.  In a script, an
+org-babel block or a batch Emacs there is nobody to ask, so it refuses — which
+is why nothing can be written there by default.  To sync without the review:
+
+```elisp
+(setq gptel-yatools-sync-without-review t)
+```
+
+This waives the review, not the checks: a file that changed on disk since the
+VFS captured it, a file whose visiting buffer has unsaved changes, and content
+the file's encoding cannot represent are all still refused and reported.  The
+model is never told about this option, and it does not make writes automatic —
+the model still has to call `file_sync`.
+
 ## Tools
 
 | Tool | Category | Purpose |
@@ -162,7 +178,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-147 ERT tests, no network, no prompts, every one of them in a throwaway temp
+154 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

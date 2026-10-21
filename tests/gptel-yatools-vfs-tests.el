@@ -393,7 +393,11 @@ them as characters and make sync expand each LF into another CRLF."
           (should (equal (gptel-yatools-vfs--disk-content file) "external\n")))))))
 
 (ert-deftest gptel-yatools-test-sync-skips-blocked-but-syncs-the-rest ()
-  "One blocked file must not stop the others, and must be reported."
+  "One blocked file must not stop the others, and must be reported.
+
+The sync runs unattended here (`gptel-yatools-sync-without-review'), which
+is how a batch Emacs syncs at all, and leaves the reply to be checked as
+the model would read it."
   (gptel-yatools-test--in-dir
     (let ((blocked (expand-file-name "b1.txt" default-directory))
           (ok (expand-file-name "ok.txt" default-directory)))
@@ -407,13 +411,11 @@ them as characters and make sync expand each LF into another CRLF."
             (gptel-yatools-vfs-put blocked "vfs\n")
             (gptel-yatools-vfs-put ok "vfs\n")
             (gptel-yatools-test--silencing-message
-              ;; This test is about partial sync, not the review UI: stub
-              ;; the confirmation so the suite stays non-interactive.
-              (cl-letf (((symbol-function 'gptel-yatools-vfs--confirm-sync)
-                         (lambda (&rest _) t)))
+              (let ((gptel-yatools-sync-without-review t))
                 (let ((out (funcall (gptel-yatools-test--tool "file_sync"))))
                   (should (string-match-p "Synced 1 file" out))
-                  (should (string-match-p "Blocked" out)))))
+                  (should (string-match-p "Blocked" out))
+                  (gptel-yatools-test--should-be-enveloped out))))
             (should (equal (gptel-yatools-vfs--disk-content ok) "vfs\n"))
             (should (equal (gptel-yatools-vfs--disk-content blocked) "orig\n"))))))))
 
@@ -914,7 +916,10 @@ leaves Emacs free to pick another buffer for that window, so the sync
 that followed could run in a buffer whose VFS was a fresh, empty
 table: every file was reported as \"no VFS entry\" and nothing was
 synced, even though the files had been listed as pending a moment
-before."
+before.
+
+The review adapter is passed in through `gptel-yatools-vfs-sync' rather
+than substituted for, which is the seam that exists for exactly this."
   (gptel-yatools-test--in-dir
     (let ((one (expand-file-name "r1.txt" default-directory))
           (two (expand-file-name "r2.txt" default-directory))
@@ -933,16 +938,17 @@ before."
               (gptel-yatools-vfs-put one "vfs\n")
               (gptel-yatools-vfs-put two "vfs\n")
               (gptel-yatools-test--silencing-message
-                (cl-letf (((symbol-function 'gptel-yatools-vfs--confirm-sync)
-                           (lambda (&rest _)
-                             ;; Mimic the review: the diff buffer was shown
-                             ;; and killed, and the window now displays some
-                             ;; other buffer.
-                             (set-buffer elsewhere)
-                             t)))
-                  (let ((out (funcall (gptel-yatools-test--tool "file_sync"))))
-                    (should (string-match-p "Synced 2 file(s)" out))
-                    (should-not (string-match-p "no VFS entry" out)))))
+                (let ((outcome
+                       (gptel-yatools-vfs-sync
+                        nil (lambda (&rest _)
+                              ;; Mimic the review: the diff buffer was shown
+                              ;; and killed, and the window now displays some
+                              ;; other buffer.
+                              (set-buffer elsewhere)
+                              t))))
+                  (should (eq (plist-get outcome :status) :done))
+                  (should (= (length (plist-get outcome :synced)) 2))
+                  (should-not (plist-get outcome :failed))))
               ;; The stray buffer must not have been handed a VFS of its own.
               (should-not (local-variable-p 'gptel-yatools-vfs elsewhere)))
             (should (equal (gptel-yatools-vfs--disk-content one) "vfs\n"))
@@ -955,16 +961,17 @@ before."
 `file_sync' keeps using buffer-local state (`gptel-yatools-vfs',
 `default-directory') after the review, so leaving the user -- and the
 tool -- in the review buffer, or in whatever buffer replaced it, is
-not merely cosmetic."
+not merely cosmetic.
+
+This drives the review adapter itself, because `vfs-sync' treats it as
+interchangeable; the timers below stand in for the keypresses."
   (gptel-yatools-test--in-dir
     (let ((file (expand-file-name "rev.txt" default-directory)))
       (ignore-errors (kill-buffer "*gptel VFS sync diff*"))
       (gptel-yatools-test--with-file file "orig\n"
         (gptel-yatools-vfs-put file "vfs\n")
         (let ((owner (current-buffer))
-              ;; In batch nothing could otherwise be shown, and the review
-              ;; refuses to run.  The acceptance comes from the timer below.
-              (noninteractive nil))
+              (gptel-yatools-sync-without-review nil))
           (run-at-time 0.2 nil
                        (lambda ()
                          (with-current-buffer (get-buffer "*gptel VFS sync diff*")
@@ -972,6 +979,142 @@ not merely cosmetic."
           (should (gptel-yatools-vfs--confirm-sync (list file)))
           (should (eq (current-buffer) owner))
           (should-not (get-buffer "*gptel VFS sync diff*")))))))
+
+
+;;;; The sync operation: one outcome, two adapters
+
+(ert-deftest gptel-yatools-test-vfs-sync-reports-nothing-to-do ()
+  "An empty VFS and an unpending path are distinguishable outcomes."
+  (gptel-yatools-test--in-dir
+    (let ((other (expand-file-name "other.txt" default-directory)))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; Nothing pending at all: the whole VFS is clean, which is a
+          ;; more useful answer than "this path has no pending change".
+          (should (eq (plist-get (gptel-yatools-vfs-sync) :status) :nothing))
+          (should (eq (plist-get (gptel-yatools-vfs-sync "absent.txt") :status)
+                      :nothing))
+          ;; Something pending, but not the requested path.
+          (gptel-yatools-vfs-put other "content\n")
+          (let ((outcome (gptel-yatools-vfs-sync "absent.txt")))
+            (should (eq (plist-get outcome :status) :no-target))
+            (should (equal (plist-get outcome :requested) "absent.txt"))))))))
+
+(ert-deftest gptel-yatools-test-vfs-sync-needs-approval ()
+  "Nothing is written when the review adapter declines."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "a.txt" default-directory)))
+      (gptel-yatools-test--write file "orig\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "vfs\n")
+          (let ((outcome (gptel-yatools-vfs-sync nil (lambda (&rest _) nil))))
+            (should (eq (plist-get outcome :status) :declined))
+            (should (eq (plist-get outcome :reason) :user))
+            (should-not (plist-get outcome :synced)))
+          (should (equal (gptel-yatools-vfs--disk-content file) "orig\n"))
+          ;; The pending change survives the refusal.
+          (should (equal (gptel-yatools-vfs-get file) "vfs\n")))))))
+
+(ert-deftest gptel-yatools-test-vfs-sync-passes-the-skipped-files-to-the-review ()
+  "The review must be shown the files it is not approving, not just the rest.
+
+Approving a change set that silently omits two files is how a user
+agrees to something they were never shown."
+  (gptel-yatools-test--in-dir
+    (let ((good (expand-file-name "good.txt" default-directory))
+          (conflicted (expand-file-name "conflict.txt" default-directory))
+          (seen nil))
+      (gptel-yatools-test--write good "orig\n")
+      (gptel-yatools-test--write conflicted "orig\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put good "vfs\n")
+          (gptel-yatools-vfs-put conflicted "vfs\n")
+          ;; Change the file behind the VFS's back.
+          (gptel-yatools-test--write conflicted "changed on disk\n")
+          (let ((outcome
+                 (gptel-yatools-vfs-sync
+                  nil (lambda (paths skipped)
+                        (setq seen (list paths skipped))
+                        t))))
+            (should (equal (car seen) (list good)))
+            (should (equal (mapcar #'car (cadr seen)) (list conflicted)))
+            (should (eq (plist-get outcome :status) :done))
+            (should (equal (plist-get outcome :synced) (list good)))
+            (should (equal (plist-get outcome :conflicts) (list conflicted))))
+          ;; The conflict is reported, and its disk content is untouched.
+          (should (equal (gptel-yatools-vfs--disk-content conflicted)
+                         "changed on disk\n")))))))
+
+(ert-deftest gptel-yatools-test-sync-without-review-waives-review-not-checks ()
+  "Unattended syncs still refuse conflicts and blocked files."
+  (gptel-yatools-test--in-dir
+    (let ((good (expand-file-name "g.txt" default-directory))
+          (conflicted (expand-file-name "c.txt" default-directory)))
+      (gptel-yatools-test--write good "orig\n")
+      (gptel-yatools-test--write conflicted "orig\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put good "vfs\n")
+          (gptel-yatools-vfs-put conflicted "vfs\n")
+          (gptel-yatools-test--write conflicted "changed\n")
+          (gptel-yatools-test--silencing-message
+            (let ((gptel-yatools-sync-without-review t))
+              ;; No review adapter is passed: the option answers for the user.
+              (let ((outcome (gptel-yatools-vfs-sync)))
+                (should (eq (plist-get outcome :status) :done))
+                (should (equal (plist-get outcome :synced) (list good)))
+                (should (equal (plist-get outcome :conflicts)
+                               (list conflicted))))))
+          (should (equal (gptel-yatools-vfs--disk-content good) "vfs\n"))
+          (should (equal (gptel-yatools-vfs--disk-content conflicted)
+                         "changed\n")))))))
+
+(ert-deftest gptel-yatools-test-sync-without-review-is-off-by-default ()
+  "With the option unset, a non-interactive Emacs must refuse to sync.
+
+That refusal is what keeps a batch run from writing to disk with nobody
+having seen a diff, so it has to survive the option's default."
+  (should-not gptel-yatools-sync-without-review)
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "n.txt" default-directory)))
+      (gptel-yatools-test--write file "orig\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "vfs\n")
+          (gptel-yatools-test--silencing-message
+            (let ((outcome (gptel-yatools-vfs-sync)))
+              (should (eq (plist-get outcome :status) :declined))
+              (should (eq (plist-get outcome :reason)
+                          (if noninteractive :noninteractive :user)))))
+          (should (equal (gptel-yatools-vfs--disk-content file) "orig\n")))))))
+
+(ert-deftest gptel-yatools-test-sync-option-is-not-mentioned-to-the-model ()
+  "No tool interface, and no reply, may mention the unattended-sync option.
+
+The model cannot set it and must not learn that skipping the review is
+possible: a reply that named it would invite the model to ask for it, and
+to report a refusal as a configuration problem.  The hint goes to the
+user, through `message', instead."
+  (dolist (tool gptel-yatools--tools)
+    (let ((text (concat (or (gptel-tool-description tool) "")
+                        (mapconcat (lambda (arg)
+                                     (or (plist-get arg :description) ""))
+                                   (gptel-tool-args tool) " "))))
+      (should-not (string-match-p "sync-without-review" text))
+      (should-not (string-match-p "without.review" text))))
+  ;; The one reply that has a reason to mention it: the batch refusal.
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "m.txt" default-directory)))
+      (gptel-yatools-test--write file "orig\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "vfs\n")
+          (gptel-yatools-test--silencing-message
+            (let ((out (funcall (gptel-yatools-test--tool "file_sync"))))
+              (should (string-match-p "non-interactively" out))
+              (should-not (string-match-p "sync-without-review" out)))))))))
 
 
 ;;;; The VFS write interface: one place that decides what a pending write is

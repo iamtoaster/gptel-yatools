@@ -315,7 +315,7 @@ without reading it first."
                        (gptel-yatools--display-path path)
                        (gptel-yatools--display-path path)
                        (gptel-yatools--display-path path))))
-    (gptel-yatools-ok body :vfs from-vfs
+    (gptel-yatools-ok body :provenance (if from-vfs :vfs :disk)
                       :comment "Binary file; contents withheld.")))
 
 (defun gptel-yatools--hard-cut (string limit)
@@ -420,17 +420,19 @@ nothing about STRING and walks all of it."
                           note))
         escaped))))
 
-(defun gptel-yatools--envelope (from-vfs comment body)
+(defun gptel-yatools--envelope (provenance comment body)
   "Return BODY wrapped in the tool context/response XML envelope.
 
-FROM-VFS is non-nil if the content came from the virtual filesystem.
+PROVENANCE says where BODY came from: `:disk', `:vfs' or `:mixed' (see
+`gptel-yatools--provenances').  It becomes the context tag's `vfs'
+attribute, which is false only for a wholly-on-disk reply.
 COMMENT is a short note shown to the LLM in the context tag.
 
 Both COMMENT and BODY are sanitised with
 `gptel-yatools--escape-raw-bytes' so that a response never carries
 bytes that cannot be serialised for the model."
   (format "<tool_context vfs=\"%s\" comment=\"%s\"/>\n<tool_response>\n%s\n</tool_response>"
-          (if from-vfs "true" "false")
+          (gptel-yatools--provenance-attr provenance)
           (gptel-yatools--xml-escape (gptel-yatools--escape-raw-bytes comment))
           (gptel-yatools--truncate body)))
 
@@ -456,30 +458,58 @@ bytes that cannot be serialised for the model."
 ;;   `gptel-yatools--page-text' is that budget, offered as a helper
 ;;   instead of a constant each tool reads directly.
 ;;-------------------------------------------------------------------------
+;;-------------------------------------------------------------------------
+;; The Result, and where its content came from
+;;
+;; A reply's provenance is one of three things, and the tool functions
+;; were spelling it out in prose -- each one writing its own
+;; `:vfs'/comment pair, and a listing that merged both saying "disk".
+;; It is a fact about the reply, so it travels as data and the boundary
+;; renders it once.
+;;-------------------------------------------------------------------------
+(defconst gptel-yatools--provenances '(:disk :vfs :mixed)
+  "The provenance values a `gptel-yatools-result' may carry.
+
+:disk   every byte of the body is what is on disk.
+:vfs    the body is pending virtual-filesystem state, not on disk yet.
+:mixed  the body blends the two -- a directory listing that merges disk
+        with VFS-only entries, for instance -- so the reply is neither
+        a description of disk nor a description of pending changes.")
+
+(defconst gptel-yatools--provenance-comments
+  '((:disk . "This reply reflects the state of disk.")
+    (:vfs . "\
+This reply reflects pending changes in the virtual filesystem that are not on disk yet. Run the file_sync tool to persist them.")
+    (:mixed . "\
+This reply mixes pending virtual-filesystem changes with disk content: entries marked (pending) exist only in the VFS. Run the file_sync tool to persist them."))
+  "Default envelope comments, keyed by a result's provenance.
+
+Tools with something more specific to say pass :comment to
+`gptel-yatools-ok' instead.")
+
+(defun gptel-yatools--provenance-attr (provenance)
+  "Return PROVENANCE as the envelope's vfs attribute value.
+
+`:disk' is the only provenance that is wholly on disk, so it is the only
+one that answers false.  A model that checks the attribute is asking
+\"may this text disagree with disk?\", and for :mixed the answer is yes."
+  (if (eq provenance :disk) "false" "true"))
+
 (cl-defstruct (gptel-yatools-result (:constructor gptel-yatools--make-result)
                                     (:copier nil))
   "What a tool function returns.
 
-BODY is the text the model reads.  VFS is non-nil when the reply
-describes pending virtual-filesystem state that is not on disk yet.
+BODY is the text the model reads.  PROVENANCE says where it came from:
+`:disk', `:vfs' or `:mixed' (see `gptel-yatools--provenances').
 COMMENT is the envelope's one-line context comment; nil means derive it
-from VFS.
+from PROVENANCE.
 
 Build one with `gptel-yatools-ok'.  A tool never formats, truncates or
 escapes its own response: all of that happens once, at the boundary
 \(see `gptel-yatools--call-tool')."
   (body "" :documentation "The text the model reads.")
-  (vfs nil :documentation "Non-nil if this reply reflects pending VFS state.")
-  (comment nil :documentation "Context comment, or nil to derive it from VFS."))
-
-(defconst gptel-yatools--result-comments
-  '((t . "\
-This reply reflects pending changes in the virtual filesystem that are not on disk yet. Run the file_sync tool to persist them.")
-    (nil . "This reply reflects the state of disk."))
-  "Default envelope comments, keyed by a result's VFS flag.
-
-Tools with something more specific to say pass :comment to
-`gptel-yatools-ok' instead.")
+  (provenance :disk :documentation "One of `gptel-yatools--provenances'.")
+  (comment nil :documentation "Context comment, or nil to derive it from PROVENANCE."))
 
 (defun gptel-yatools-ok (body &rest args)
   "Return a `gptel-yatools-result' carrying BODY.
@@ -490,17 +520,21 @@ decide what fits.
 
 ARGS is a plist with two optional keys:
 
-  :vfs      non-nil when the reply describes pending virtual-filesystem
-            state that is not on disk yet, which is what the model needs
-            to know before it trusts the text as a description of disk.
-  :comment  the envelope's one-line context comment.  Defaults to a
-            sentence derived from :vfs."
-  (let ((vfs (plist-get args :vfs)))
+  :provenance  one of `gptel-yatools--provenances'.  Defaults to `:disk'.
+               A tool that read a pending VFS entry says `:vfs'; one
+               whose reply blends disk and pending state -- a merged
+               directory listing -- says `:mixed'.
+  :comment     the envelope's one-line context comment.  Defaults to a
+               sentence derived from :provenance."
+  (let ((provenance (or (plist-get args :provenance) :disk)))
+    (unless (memq provenance gptel-yatools--provenances)
+      (error "gptel-yatools-ok: %S is not a provenance; expected one of %S"
+             provenance gptel-yatools--provenances))
     (gptel-yatools--make-result
      :body (if (stringp body) body (format "%s" body))
-     :vfs (and vfs t)
+     :provenance provenance
      :comment (or (plist-get args :comment)
-                  (cdr (assq (and vfs t) gptel-yatools--result-comments))))))
+                  (cdr (assq provenance gptel-yatools--provenance-comments))))))
 
 (defun gptel-yatools--respond (result)
   "Render RESULT, a `gptel-yatools-result', as the envelope the model sees.
@@ -510,11 +544,11 @@ to the model as a failed call rather than signalled, because a signalled
 error would bypass the envelope -- and with it the escaping that keeps
 the request serialisable."
   (if (gptel-yatools-result-p result)
-      (gptel-yatools--envelope (gptel-yatools-result-vfs result)
+      (gptel-yatools--envelope (gptel-yatools-result-provenance result)
                                (gptel-yatools-result-comment result)
                                (gptel-yatools-result-body result))
     (gptel-yatools--envelope
-     nil
+     :disk
      "The tool returned no result."
      (format "Error: internal error: the tool returned %S where a result was expected. This is a bug in gptel-yatools; nothing was changed."
              result))))
@@ -692,12 +726,12 @@ debug: `condition-case-unless-debug' leaves the signal alone while
          (gptel-yatools--call-with-timeout function args timeout name))
       (gptel-yatools-timeout-error
        (gptel-yatools--envelope
-        nil "Tool call timed out."
+        :disk "Tool call timed out."
         (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
                                         (or (plist-get (cdr err) :tool) name))))
       (error
        (gptel-yatools--envelope
-        nil "The tool reported an error."
+        :disk "The tool reported an error."
         (format "Error: %s" (gptel-yatools--error-text err)))))))
 
 (defun gptel-yatools--page-text (text offset lines)

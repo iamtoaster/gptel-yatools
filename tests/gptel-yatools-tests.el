@@ -931,15 +931,70 @@ the function installed in the registry renders an envelope."
           (gptel-yatools-test--should-be-enveloped out)
           (should (string-match-p "Error: " out)))))))
 
-(ert-deftest gptel-yatools-test-ok-derives-the-comment-from-the-vfs-flag ()
-  "The context comment is derived from :vfs unless the caller overrides it."
-  (should (string-match-p "virtual filesystem"
-                          (gptel-yatools-result-comment (gptel-yatools-ok "body" :vfs t))))
-  (should (string-match-p "disk"
-                          (gptel-yatools-result-comment (gptel-yatools-ok "body"))))
+(ert-deftest gptel-yatools-test-ok-derives-the-comment-from-the-provenance ()
+  "The context comment is derived from :provenance unless the caller overrides it."
+  (should (string-match-p
+           "virtual filesystem"
+           (gptel-yatools-result-comment
+            (gptel-yatools-ok "body" :provenance :vfs))))
+  (should (string-match-p
+           "mixes pending"
+           (gptel-yatools-result-comment
+            (gptel-yatools-ok "body" :provenance :mixed))))
+  (should (string-match-p
+           "disk"
+           (gptel-yatools-result-comment (gptel-yatools-ok "body"))))
   (should (equal (gptel-yatools-result-comment
-                  (gptel-yatools-ok "body" :vfs t :comment "custom"))
-                 "custom")))
+                  (gptel-yatools-ok "body" :provenance :vfs :comment "custom"))
+                 "custom"))
+  ;; An unknown provenance is a bug in the caller, not a comment to guess at.
+  (should-error (gptel-yatools-ok "body" :provenance :maybe) :type 'error))
+
+(ert-deftest gptel-yatools-test-provenance-reaches-the-wire ()
+  "Provenance decides the envelope's vfs attribute, and only :disk is false."
+  (dolist (pair '((:disk . "vfs=\"false\"")
+                  (:vfs . "vfs=\"true\"")
+                  (:mixed . "vfs=\"true\"")))
+    (should (string-match-p
+             (cdr pair)
+             (gptel-yatools--respond
+              (gptel-yatools-ok "body" :provenance (car pair)))))))
+
+(ert-deftest gptel-yatools-test-directory-listing-marks-pending-entries ()
+  "A merged directory listing must say which of its rows are pending.
+
+Reporting the merged listing as a description of disk is what let the
+model believe a VFS-only file already existed."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-test--write (gptel-yatools-test--root-file "on-disk.txt")
+                               "here\n")
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (gptel-yatools-vfs-put
+         (gptel-yatools-test--root-file "only-in-vfs.txt") "new\n")
+        (let ((out (funcall (gptel-yatools-test--tool "read_path") ".")))
+          ;; The disk-only row is unremarkable...
+          (should (string-match-p "file\ton-disk\\.txt$" out))
+          ;; ...the VFS-only row says so, and the reply says it is mixed.
+          (should (string-match-p "file\tonly-in-vfs\\.txt\t(pending)" out))
+          (should (string-match-p "vfs=\"true\"" out))
+          (should (string-match-p "mixes pending" out)))
+        (gptel-yatools-vfs-discard-pending)
+        ;; A directory with nothing pending stays a description of disk.
+        (let ((out (funcall (gptel-yatools-test--tool "read_path") ".")))
+          (should (string-match-p "vfs=\"false\"" out))
+          (should-not (string-match-p "(pending" out)))))))
+
+(ert-deftest gptel-yatools-test-directory-listing-marks-shadowed-files ()
+  "A disk entry whose content a pending write shadows is marked as such."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-test--write (gptel-yatools-test--root-file "f.txt") "old\n")
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (gptel-yatools-vfs-put (gptel-yatools-test--root-file "f.txt") "new\n")
+        (let ((out (funcall (gptel-yatools-test--tool "read_path") ".")))
+          (should (string-match-p "file\tf\\.txt\t(pending change)" out))
+          (should (string-match-p "vfs=\"true\"" out)))))))
 
 (ert-deftest gptel-yatools-test-a-wrong-shaped-result-is-reported-not-signalled ()
   "A tool returning something that is not a result must not kill the call.

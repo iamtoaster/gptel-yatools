@@ -658,7 +658,7 @@ cannot drift apart."
 (defun gptel-yatools-skills--skill-result (skill)
   "Return the result that loads SKILL: header, files, and body."
   (gptel-yatools-ok (gptel-yatools-skills--payload skill)
-                    :vfs (plist-get skill :from-vfs)
+                    :provenance (if (plist-get skill :from-vfs) :vfs :disk)
                     :comment "Skill loaded."))
 
 (defun gptel-yatools-skills--resolve-file (skill file)
@@ -704,7 +704,7 @@ a truename."
           (gptel-yatools-ok
            (format "File: %s\nSkill: %s\n\n%s"
                    file (plist-get skill :name) content)
-           :vfs from-vfs
+           :provenance (if from-vfs :vfs :disk)
            :comment "Skill file read.")))))))
 
 ;;-------------------------------------------------------------------------

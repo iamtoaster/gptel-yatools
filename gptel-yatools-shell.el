@@ -38,7 +38,7 @@ VFS flag, since the output itself always describes the disk."
   (let ((changed (gptel-yatools-vfs-pending-paths)))
     (gptel-yatools-ok
      output
-     :vfs (and changed t)
+     :provenance (if changed :vfs :disk)
      :comment
      (if changed
          (format "WARNING: %d VFS file(s) have uncommitted changes (%s). The command ran against DISK, not the VFS. Missing files, stale content, or unexpected results in the output below may be because changes are pending in the VFS. Run vfs_diff to inspect, file_sync to apply."

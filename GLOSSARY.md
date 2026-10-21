@@ -57,10 +57,19 @@ _Avoid_: Full path, absolute name, expanded path
 ### Tools
 
 **Result**:
-What a tool function returns: the body the model reads, a flag saying
-whether it reflects pending VFS state, and an optional context comment.
-Never formatted text, and never a half-rendered envelope.
+What a tool function returns: the body the model reads, the provenance
+of that body, and an optional context comment.  Never formatted text,
+and never a half-rendered envelope.
 _Avoid_: Response, output, return value
+
+**Provenance**:
+Where a Result's body came from: `:disk` when every byte of it is what
+is on disk, `:vfs` when it is pending state that is not on disk yet, and
+`:mixed` when it blends the two -- a directory listing that merges disk
+with VFS-only entries.  Carried as data on the Result and rendered once,
+at the tool boundary, so a tool never describes its own provenance in
+prose and cannot forget to.
+_Avoid_: VFS flag, dirty flag, source
 
 **Tool function**:
 The implementation half of a tool, named `gptel-yatools-<name>-tool`.  It

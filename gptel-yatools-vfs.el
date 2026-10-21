@@ -310,9 +310,22 @@ turned into LF) also counts as a change."
   "Return a listing of directory FULL, merging disk and VFS entries.
 
 Every VFS path under FULL contributes its first path component, so
-intermediate virtual directories appear correctly."
+intermediate virtual directories appear correctly.
+
+Each line is TYPE, a tab, the name, and -- when the entry is not simply
+what disk holds -- a third tab-separated note saying so: `(pending)' for
+an entry that exists only in the VFS, `(pending change)' for one whose
+disk content a pending write shadows.  Without the note the listing is
+indistinguishable from one of a directory that is entirely on disk,
+which is how a merged reply came to be described as a description of
+disk.
+
+Returns a plist of :text and :pending (non-nil when any line carries a
+note), so the caller can say which provenance the reply has instead of
+guessing."
   (let* ((full-dir (file-name-as-directory (expand-file-name full)))
-         (entries (make-hash-table :test #'equal)))
+         (entries (make-hash-table :test #'equal))
+         (pending nil))
     ;; Disk entries.  `directory-files' signals a raw `file-error'
     ;; for an unreadable directory or one deleted between the checks
     ;; above; turn that into a readable tool error instead.
@@ -327,7 +340,9 @@ intermediate virtual directories appear correctly."
          (error "Error: cannot read directory %s: %s"
                 (gptel-yatools--display-path full)
                 (error-message-string err)))))
-    ;; VFS entries (including nested ones)
+    ;; VFS entries (including nested ones).  One VFS key may be a file
+    ;; whose disk twin is already listed, which is what `(pending
+    ;; change)' marks.
     (maphash
      (lambda (path _entry)
        (when (and (string-prefix-p full-dir path)
@@ -335,14 +350,30 @@ intermediate virtual directories appear correctly."
          (let* ((rel   (substring path (length full-dir)))
                 (slash (cl-position ?/ rel :test #'char-equal))
                 (name  (if slash (substring rel 0 slash) rel))
-                (type  (if slash "dir" "file")))
-           (puthash name type entries))))
+                (type  (if slash "dir" "file"))
+                (on-disk (gethash name entries)))
+           (setq pending t)
+           (puthash name
+                    (cond
+                     ((null on-disk) (cons type "(pending)"))
+                     ;; An existing disk name whose content a pending
+                     ;; write shadows: the entry is real, its content is
+                     ;; not what disk holds.
+                     ((equal on-disk type) (cons type "(pending change)"))
+                     (t (cons type "(pending)")))
+                    entries))))
      (gptel-yatools-vfs--table))
     (let (lines)
-      (maphash (lambda (name type)
-                 (push (format "%s\t%s" type name) lines))
+      (maphash (lambda (name value)
+                 (let ((type (if (consp value) (car value) value))
+                       (note (and (consp value) (cdr value))))
+                   (push (if note
+                             (format "%s\t%s\t%s" type name note)
+                           (format "%s\t%s" type name))
+                         lines)))
                entries)
-      (mapconcat #'identity (sort lines #'string-lessp) "\n"))))
+      (list :text (mapconcat #'identity (sort lines #'string-lessp) "\n")
+            :pending pending))))
 
 (defun gptel-yatools-vfs--validate-insertable (full)
   "Return nil if FULL can be written into, or a descriptive error string.
@@ -1279,11 +1310,11 @@ review could otherwise run against a fresh, empty table and sync nothing."
        (if (eq (plist-get outcome :reason) :noninteractive)
            (gptel-yatools-ok
           "This Emacs is running non-interactively (e.g. batch), so the review diff cannot be shown and NOTHING was written to disk. The pending VFS changes are intact; run file_sync from an interactive Emacs session."
-          :vfs t
+          :provenance :vfs
           :comment "Sync needs an interactive user; nothing synced.")
          (gptel-yatools-ok
           "User rejected the sync. Pending VFS changes are intact; call file_sync again after the user changes their mind."
-          :vfs t
+          :provenance :vfs
           :comment "Sync rejected by user. VFS still holds the changes.")))
       (:done
        (cond
@@ -1294,13 +1325,13 @@ review could otherwise run against a fresh, empty table and sync nothing."
          (gptel-yatools-ok
           (format "These files could not be synced:\n%s\n"
                   (gptel-yatools-vfs--sync-reason-list blocked))
-          :vfs t
+          :provenance :vfs
           :comment "All pending changes are blocked; nothing synced."))
         ((and (null synced) (null failed) conflicts)
          (gptel-yatools-ok
           (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
                   (gptel-yatools-vfs--sync-file-list conflicts))
-          :vfs t
+          :provenance :vfs
           :comment "All pending changes conflict with disk; nothing synced."))
         (t
          (let ((has-problems (or conflicts failed blocked)))
@@ -1323,7 +1354,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                (format "\nFailed (%d file(s), NOT synced):\n%s\n"
                        (length failed)
                        (gptel-yatools-vfs--sync-reason-list failed))))
-            :vfs has-problems
+            :provenance (if has-problems :vfs :disk)
             :comment (if has-problems
                          "Sync partial: some files were not synced."
                        "VFS synced to disk.")))))))))
@@ -1352,13 +1383,14 @@ review could otherwise run against a fresh, empty table and sync nothing."
      (vfs
       (if (gptel-yatools--binary-p vfs)
           (gptel-yatools--binary-notice full vfs t)
-        (gptel-yatools-ok vfs :vfs t)))
+        (gptel-yatools-ok vfs :provenance :vfs)))
      ;; Real directory (not shadowed by a VFS file)
      ((file-directory-p full)
-      (let ((listing (gptel-yatools-vfs--directory-listing full)))
+      (let* ((listing (gptel-yatools-vfs--directory-listing full))
+             (text (plist-get listing :text)))
         (gptel-yatools-ok
-         (if (string-empty-p listing) "(empty directory)" listing)
-         :comment "Directory listing from disk. VFS-only files are also shown.")))
+         (if (string-empty-p text) "(empty directory)" text)
+         :provenance (if (plist-get listing :pending) :mixed :disk))))
      ;; Disk file, not shadowed
      ((file-regular-p full)
       (let ((read (gptel-yatools-vfs-read full)))
@@ -1374,9 +1406,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
      ;; Virtual directory (only VFS ancestors exist)
      ((gptel-yatools-vfs--has-children-p full)
       (gptel-yatools-ok
-       (gptel-yatools-vfs--directory-listing full)
-       :vfs t
-       :comment "Directory listing synthesized from the virtual filesystem; no such directory exists on disk yet."))
+       (plist-get (gptel-yatools-vfs--directory-listing full) :text)
+       :provenance :vfs))
      (t (error "Path does not exist: %s"
                (gptel-yatools--display-path full))))))
 
@@ -1431,7 +1462,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                 (t
                  (format "(no text in %s after line %d.)"
                          (gptel-yatools--display-path full) offset)))
-               :vfs (plist-get read :from-vfs)))))))))
+               :provenance (if (plist-get read :from-vfs) :vfs :disk)))))))))
 
 (gptel-yatools-define-tool gptel-yatools-fetch-lines-from-file-using-regex
   :name "fetch_lines_from_file_using_regex"
@@ -1483,7 +1514,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
              (format "(no lines in %s match the regexp %S.)"
                      (gptel-yatools--display-path full)
                      regex))
-           :vfs (plist-get read :from-vfs))))))))
+           :provenance (if (plist-get read :from-vfs) :vfs :disk))))))))
 
 (gptel-yatools-define-tool gptel-yatools-write-file
   :name "write_file"
@@ -1514,7 +1545,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  (gptel-yatools--display-path full)
                  (plist-get written :bytes)
                  (plist-get written :coding))
-         :vfs t)
+         :provenance :vfs)
       (gptel-yatools-ok
        (format "%s already has the requested content on disk. No VFS entry created."
                (gptel-yatools--display-path full))
@@ -1552,7 +1583,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  (gptel-yatools--display-path full)
                  (plist-get edited :bytes)
                  (plist-get edited :coding))
-         :vfs t)
+         :provenance :vfs)
       (gptel-yatools-ok
        (format "%s already has the requested content."
                (gptel-yatools--display-path full))
@@ -1635,7 +1666,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                           "This is the last chunk of the diff."))))))
         (gptel-yatools-ok
          (concat (or banner "") (plist-get paging :text))
-         :vfs t
+         :provenance :vfs
          :comment
          (concat
           (if (> omitted 0)
@@ -1663,7 +1694,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
       (gptel-yatools-ok
        (format "Removed pending VFS change for %s."
                (gptel-yatools--display-path (car discarded)))
-       :vfs t
+       :provenance :vfs
        :comment "VFS entry discarded."))
      (path
       (gptel-yatools-ok
@@ -1680,7 +1711,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                (mapconcat (lambda (f)
                             (format "  %s" (gptel-yatools--display-path f)))
                           discarded "\n"))
-       :vfs t
+       :provenance :vfs
        :comment "All VFS entries discarded.")))))
 
 

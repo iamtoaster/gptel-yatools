@@ -33,6 +33,18 @@
 ;; explicitly experimental in the specification, and gptel has no per-skill
 ;; tool allowlist to map it onto.
 ;;
+;; The catalog is the module that answers the questions every caller has:
+;; which skills are there (`--discover`), which one does a name mean
+;; (`--lookup`), what is one called (`gptel-yatools-skills-handle`), and what
+;; does loading it say (`--payload`).  Discovery decides each skill's handle
+;; itself, so no caller has to work out which names are ambiguous.
+;;
+;; Parsing is cached by content (see `gptel-yatools-skills--parse-cache'):
+;; YAML is the whole cost of a scan, ~8 ms of it per skill, and the result
+;; depends on nothing but the text.  Everything that depends on where a skill
+;; sits -- its root, its path, whether its `name' agrees with its directory --
+;; is recomputed on every discovery.
+;;
 ;; This file is loaded by `gptel-yatools.el', which puts the tool in
 ;; `gptel-yatools--tools'.  It calls helpers that file defines, so it cannot be
 ;; loaded on its own before it.
@@ -274,52 +286,138 @@ most common authoring slip of all."
     (list :problems (nreverse problems)
           :warnings (nreverse warnings))))
 
+;;-------------------------------------------------------------------------
+;; Parsing, cached by content
+;;
+;; YAML is the whole cost of a discovery: reading all 38 SKILL.md files of
+;; a real skill root costs ~5 ms, and parsing their frontmatter ~320 ms.
+;; So the parse is what gets cached, and everything location-derived --
+;; which root a skill came from, its path relative to that root, whether
+;; its `name' agrees with its directory -- is recomputed every time.
+;;
+;; The key is the text itself, not the path.  Two chats can hold different
+;; pending copies of the same SKILL.md, and a path key would hand one
+;; chat's parse to the other; a content key cannot, because identical
+;; text parses identically whatever file it came from.  A plain `equal'
+;; lookup beats hashing here: `secure-hash' over every skill costs about
+;; as much as reading them all (~1.3 ms per 38), while `gethash' on the
+;; string is one C-level pass at memory speed.
+;;-------------------------------------------------------------------------
+(defvar gptel-yatools-skills--parse-cache (make-hash-table :test #'equal)
+  "Parsed skill text, keyed by the text itself.
+
+A value is the plist `gptel-yatools-skills--parse' returns.  Shared by
+every buffer, which is safe because the key is the content: nothing here
+depends on which buffer asked, which root the skill was found under, or
+what the file is called.  Nothing invalidates it either -- a changed file
+is a different key -- so the VFS needs no hook to keep it honest.
+_Caller contract_: values are shared by reference.  Read them, do not
+`plist-put' into them.")
+
+(defconst gptel-yatools-skills--parse-cache-limit 256
+  "How many parsed texts the cache may hold before it is trimmed.
+
+Roughly 4.5 kB of text per entry, so the table stays around a megabyte.
+The growth case is authoring a skill: every edit is a new key.  Eviction
+is arbitrary rather than least-recently-used -- the table exists to stop
+re-parsing text we have, not to keep a working set warm -- and trimming
+can never produce a wrong answer, only a slower next call.")
+
+(defun gptel-yatools-skills--parse (text)
+  "Return the content-derived parts of a skill's TEXT, cached.
+
+The value is a plist of :frontmatter (the parsed YAML alist, or nil),
+:body (the Markdown after the frontmatter, or nil) and :problems (what
+is wrong with the text itself: no frontmatter block, invalid YAML).
+
+Everything here is a fact about TEXT alone, which is what makes it safe
+to key on TEXT and share across buffers.  Validation and identity are
+not: they compare the text against the directory it sits in, and are
+computed per discovery."
+  (or (gethash text gptel-yatools-skills--parse-cache)
+      (let* ((split (gptel-yatools-skills--frontmatter text))
+             (frontmatter nil)
+             (problems nil))
+        (cond
+         ((null split)
+          (push "`SKILL.md' does not start with a `---' YAML frontmatter block"
+                problems))
+         (t
+          (setq frontmatter
+                (condition-case err
+                    (gptel-yatools-skills--parse-frontmatter (car split))
+                  (error
+                   (push (format "the frontmatter is not valid YAML: %s"
+                                 (error-message-string err))
+                         problems)
+                   nil)))))
+        (let ((parsed (list :frontmatter frontmatter
+                            :body (cdr-safe split)
+                            :problems (nreverse problems))))
+          (puthash text parsed gptel-yatools-skills--parse-cache)
+          (when (> (hash-table-count gptel-yatools-skills--parse-cache)
+                   gptel-yatools-skills--parse-cache-limit)
+            (gptel-yatools-skills--trim-parse-cache text))
+          parsed))))
+
+(defun gptel-yatools-skills--trim-parse-cache (&optional keep)
+  "Drop entries until the parse cache is back under its limit.
+
+KEEP, when given, is the key of the entry just added: it is never
+dropped, so an entry is not parsed and then thrown away in the same
+call.  Everything else is fair game -- see
+`gptel-yatools-skills--parse-cache-limit' for why this is not an LRU."
+  (let ((count (hash-table-count gptel-yatools-skills--parse-cache)))
+    (maphash (lambda (key _)
+               (when (and (> count gptel-yatools-skills--parse-cache-limit)
+                          (not (and keep (equal key keep))))
+                 (remhash key gptel-yatools-skills--parse-cache)
+                 (setq count (1- count))))
+             gptel-yatools-skills--parse-cache)))
+
+(defun gptel-yatools-skills--clear-parse-cache ()
+  "Forget every parsed skill text.  For tests, and for `customize'."
+  (clrhash gptel-yatools-skills--parse-cache))
+
 (defun gptel-yatools-skills--read (dir root)
   "Return a skill plist for the skill directory DIR, found under ROOT.
 
 The plist carries the parsed frontmatter, the body, the validation
-result, and where the `SKILL.md' came from -- a pending VFS copy, if
-there is one, wins over the file on disk just as it does for `read_path'.
-The directory name, not the `name' field, is the skill's identity."
+result, its handle, and where the `SKILL.md' came from -- a pending VFS
+copy, if there is one, wins over the file on disk just as it does for
+`read_path'.  The directory name, not the `name' field, is the skill's
+identity.
+
+The parse is cached by content (see
+`gptel-yatools-skills--parse-cache'); the validation is not, because it
+compares the text against DIR's name and so belongs to this directory."
   (let* ((dirname (file-name-nondirectory (directory-file-name dir)))
          (path (expand-file-name "SKILL.md" dir))
          (read (ignore-errors (gptel-yatools-vfs-read path)))
          (text (plist-get read :content))
-         (from-vfs (plist-get read :from-vfs))
-         (split (and text (gptel-yatools-skills--frontmatter text)))
-         (frontmatter nil)
-         (problems nil))
-    (cond
-     ((null text)
-      (push "`SKILL.md' could not be read" problems))
-     ((null split)
-      (push "`SKILL.md' does not start with a `---' YAML frontmatter block" problems))
-     (t
-      (setq frontmatter
-            (condition-case err
-                (gptel-yatools-skills--parse-frontmatter (car split))
-              (error
-               (push (format "the frontmatter is not valid YAML: %s"
-                             (error-message-string err))
-                     problems)
-               nil)))))
-    (let ((checked (if problems
+         (parsed (if text
+                     (gptel-yatools-skills--parse text)
+                   (list :frontmatter nil :body nil
+                         :problems (list "`SKILL.md' could not be read"))))
+         (frontmatter (plist-get parsed :frontmatter))
+         (problems (plist-get parsed :problems))
+         (checked (if problems
                        ;; The file itself is unreadable or unparseable, so
                        ;; there are no fields to check: adding "the
                        ;; frontmatter is empty" to the real reason would only
                        ;; bury it.
                        (list :problems nil :warnings nil)
                      (gptel-yatools-skills--validate frontmatter dirname))))
-      (list :name dirname
-            :relative (gptel-yatools-skills--relative dir root)
-            :directory (file-name-as-directory (expand-file-name dir))
-            :root (file-name-as-directory (expand-file-name root))
-            :path path
-            :frontmatter frontmatter
-            :body (cdr-safe split)
-            :from-vfs from-vfs
-            :problems (append (nreverse problems) (plist-get checked :problems))
-            :warnings (plist-get checked :warnings)))))
+    (list :name dirname
+          :relative (gptel-yatools-skills--relative dir root)
+          :directory (file-name-as-directory (expand-file-name dir))
+          :root (file-name-as-directory (expand-file-name root))
+          :path path
+          :frontmatter frontmatter
+          :body (plist-get parsed :body)
+          :from-vfs (plist-get read :from-vfs)
+          :problems (append problems (plist-get checked :problems))
+          :warnings (plist-get checked :warnings))))
 
 (defun gptel-yatools-skills--skill-directory-p (dir)
   "Return non-nil if DIR holds a `SKILL.md'.
@@ -402,8 +500,11 @@ confidence.
 A skill reachable through two roots that resolve to the same directory
 is read once; two *different* skills that happen to share a name are
 both kept, since with grouped skills that is a plausible arrangement.
-Resolving the duplicates is the caller's problem, see
-`gptel-yatools-skills--lookup'."
+
+Each skill carries a `:handle' -- the name it is shown and loaded by.
+Deciding it here, once, is what lets every caller use it without
+re-deriving which names are ambiguous; see
+`gptel-yatools-skills--assign-handles'."
   (let* ((collected (gptel-yatools-skills--roots))
          (roots (car collected))
          (notes (cdr collected))
@@ -425,17 +526,45 @@ Resolving the duplicates is the caller's problem, see
               (unless (gethash identity seen)
                 (puthash identity t seen)
                 (push (gptel-yatools-skills--read dir root) skills)))))))
-    (list :skills (sort skills
-                        (lambda (a b)
-                          (let ((na (plist-get a :name))
-                                (nb (plist-get b :name)))
-                            (if (equal na nb)
-                                (string-lessp (plist-get a :relative)
-                                              (plist-get b :relative))
-                              (string-lessp na nb)))))
+    (list :skills (gptel-yatools-skills--assign-handles
+                   (sort skills
+                         (lambda (a b)
+                           (let ((na (plist-get a :name))
+                                 (nb (plist-get b :name)))
+                             (if (equal na nb)
+                                 (string-lessp (plist-get a :relative)
+                                               (plist-get b :relative))
+                               (string-lessp na nb))))))
           :notes (nreverse notes)
           :missing (nreverse missing)
           :roots roots)))
+
+(defun gptel-yatools-skills--assign-handles (skills)
+  "Return SKILLS with each `:handle' set to the name it is addressed by.
+
+A handle is the bare name, unless that name occurs more than once, in
+which case it is the skill's path relative to its root -- the only
+handle that identifies one skill on its own.  The decision is made once,
+here, rather than by each caller that wants to show or record a name.
+
+The ambiguity test is done against the whole list before rewriting any
+skill, so assigning handles cannot change which names are ambiguous."
+  (let ((ambiguous (gptel-yatools-skills--duplicate-names skills)))
+    (mapcar (lambda (skill)
+              (plist-put (copy-sequence skill) :handle
+                         (if (member (plist-get skill :name) ambiguous)
+                             (plist-get skill :relative)
+                           (plist-get skill :name))))
+            skills)))
+
+(defun gptel-yatools-skills-handle (skill)
+  "Return SKILL's handle: the name it is shown and loaded by.
+
+See `gptel-yatools-skills--assign-handles' for how it is chosen.  A
+skill that did not come from `gptel-yatools-skills--discover' -- a
+plist built by hand in a test, say -- falls back on its `name'."
+  (or (plist-get skill :handle)
+      (plist-get skill :name)))
 
 (defun gptel-yatools-skills--lookup (skills name)
   "Resolve NAME against SKILLS.
@@ -522,19 +651,16 @@ The index is meant to cost ~100 tokens per skill, and a broken file can
 carry a description of any length.  Truncating keeps one bad skill from
 crowding every other one out of the list.")
 
-(defun gptel-yatools-skills--index-line (skill &optional ambiguous-names)
+(defun gptel-yatools-skills--index-line (skill)
   "Return the index line for SKILL.
 
-AMBIGUOUS-NAMES is the list from
-`gptel-yatools-skills--duplicate-names'; a skill whose name is on it is
-shown by its path instead, which is the only handle that identifies it
-on its own."
+The line is headed by the skill's handle, which is its path rather than
+its bare name when the name is not unique -- the only heading that
+identifies one skill on its own."
   (let ((description (gptel-yatools-skills--field (plist-get skill :frontmatter)
                                                   "description"))
         (problems (plist-get skill :problems)))
-    (concat (if (member (plist-get skill :name) ambiguous-names)
-                (plist-get skill :relative)
-              (plist-get skill :name))
+    (concat (gptel-yatools-skills-handle skill)
             " — "
             (if (and (stringp description)
                      (not (string-empty-p (string-trim description))))
@@ -566,9 +692,7 @@ on its own."
                           (mapconcat #'identity roots ", ")
                         "(no skill directories configured)")))
             (and skills
-                 (mapconcat (lambda (skill)
-                              (gptel-yatools-skills--index-line skill ambiguous))
-                            skills "\n"))
+                 (mapconcat #'gptel-yatools-skills--index-line skills "\n"))
             (and ambiguous
                  (format "Some names occur more than once; those skills are shown with their path relative to the skill directory, which is also the name to load them by: %s."
                          (mapconcat #'identity ambiguous ", ")))
@@ -798,19 +922,9 @@ through gptel's own commands takes the buffer with it.")
             (buffer-local-value 'gptel-yatools-skills--attached buffer))
           (gptel-yatools-skills--attached-buffers)))
 
-(defun gptel-yatools-skills--handle (skill &optional ambiguous)
-  "Return the name to show for SKILL: its path when its name is not unique.
-
-AMBIGUOUS is the list of names that occur more than once, from
-`gptel-yatools-skills--duplicate-names'.  Passing it in keeps callers
-from rescanning the skill directories once per skill."
-  (if (member (plist-get skill :name) ambiguous)
-      (plist-get skill :relative)
-    (plist-get skill :name)))
-
-(defun gptel-yatools-skills--payload-buffer (skill &optional ambiguous)
+(defun gptel-yatools-skills--payload-buffer (skill)
   "Return a new buffer holding SKILL's payload, marked with its handle."
-  (let* ((handle (gptel-yatools-skills--handle skill ambiguous))
+  (let* ((handle (gptel-yatools-skills-handle skill))
          (buffer (generate-new-buffer (format "*gptel skill: %s*" handle))))
     (with-current-buffer buffer
       (insert (gptel-yatools-skills--payload skill))
@@ -824,17 +938,17 @@ from rescanning the skill directories once per skill."
     (setq gptel-context (assq-delete-all buffer gptel-context))
     (kill-buffer buffer)))
 
-(defun gptel-yatools-skills--attach (skill &optional ambiguous)
+(defun gptel-yatools-skills--attach (skill)
   "Attach SKILL to the gptel context, replacing an earlier copy of it.
 
 Re-attaching is what you do after editing a skill, so the old copy has
 to go rather than pile up to be sent twice."
-  (let ((handle (gptel-yatools-skills--handle skill ambiguous)))
+  (let ((handle (gptel-yatools-skills-handle skill)))
     (dolist (buffer (gptel-yatools-skills--attached-buffers))
       (when (equal (buffer-local-value 'gptel-yatools-skills--attached buffer)
                    handle)
         (gptel-yatools-skills--detach buffer)))
-    (let ((buffer (gptel-yatools-skills--payload-buffer skill ambiguous)))
+    (let ((buffer (gptel-yatools-skills--payload-buffer skill)))
       ;; `gptel-context' accepts `(BUFFER)' entries directly, so no
       ;; overlay is needed and nothing in the chat buffer is touched.
       (push (list buffer) gptel-context)
@@ -850,13 +964,15 @@ to go rather than pile up to be sent twice."
 (defun gptel-yatools-skills--candidates (skills)
   "Return an alist of (DISPLAY . SKILL) for completion over SKILLS.
 
-DISPLAY is the handle, which is unique: when two skills would show the
-same handle their roots are appended to tell them apart."
-  (let ((ambiguous (gptel-yatools-skills--duplicate-names skills))
-        (seen (make-hash-table :test #'equal))
+DISPLAY is the skill's handle, which is unique by construction: a
+handle is a path exactly when a bare name would not identify one skill.
+The root is appended in the pathological case of two roots putting the
+same directory path under different roots, so completion stays usable
+even then."
+  (let ((seen (make-hash-table :test #'equal))
         (result nil))
     (dolist (skill skills)
-      (let* ((handle (gptel-yatools-skills--handle skill ambiguous))
+      (let* ((handle (gptel-yatools-skills-handle skill))
              (display (if (gethash handle seen)
                           (format "%s (%s)" handle
                                   (directory-file-name (plist-get skill :root)))
@@ -885,7 +1001,6 @@ actually sent."
   (require 'gptel-context)
   (let* ((found (gptel-yatools-skills--discover))
          (skills (plist-get found :skills))
-         (ambiguous (gptel-yatools-skills--duplicate-names skills))
          (candidates (gptel-yatools-skills--candidates skills))
          (sent nil))
     (dolist (name names)
@@ -897,18 +1012,16 @@ actually sent."
                      "no skills were found at all")))
          ((plist-get skill :problems)
           (message "gptel: %s cannot be used: %s"
-                   (gptel-yatools-skills--handle skill ambiguous)
+                   (gptel-yatools-skills-handle skill)
                    (car (plist-get skill :problems))))
          (t
           (if insert
               (gptel-yatools-skills--insert skill)
-            (gptel-yatools-skills--attach skill ambiguous))
+            (gptel-yatools-skills--attach skill))
           (push skill sent)))))
     (when (and sent (not insert))
       (message "gptel: sending %s with each request (`gptel-yatools-skills-remove' to stop)"
-               (mapconcat (lambda (skill)
-                            (gptel-yatools-skills--handle skill ambiguous))
-                          (nreverse sent) ", ")))
+               (mapconcat #'gptel-yatools-skills-handle (nreverse sent) ", ")))
     (nreverse sent)))
 
 (defun gptel-yatools-skills--completion-table (candidates)
@@ -1042,14 +1155,11 @@ Each skill is listed with its validation status; RET visits its
                                ("Directory" 40 t)])
   (setq tabulated-list-padding 2)
   (let* ((found (gptel-yatools-skills--discover))
-         (skills (plist-get found :skills))
-         (ambiguous (gptel-yatools-skills--duplicate-names skills)))
+         (skills (plist-get found :skills)))
     (setq tabulated-list-entries
           (mapcar (lambda (skill)
                     (list skill
-                          (vector (if (member (plist-get skill :name) ambiguous)
-                                      (plist-get skill :relative)
-                                    (plist-get skill :name))
+                          (vector (gptel-yatools-skills-handle skill)
                                   (gptel-yatools-skills--status skill)
                                   (or (gptel-yatools-skills--field
                                        (plist-get skill :frontmatter)

@@ -19,10 +19,20 @@ Skills may sit in groups below a root.
 _Avoid_: Skill path, skill location
 
 **Skill handle**:
-The name a skill is shown and called by.  It is the bare name unless that name
-occurs under more than one root, in which case it is the skill's path relative
-to its root.
+The name a skill is shown and called by.  It is the bare name unless that
+name occurs under more than one root, in which case it is the skill's path
+relative to its root.  Discovery decides it once and stores it on the
+skill, so nothing else has to work out which names are ambiguous.
 _Avoid_: Skill id, qualified name
+
+**Skill catalog**:
+The module that answers what the skill roots hold: which skills exist,
+which one a name means, what each is called, and what loading one says.
+It is also where the parse of a `SKILL.md` is cached -- by the text
+itself, so two chats holding different pending copies of one file each
+parse their own, and nothing has to invalidate the cache when a file
+changes.
+_Avoid_: Skill registry, skill index (that is the reply, not the module)
 
 **Attached skill**:
 A skill the user attached to the gptel context with

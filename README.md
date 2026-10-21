@@ -148,6 +148,14 @@ path relative to the root (`engineering/code-review`), and calling that path
 loads the intended one; the bare name then reports the candidates instead of
 picking one.
 
+The scan is cheap after the first call: the directories are walked every
+time, so a skill added or removed is noticed immediately, but the YAML
+frontmatter is parsed once per distinct `SKILL.md` text and then cached. On
+a root of 38 skills that is 400 ms for the first `skill` call and about
+20 ms afterwards.  The cache is keyed by the text, not the path, so a
+pending VFS copy of a `SKILL.md` gets its own parse and never leaks into
+another chat's index.
+
 Every scan validates the frontmatter against the specification: a skill whose
 `name` or `description` is missing or malformed is still listed, but cannot be
 loaded until it is fixed.  `M-x gptel-yatools-skills` shows what was found,

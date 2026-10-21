@@ -464,6 +464,83 @@ survive that."
           (should (string-match-p "Unsynced body." out))
           (should-not (string-match-p "Follow the edited procedure." out)))))))
 
+;;;; 5b. The parse cache
+
+(ert-deftest gptel-yatools-skills-test-parse-cache-keeps-two-chats-apart ()
+  "Two chats holding different pending copies must each parse their own.
+
+The cache is global and keyed by content, so this is the property that
+makes it safe: identical text shares a parse, different text cannot.
+Keying by path instead would hand the first chat's parse to the second,
+which is the cross-chat leak the buffer-local VFS exists to prevent."
+  (gptel-yatools-test--in-dir
+    (let* ((root (gptel-yatools-test--root-file "skills"))
+           (dir (gptel-yatools-skills-test--skill root "shared"))
+           (path (expand-file-name "SKILL.md" dir)))
+      (gptel-yatools-skills-test--with-roots (list root)
+        ;; Chat A holds one pending version...
+        (with-temp-buffer
+          (gptel-yatools-test--vfs
+            (gptel-yatools-vfs-put
+             path "---\nname: shared\ndescription: From chat A.\n---\n\nBody A.\n")
+            (let ((out (gptel-yatools-skills-test--call "shared")))
+              (should (string-match-p "Body A." out))
+              (should (string-match-p "From chat A." out)))))
+        ;; ...chat B holds a different one, at the same path.
+        (with-temp-buffer
+          (gptel-yatools-test--vfs
+            (gptel-yatools-vfs-put
+             path "---\nname: shared\ndescription: From chat B.\n---\n\nBody B.\n")
+            (let ((out (gptel-yatools-skills-test--call "shared")))
+              (should (string-match-p "Body B." out))
+              (should (string-match-p "From chat B." out))
+              (should-not (string-match-p "Body A." out)))))
+        ;; And a third chat with no pending copy sees disk, not either cache.
+        (with-temp-buffer
+          (gptel-yatools-test--vfs
+            (let ((out (gptel-yatools-skills-test--call "shared")))
+              (should (string-match-p "Follow the shared procedure." out))
+              (should-not (string-match-p "Body A." out)))))))))
+
+(ert-deftest gptel-yatools-skills-test-parse-cache-is-not-invalidated-by-reload ()
+  "The cache must be free to keys it does not own.
+
+Nothing calls into it to invalidate: a changed file is simply a key that
+was never seen.  This pins that down, because it is the reason the VFS
+needs no hook to keep the catalog honest."
+  (gptel-yatools-test--in-dir
+    (let* ((root (gptel-yatools-test--root-file "skills"))
+           (dir (gptel-yatools-skills-test--skill root "drifting"))
+           (path (expand-file-name "SKILL.md" dir)))
+      (gptel-yatools-skills-test--indexed root
+        (should (string-match-p "Follow the drifting procedure."
+                                (gptel-yatools-skills-test--call "drifting")))
+        ;; The file changes on disk, with no cache call in between.
+        (gptel-yatools-test--write
+         path "---\nname: drifting\ndescription: Rewritten.\n---\n\nNew body.\n")
+        (let ((out (gptel-yatools-skills-test--call "drifting")))
+          (should (string-match-p "New body." out))
+          (should-not (string-match-p "Follow the drifting procedure." out)))))))
+
+(ert-deftest gptel-yatools-skills-test-parse-cache-does-not-grow-forever ()
+  "Editing a skill repeatedly must not grow the cache without bound."
+  (gptel-yatools-test--in-dir
+    (let* ((root (gptel-yatools-test--root-file "skills"))
+           (dir (gptel-yatools-skills-test--skill root "churn"))
+           (path (expand-file-name "SKILL.md" dir)))
+      (gptel-yatools-skills-test--indexed root
+        (dotimes (i (+ gptel-yatools-skills--parse-cache-limit 20))
+          (gptel-yatools-test--write
+           path (format "---\nname: churn\ndescription: Version %d.\n---\n\nBody %d.\n"
+                        i i))
+          (gptel-yatools-skills-test--call "churn"))
+        (should (<= (hash-table-count gptel-yatools-skills--parse-cache)
+                    gptel-yatools-skills--parse-cache-limit))
+        ;; And the newest version is still the one served, parsed or not.
+        (should (string-match-p
+                 (format "Body %d\\." (1- (+ gptel-yatools-skills--parse-cache-limit 20)))
+                 (gptel-yatools-skills-test--call "churn")))))))
+
 (ert-deftest gptel-yatools-skills-test-tool-survives-a-reload ()
   "Reloading the package must not drop the tool from its list.
 
@@ -620,7 +697,10 @@ library stays loaded."
           (should-not gptel-context))))))
 
 (ert-deftest gptel-yatools-skills-test-add-completes-by-path-when-ambiguous ()
-  "The completion candidates must identify each skill when names clash."
+  "The completion candidates must identify each skill when names clash.
+
+Discovery decides the handle once, so no caller has to work out which
+names are ambiguous in order to show one."
   (gptel-yatools-test--in-dir
     (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill (expand-file-name "a" root) "clash")
@@ -629,9 +709,18 @@ library stays loaded."
         (let* ((skills (plist-get (gptel-yatools-skills--discover) :skills))
                (candidates (gptel-yatools-skills--candidates skills)))
           (should (equal (mapcar #'car candidates) '("a/clash" "b/clash")))
-          (should (equal (gptel-yatools-skills--handle (cdr (assoc "a/clash" candidates))
-                                                        '("clash"))
-                         "a/clash")))))))
+          (should (equal (gptel-yatools-skills-handle
+                          (cdr (assoc "a/clash" candidates)))
+                         "a/clash"))
+          ;; The handle is on the skill itself, decided at discovery.
+          (should (equal (gptel-yatools-skills-handle (car skills)) "a/clash"))
+          ;; A unique name keeps its bare name as the handle.
+          (gptel-yatools-skills-test--skill (expand-file-name "c" root) "solo")
+          (let ((solo (cl-find "solo"
+                               (plist-get (gptel-yatools-skills--discover) :skills)
+                               :key (lambda (skill) (plist-get skill :name))
+                               :test #'equal)))
+            (should (equal (gptel-yatools-skills-handle solo) "solo"))))))))
 
 (ert-deftest gptel-yatools-skills-test-indicator-follows-gptels-own-removal ()
   "Removing the context in gptel's own way must clear the indicator too.

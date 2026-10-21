@@ -29,45 +29,40 @@
 (declare-function gptel-yatools--workspace-root "gptel-yatools" ())
 (declare-function gptel-yatools--display-path "gptel-yatools" (path))
 (declare-function gptel-yatools--resolve-timeout "gptel-yatools" (value))
-(declare-function gptel-yatools--truncate "gptel-yatools" (string))
-(declare-function gptel-yatools--xml-escape "gptel-yatools" (s))
-(declare-function gptel-yatools--escape-raw-bytes "gptel-yatools" (string))
 (declare-function gptel-yatools--require-string "gptel-yatools" (value what))
 (declare-function gptel-yatools--make-tool "gptel-yatools" (&rest slots))
+(declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
 (declare-function gptel-yatools--update-tool-status "gptel-yatools" (message &optional face))
 (declare-function gptel-yatools-vfs--changed-paths "gptel-yatools-vfs" ())
 (declare-function gptel-yatools-vfs--invalidate-header-line "gptel-yatools-vfs" ())
 
-(defun gptel-yatools--wrap-command-output (output)
-  "Wrap command OUTPUT, warning the LLM about pending VFS changes.
+(defun gptel-yatools-tools--command-result (output)
+  "Return the result for a finished command whose combined output is OUTPUT.
 
-When any VFS entries are pending, a warning is prepended to the
-result describing the split between the VFS and disk; otherwise a
-context tag recording that the command ran against disk (with no
-pending VFS changes) is included so the XML envelope is uniform."
-  (let* ((changed (gptel-yatools-vfs--changed-paths))
-         (output (gptel-yatools--truncate output)))
-    (if changed
-        (format "<tool_context vfs=\"true\" comment=\"%s\"/>\n<tool_response>\n%s\n</tool_response>"
-                (gptel-yatools--xml-escape
-                 (format "WARNING: %d VFS file(s) have uncommitted changes (%s). \
-The command ran against DISK, not the VFS. Missing files, stale content, or unexpected results in the output below may be \
-because changes are pending in the VFS. Run vfs_diff to inspect, file_sync to apply."
-                         (length changed)
-                         (mapconcat #'gptel-yatools--display-path changed ", ")))
-                output)
-      (format "<tool_context vfs=\"false\" comment=\"Command ran against disk. VFS has no pending changes.\"/>\n<tool_response>\n%s\n</tool_response>"
-              output))))
+When any VFS entries are pending, the envelope's comment warns the model
+that the command ran against disk, not the VFS: a file it expected to
+find may only exist in the pending changes, and one it read may be
+stale.  That warning is the whole reason a command result carries the
+VFS flag, since the output itself always describes the disk."
+  (let ((changed (gptel-yatools-vfs--changed-paths)))
+    (gptel-yatools-ok
+     output
+     :vfs (and changed t)
+     :comment
+     (if changed
+         (format "WARNING: %d VFS file(s) have uncommitted changes (%s). The command ran against DISK, not the VFS. Missing files, stale content, or unexpected results in the output below may be because changes are pending in the VFS. Run vfs_diff to inspect, file_sync to apply."
+                 (length changed)
+                 (mapconcat #'gptel-yatools--display-path changed ", "))
+       "Command ran against disk. VFS has no pending changes."))))
 
 ;;-------------------------------------------------------------------------
 ;; Command runner
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-tools--run-command (command directory)
-  "Run COMMAND (in DIRECTORY if non-empty) and return a wrapped string.
+  "Run COMMAND (in DIRECTORY if non-empty) and return a result.
 
-The result is always a string: an XML envelope containing the
-command's exit code and combined output, or an error description
-if the command could not be started.
+The result always carries a body: the command's exit code and combined
+output, or a description of why it could not be started.
 
 The command is killed once it outlives the current tool timeout
 \(`gptel-yatools--current-timeout', or `gptel-yatools-timeout'), so a
@@ -89,11 +84,11 @@ uses a real process and polls it instead."
          (default-directory target-directory))
     (cond
      ((not (file-directory-p default-directory))
-      (gptel-yatools--wrap-command-output
+      (gptel-yatools-tools--command-result
        (format "Error: working directory does not exist: %s"
                shown-directory)))
      ((string-empty-p (string-trim command))
-      (gptel-yatools--wrap-command-output "Error: command is empty."))
+      (gptel-yatools-tools--command-result "Error: command is empty."))
      (t
       (let ((outbuf (generate-new-buffer " *gptel-exec-output*")))
         (unwind-protect
@@ -168,7 +163,7 @@ uses a real process and polls it instead."
                 ;; change which pending entries still differ, so the cached
                 ;; header-line count must not outlive it.
                 (gptel-yatools-vfs--invalidate-header-line)
-                (gptel-yatools--wrap-command-output
+                (gptel-yatools-tools--command-result
                  (cond
                   (start-error
                    (format "Failed to start command in %s.\nError: %s"
@@ -203,14 +198,15 @@ uses a real process and polls it instead."
 (defun gptel-yatools-tools--tools ()
   "Return the tools defined in this file, in declaration order.
 
-Each one already carries the shared TIMEOUT argument and the deadline
-guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
+Each one already carries the shared TIMEOUT argument, the deadline
+guard and the response boundary; `gptel-yatools.el' appends this list to
+`gptel-yatools--tools'."
   (list
    ;; 1. Read workspace root
    (gptel-yatools--make-tool
     :name "read_workspace_root"
     :function (lambda ()
-                (gptel-yatools--workspace-root))
+                (gptel-yatools-ok (gptel-yatools--workspace-root)))
     :description "Return the absolute path of the current workspace root. Use it to resolve relative paths."
     :args nil
     :category "workspace")
@@ -247,9 +243,9 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
     (lambda (code)
       (cond
        ((not (stringp code))
-        "Error: code must be a string.")
+        (error "Error: code must be a string."))
        ((string-empty-p (string-trim code))
-        "Error: code is empty.")
+        (error "Error: code is empty."))
        (t
         (let ((outbuf (generate-new-buffer " *gptel-elisp-output*"))
               (result nil)
@@ -290,13 +286,11 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                       (with-current-buffer outbuf
                         (buffer-substring-no-properties
                          (point-min) (point-max))))
-                ;; This response, like every other tool's, is pasted
-                ;; into the model's context: an unbounded `princ' loop
-                ;; must not blow up the request.  Escaping keeps raw
-                ;; bytes from breaking JSON serialisation.
-                (gptel-yatools--truncate
-                 (gptel-yatools--escape-raw-bytes
-                  (cond
+                ;; The boundary truncates and escapes this body like any
+                ;; other: an unbounded `princ' loop must not blow up the
+                ;; request, and a raw byte must not break serialisation.
+                (gptel-yatools-ok
+                 (cond
                    (error-msg
                     (format "%s\n\nPrinted output:\n%s\n(no value returned)"
                             error-msg
@@ -310,7 +304,7 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                   (prin1-to-string result))
                               (error
                                (format "<unprintable value: %s>"
-                                       (error-message-string err))))))))))
+                                       (error-message-string err)))))))))
             (when (buffer-live-p outbuf)
               (kill-buffer outbuf)))))))
     :description

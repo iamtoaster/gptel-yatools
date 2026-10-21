@@ -51,7 +51,7 @@
 (declare-function gptel-yatools--make-tool "gptel-yatools" (&rest slots))
 (declare-function gptel-yatools--workspace-root "gptel-yatools" ())
 (declare-function gptel-yatools-vfs--effective-content "gptel-yatools-vfs" (path))
-(declare-function gptel-yatools--wrap "gptel-yatools" (from-vfs comment body))
+(declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
 (declare-function gptel-yatools--require-string "gptel-yatools" (value what))
 (declare-function gptel-yatools--binary-p "gptel-yatools" (string))
 (declare-function gptel-yatools--binary-notice "gptel-yatools" (path content from-vfs))
@@ -559,90 +559,78 @@ on its own."
             (when problems
               (format "  [cannot be loaded: %s]" (car problems))))))
 
-(defun gptel-yatools-skills--respond-index (found)
-  "Return the tool response listing every skill in FOUND."
+(defun gptel-yatools-skills--index-body (found)
+  "Return the index text listing every skill in FOUND."
   (let* ((skills (plist-get found :skills))
          (notes (plist-get found :notes))
          (missing (plist-get found :missing))
          (roots (plist-get found :roots))
          (ambiguous (gptel-yatools-skills--duplicate-names skills)))
-    (gptel-yatools--wrap
-     nil
-     "Skill index."
-     (mapconcat
-      #'identity
-      (delq nil
-            (list
-             (if skills
-                 (format "%d skill%s available. Call this tool with `name' to load one, or with `name' and `file' to read a file it references."
-                         (length skills) (if (= (length skills) 1) "" "s"))
-               (format "No skills found. Searched: %s"
-                       (if roots
-                           (mapconcat #'identity roots ", ")
-                         "(no skill directories configured)")))
-             (and skills
-                  (mapconcat (lambda (skill)
-                               (gptel-yatools-skills--index-line skill ambiguous))
-                             skills "\n"))
-             (and ambiguous
-                  (format "Some names occur more than once; those skills are shown with their path relative to the skill directory, which is also the name to load them by: %s."
-                          (mapconcat #'identity ambiguous ", ")))
-             (and missing (not skills)
-                  (format "These configured directories do not exist: %s"
-                          (mapconcat #'identity missing ", ")))
-             (gptel-yatools-skills--notes-section notes)))
-      "\n\n"))))
+    (mapconcat
+     #'identity
+     (delq nil
+           (list
+            (if skills
+                (format "%d skill%s available. Call this tool with `name' to load one, or with `name' and `file' to read a file it references."
+                        (length skills) (if (= (length skills) 1) "" "s"))
+              (format "No skills found. Searched: %s"
+                      (if roots
+                          (mapconcat #'identity roots ", ")
+                        "(no skill directories configured)")))
+            (and skills
+                 (mapconcat (lambda (skill)
+                              (gptel-yatools-skills--index-line skill ambiguous))
+                            skills "\n"))
+            (and ambiguous
+                 (format "Some names occur more than once; those skills are shown with their path relative to the skill directory, which is also the name to load them by: %s."
+                         (mapconcat #'identity ambiguous ", ")))
+            (and missing (not skills)
+                 (format "These configured directories do not exist: %s"
+                         (mapconcat #'identity missing ", ")))
+            (gptel-yatools-skills--notes-section notes)))
+     "\n\n")))
 
-(defun gptel-yatools-skills--respond-ambiguous (name matches)
-  "Return the tool response for NAME, which matches more than one skill."
-  (gptel-yatools--wrap
-   nil
-   "Ambiguous skill name."
-   (mapconcat
-    #'identity
-    (list
-     (format "Error: %S matches %d skills, so it does not identify one." name (length matches))
-     (concat "Call this tool again with one of these paths -- each is relative to a skill directory and is usable as `name':\n"
-             (mapconcat (lambda (skill)
-                          (format "  - %s" (plist-get skill :relative)))
-                        matches "\n")))
-    "\n\n")))
+(defun gptel-yatools-skills--ambiguous-message (name matches)
+  "Return why NAME does not identify one skill, listing the MATCHES."
+  (mapconcat
+   #'identity
+   (list
+    (format "Error: %S matches %d skills, so it does not identify one." name (length matches))
+    (concat "Call this tool again with one of these paths -- each is relative to a skill directory and is usable as `name':\n"
+            (mapconcat (lambda (skill)
+                         (format "  - %s" (plist-get skill :relative)))
+                       matches "\n")))
+   "\n\n"))
 
-(defun gptel-yatools-skills--respond-unknown (found name)
-  "Return the tool response for a call naming NAME, which FOUND does not hold."
+(defun gptel-yatools-skills--unknown-message (found name)
+  "Return why FOUND holds no skill called NAME, and what it does hold."
   (let ((skills (plist-get found :skills)))
-    (gptel-yatools--wrap
-     nil
-     "No such skill."
-     (mapconcat
-      #'identity
-      (delq nil
-            (list
-             (format "Error: no skill named %S." name)
-             (if skills
-                 (format "Available skills: %s. Call this tool without arguments for the full index."
-                         (mapconcat (lambda (skill) (plist-get skill :relative))
-                                    skills ", "))
-               "No skills are available at all; call this tool without arguments to see where it looked.")
-             (gptel-yatools-skills--notes-section (plist-get found :notes))))
-      "\n\n"))))
+    (mapconcat
+     #'identity
+     (delq nil
+           (list
+            (format "Error: no skill named %S." name)
+            (if skills
+                (format "Available skills: %s. Call this tool without arguments for the full index."
+                        (mapconcat (lambda (skill) (plist-get skill :relative))
+                                   skills ", "))
+              "No skills are available at all; call this tool without arguments to see where it looked.")
+            (gptel-yatools-skills--notes-section (plist-get found :notes))))
+     "\n\n")))
 
-(defun gptel-yatools-skills--respond-invalid (skill)
-  "Return the tool response explaining why SKILL cannot be loaded."
-  (gptel-yatools--wrap
-   nil
-   "Skill is not valid."
-   (mapconcat
-    #'identity
-    (delq nil
-          (list
-           (format "Error: the skill in %s cannot be loaded because its `SKILL.md' does not satisfy the Agent Skills specification."
-                   (directory-file-name (plist-get skill :directory)))
-           (concat "Problems:\n"
-                   (mapconcat (lambda (problem) (format "  - %s" problem))
-                              (plist-get skill :problems) "\n"))
-           (gptel-yatools-skills--notes-section (plist-get skill :warnings))))
-    "\n\n")))
+(defun gptel-yatools-skills--invalid-message (skill)
+  "Return why SKILL cannot be loaded."
+  (mapconcat
+   #'identity
+   (delq nil
+         (list
+          (format "Error: the skill in %s cannot be loaded because its `SKILL.md' does not satisfy the Agent Skills specification."
+                  (directory-file-name (plist-get skill :directory)))
+          (concat "Problems:\n"
+                  (mapconcat (lambda (problem) (format "  - %s" problem))
+                             (plist-get skill :problems) "\n"))
+          (gptel-yatools-skills--notes-section (plist-get skill :warnings))))
+   "\n\n"))
 
 (defun gptel-yatools-skills--payload (skill)
   "Return SKILL's text as it should be handed to the model.
@@ -679,12 +667,11 @@ cannot drift apart."
             (gptel-yatools-skills--notes-section (plist-get skill :warnings))))
      "\n\n")))
 
-(defun gptel-yatools-skills--respond-skill (skill)
-  "Return the tool response that loads SKILL: header, files, and body."
-  (gptel-yatools--wrap
-   (plist-get skill :from-vfs)
-   "Skill loaded."
-   (gptel-yatools-skills--payload skill)))
+(defun gptel-yatools-skills--skill-result (skill)
+  "Return the result that loads SKILL: header, files, and body."
+  (gptel-yatools-ok (gptel-yatools-skills--payload skill)
+                    :vfs (plist-get skill :from-vfs)
+                    :comment "Skill loaded."))
 
 (defun gptel-yatools-skills--resolve-file (skill file)
   "Return FILE's absolute path inside SKILL, or nil if it escapes it.
@@ -707,32 +694,30 @@ a truename."
                         (file-name-as-directory (file-truename dir)))))
         (and true true-dir (string-prefix-p true-dir true) full))))))
 
-(defun gptel-yatools-skills--respond-file (skill file)
-  "Return the tool response that reads FILE from SKILL."
+(defun gptel-yatools-skills--file-result (skill file)
+  "Return the result that reads FILE from SKILL."
   (let ((full (gptel-yatools-skills--resolve-file skill file)))
     (if (null full)
-        (gptel-yatools--wrap
-         nil
-         "File is not inside the skill."
+        (gptel-yatools-ok
          (format "Error: %S is not a readable file inside the skill directory. Pass a path relative to the skill root, like \"references/REFERENCE.md\" or \"scripts/extract.py\"."
-                 file))
+                 file)
+         :comment "File is not inside the skill.")
       (let* ((effective (gptel-yatools-vfs--effective-content full))
              (content (car-safe effective))
              (from-vfs (cdr-safe effective)))
         (cond
          ((null content)
-          (gptel-yatools--wrap
-           nil
-           "Unreadable skill file."
-           (format "Error: %s could not be read." full)))
+          (gptel-yatools-ok
+           (format "Error: %s could not be read." full)
+           :comment "Unreadable skill file."))
          ((gptel-yatools--binary-p content)
           (gptel-yatools--binary-notice full content from-vfs))
          (t
-          (gptel-yatools--wrap
-           from-vfs
-           "Skill file read."
+          (gptel-yatools-ok
            (format "File: %s\nSkill: %s\n\n%s"
-                   file (plist-get skill :name) content))))))))
+                   file (plist-get skill :name) content)
+           :vfs from-vfs
+           :comment "Skill file read.")))))))
 
 ;;-------------------------------------------------------------------------
 ;; The tool
@@ -747,22 +732,27 @@ a truename."
                         (gptel-yatools-skills--lookup (plist-get found :skills) name))))
     (cond
      ((and file (not present))
-      (gptel-yatools--wrap
-       nil
-       "Missing skill name."
-       "Error: reading a skill file needs both `name' and `file', since `file' is relative to the skill's own directory."))
+      (gptel-yatools-ok
+       "Error: reading a skill file needs both `name' and `file', since `file' is relative to the skill's own directory."
+       :comment "Missing skill name."))
      ((not present)
-      (gptel-yatools-skills--respond-index found))
+      (gptel-yatools-ok (gptel-yatools-skills--index-body found)
+                        :comment "Skill index."))
      ((plist-get resolved :ambiguous)
-      (gptel-yatools-skills--respond-ambiguous name (plist-get resolved :ambiguous)))
+      (gptel-yatools-ok
+       (gptel-yatools-skills--ambiguous-message name (plist-get resolved :ambiguous))
+       :comment "Ambiguous skill name."))
      ((null resolved)
-      (gptel-yatools-skills--respond-unknown found name))
+      (gptel-yatools-ok (gptel-yatools-skills--unknown-message found name)
+                        :comment "No such skill."))
      ((plist-get (plist-get resolved :skill) :problems)
-      (gptel-yatools-skills--respond-invalid (plist-get resolved :skill)))
+      (gptel-yatools-ok
+       (gptel-yatools-skills--invalid-message (plist-get resolved :skill))
+       :comment "Skill is not valid."))
      (file
-      (gptel-yatools-skills--respond-file (plist-get resolved :skill) file))
+      (gptel-yatools-skills--file-result (plist-get resolved :skill) file))
      (t
-      (gptel-yatools-skills--respond-skill (plist-get resolved :skill))))))
+      (gptel-yatools-skills--skill-result (plist-get resolved :skill))))))
 
 (defun gptel-yatools-skills--tool ()
   "Return the `skill' tool.

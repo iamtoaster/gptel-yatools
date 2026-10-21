@@ -34,8 +34,8 @@
 (declare-function gptel-yatools--coerce-integer "gptel-yatools" (value default &optional minimum))
 (declare-function gptel-yatools--require-string "gptel-yatools" (value what))
 (declare-function gptel-yatools--flag-p "gptel-yatools" (value))
-(declare-function gptel-yatools--wrap "gptel-yatools" (from-vfs comment body))
-(declare-function gptel-yatools--truncate "gptel-yatools" (string))
+(declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
+(declare-function gptel-yatools--page-text "gptel-yatools" (text offset lines))
 (declare-function gptel-yatools--binary-p "gptel-yatools" (string))
 (declare-function gptel-yatools--binary-notice "gptel-yatools" (path content from-vfs))
 (defvar gptel-yatools--output-line-limit)
@@ -968,8 +968,9 @@ Returns (STATUS MESSAGE) where STATUS is `:ok' or `:failed'."
 (defun gptel-yatools-vfs--tools ()
   "Return the filesystem tools defined in this file, in declaration order.
 
-Each one already carries the shared TIMEOUT argument and the deadline
-guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
+Each one already carries the shared TIMEOUT argument, the deadline
+guard and the response boundary; `gptel-yatools.el' appends this list to
+`gptel-yatools--tools'."
   (list
    ;; 2. Read a path: directory listing, or file content (VFS-aware)
    (gptel-yatools--make-tool
@@ -984,19 +985,13 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
          (vfs
           (if (gptel-yatools--binary-p vfs)
               (gptel-yatools--binary-notice full vfs t)
-            (gptel-yatools--wrap
-             t
-             "Content read from the virtual filesystem, not disk. Run the file_sync tool to persist these changes to disk."
-             vfs)))
+            (gptel-yatools-ok vfs :vfs t)))
          ;; Real directory (not shadowed by a VFS file)
          ((file-directory-p full)
           (let ((listing (gptel-yatools-vfs--directory-listing full)))
-            (gptel-yatools--wrap
-             nil
-             "Directory listing from disk. VFS-only files are also shown."
-             (if (string-empty-p listing)
-                 "(empty directory)"
-               listing))))
+            (gptel-yatools-ok
+             (if (string-empty-p listing) "(empty directory)" listing)
+             :comment "Directory listing from disk. VFS-only files are also shown.")))
          ;; Disk file, not shadowed
          ((file-regular-p full)
           (let ((content (gptel-yatools-vfs--disk-content full)))
@@ -1007,10 +1002,7 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
              ((gptel-yatools--binary-p content)
               (gptel-yatools--binary-notice full content nil))
              (t
-              (gptel-yatools--wrap
-               nil
-               "Content read from disk."
-               content)))))
+              (gptel-yatools-ok content)))))
          ;; Something that exists but is not a readable file: a
          ;; device, FIFO or socket.  Reading it could block forever or
          ;; never stop, so refuse instead of trying.
@@ -1019,10 +1011,10 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                  (gptel-yatools--display-path full)))
          ;; Virtual directory (only VFS ancestors exist)
          ((gptel-yatools-vfs--has-children-p full)
-          (gptel-yatools--wrap
-           t
-           "Directory listing synthesized from the virtual filesystem; no such directory exists on disk yet."
-           (gptel-yatools-vfs--directory-listing full)))
+          (gptel-yatools-ok
+           (gptel-yatools-vfs--directory-listing full)
+           :vfs t
+           :comment "Directory listing synthesized from the virtual filesystem; no such directory exists on disk yet."))
          (t (error "Path does not exist: %s"
                    (gptel-yatools--display-path full))))))
     :description "Read a path relative to the workspace root. If PATH is a directory, return a listing (merged with VFS entries). If PATH is a file, return its contents. Pending VFS changes take precedence over disk contents; the response is wrapped in XML indicating provenance."
@@ -1056,11 +1048,7 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                (forward-line lines)
                                (buffer-substring-no-properties
                                 beg (point)))))
-                  (gptel-yatools--wrap
-                   (cdr eff)
-                   (if (cdr eff)
-                       "Lines read from the virtual filesystem. Run the file_sync tool to persist these changes to disk."
-                     "Lines read from disk.")
+                  (gptel-yatools-ok
                    (cond
                     ;; An empty body would read like an empty file,
                     ;; so say what the empty result means.
@@ -1074,7 +1062,8 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                              (max 1 total)))
                     (t
                      (format "(no text in %s after line %d.)"
-                             (gptel-yatools--display-path full) offset)))))))))))
+                             (gptel-yatools--display-path full) offset)))
+                   :vfs (cdr eff)))))))))
     :description "Read LINES lines from a file starting at 1-based line OFFSET. Returns the raw text of those lines. Pending VFS changes shadow disk content. The result is wrapped in XML indicating provenance. Binary files (containing NUL bytes) are reported, not returned."
     :args (list '(:name "path"
                         :type string
@@ -1104,7 +1093,7 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
         (gptel-yatools-vfs--require-file full)
         (cond
          (regex-error
-          (format "Error: invalid regexp %S: %s" regex regex-error))
+          (error "Error: invalid regexp %S: %s" regex regex-error))
          ((gptel-yatools--binary-p (car eff))
           (gptel-yatools--binary-notice full (car eff) (cdr eff)))
          (t
@@ -1121,18 +1110,15 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                   (when (string-match-p regex line)
                     (push (format "%d:%s" line-num line) matches)))
                 (forward-line 1))
-              (gptel-yatools--wrap
-               (cdr eff)
-               (if (cdr eff)
-                   "Matching lines read from the virtual filesystem. Run the file_sync tool to persist these changes to disk."
-                 "Matching lines read from disk.")
+              (gptel-yatools-ok
                ;; An empty body would be indistinguishable from an
                ;; empty file, so say that nothing matched.
                (if matches
                    (mapconcat #'identity (nreverse matches) "\n")
                  (format "(no lines in %s match the regexp %S.)"
                          (gptel-yatools--display-path full)
-                         regex)))))))))
+                         regex))
+               :vfs (cdr eff))))))))
     :description "Return lines from a file that match an Emacs regexp. Each match is prefixed with its 1-based line number. Pending VFS changes shadow disk content. The result is wrapped in XML indicating provenance. Binary files (containing NUL bytes) are reported, not searched."
     :args (list '(:name "path"
                         :type string
@@ -1161,41 +1147,39 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                (gptel-yatools-vfs--first-unencodable content target))))
         (cond
          ((not (stringp content))
-          "Error: content must be a string.")
-         (validate-error validate-error)
+          (error "Error: content must be a string."))
+         (validate-error (error "%s" validate-error))
          ((file-directory-p full)
-          (format "Error: cannot write %s: it is a directory on disk."
-                  (gptel-yatools--display-path full)))
+          (error "Error: cannot write %s: it is a directory on disk."
+                 (gptel-yatools--display-path full)))
          ;; Writing a file over a virtual directory would make
          ;; every pending child unsyncable ("File exists"), so
          ;; reject it at write time.
          ((gptel-yatools-vfs--has-children-p full)
-          (format "Error: cannot write %s: it is a directory in the VFS because pending file(s) are stored under it. Discard those entries first."
-                  (gptel-yatools--display-path full)))
+          (error "Error: cannot write %s: it is a directory in the VFS because pending file(s) are stored under it. Discard those entries first."
+                 (gptel-yatools--display-path full)))
          ;; Writing to a FIFO blocks until a reader appears, and to a
          ;; device it may fail or scribble on hardware.
          ((and (file-exists-p full) (not (file-regular-p full)))
-          (format "Error: cannot write %s: it is not a regular file (device, FIFO or socket)."
-                  (gptel-yatools--display-path full)))
+          (error "Error: cannot write %s: it is not a regular file (device, FIFO or socket)."
+                 (gptel-yatools--display-path full)))
          ((not coding-valid)
-          (format "Error: unknown coding system '%s'. Use an Emacs coding system name such as utf-8, iso-latin-1 or utf-8-dos." coding))
+          (error "Error: unknown coding system '%s'. Use an Emacs coding system name such as utf-8, iso-latin-1 or utf-8-dos." coding))
          (unencodable
-          (format "Error: %s cannot represent %S, which occurs in the content. Nothing was written. Either remove it, or pass coding=\"utf-8\" to convert %s to UTF-8 on sync."
-                  target unencodable (gptel-yatools--display-path full)))
+          (error "Error: %s cannot represent %S, which occurs in the content. Nothing was written. Either remove it, or pass coding=\"utf-8\" to convert %s to UTF-8 on sync."
+                 target unencodable (gptel-yatools--display-path full)))
          (t
           (gptel-yatools-vfs-put full content (gptel-yatools--flag-p overwrite) coding-sym)
           (if (gptel-yatools-vfs-get full)
-              (gptel-yatools--wrap
-               t
-               "Written to the virtual filesystem. No changes have been made to disk. Use the file_sync tool to persist these changes."
+              (gptel-yatools-ok
                (format "Wrote %s to the VFS (file is now %d bytes, encoding on sync: %s). Call file_sync to write these changes to disk."
                        (gptel-yatools--display-path full)
-                       (gptel-yatools-vfs--encodable-bytes content target) target))
-            (gptel-yatools--wrap
-             nil
-             "No change needed."
+                       (gptel-yatools-vfs--encodable-bytes content target) target)
+               :vfs t)
+            (gptel-yatools-ok
              (format "%s already has the requested content on disk. No VFS entry created."
-                     (gptel-yatools--display-path full))))))))
+                     (gptel-yatools--display-path full))
+             :comment "No change needed."))))))
     :description
     "Write CONTENT to the file at PATH. The write is stored in a buffer-local virtual filesystem (VFS) and does NOT touch disk. Call the file_sync tool to review the accumulated diffs and write them to disk. CONTENT must be the file's full new contents, not a patch. No user-facing diff review happens here; it happens at file_sync. The path must be writable: no ancestor of the target may be a regular file (on disk or in the VFS), and the target itself must not be a directory on disk. Content is rejected at write time if the file's encoding cannot represent it; pass CODING (e.g. \"utf-8\") to deliberately convert the file to another encoding on sync. Pass overwrite=true to accept the current disk content as the new baseline and discard any pending conflict (see file_sync); otherwise a pre-existing conflict is preserved."
     :args (list '(:name "path"
@@ -1226,37 +1210,37 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
              (eff  (gptel-yatools-vfs--effective-content full)))
         (cond
          ((not (stringp old_string))
-          "Error: old_string must be a string.")
+          (error "Error: old_string must be a string."))
          ((not (stringp new_string))
-          "Error: new_string must be a string.")
+          (error "Error: new_string must be a string."))
          ((string-empty-p old_string)
-          "Error: old_string must not be empty.")
+          (error "Error: old_string must not be empty."))
          ((not coding-valid)
-          (format "Error: unknown coding system '%s'. Use an Emacs coding system name such as utf-8, iso-latin-1 or utf-8-dos." coding))
+          (error "Error: unknown coding system '%s'. Use an Emacs coding system name such as utf-8, iso-latin-1 or utf-8-dos." coding))
          ;; `gptel-yatools-vfs--effective-content' returns (nil . nil)
          ;; for an existing non-regular or unreadable path.
          ;; Editing that as text used to fall through to
          ;; `string=' with nil, and to grep/awk on a FIFO (which
          ;; can block forever).
          ((and eff (null (car eff)))
-          (format "Error: %s is not a readable regular file (permission denied, I/O error, device, FIFO or socket); refusing to edit it."
-                  (gptel-yatools--display-path full)))
+          (error "Error: %s is not a readable regular file (permission denied, I/O error, device, FIFO or socket); refusing to edit it."
+                 (gptel-yatools--display-path full)))
          ((null eff)
-          (format "Error: %s"
-                  (if (file-directory-p full)
-                      (concat (gptel-yatools--display-path full)
-                              " is a directory, not a file.")
-                    (concat "no such file: "
-                            (gptel-yatools--display-path full)))))
+          (error "Error: %s"
+                 (if (file-directory-p full)
+                     (concat (gptel-yatools--display-path full)
+                             " is a directory, not a file.")
+                   (concat "no such file: "
+                           (gptel-yatools--display-path full)))))
          ;; The read tools refuse to show binary content, so an edit
          ;; here could only be a blind guess at bytes the model has
          ;; not seen.  Replacing such a file wholesale is fine.
          ((gptel-yatools--binary-p (car eff))
-          (format "Error: %s is a binary file (%s); it cannot be edited as text. Use write_file to replace it wholesale, or execute_command to inspect it."
-                  (gptel-yatools--display-path full)
-                  (if-let* ((size (file-attribute-size (file-attributes full))))
-                      (format "%d bytes" size)
-                    "size unknown")))
+          (error "Error: %s is a binary file (%s); it cannot be edited as text. Use write_file to replace it wholesale, or execute_command to inspect it."
+                 (gptel-yatools--display-path full)
+                 (if-let* ((size (file-attribute-size (file-attributes full))))
+                     (format "%d bytes" size)
+                   "size unknown")))
          (t
           (let* ((content (car eff))
                  (from-vfs (cdr eff))
@@ -1275,11 +1259,11 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                           (gptel-yatools-edit-file--emacs-count content old_string))))
             (cond
              ((zerop count)
-              (format "Error: the text to replace was not found in %s. Read the file again and copy the exact text, including whitespace and indentation."
-                      (gptel-yatools--display-path full)))
+              (error "Error: the text to replace was not found in %s. Read the file again and copy the exact text, including whitespace and indentation."
+                     (gptel-yatools--display-path full)))
              ((> count 1)
-              (format "Error: the text to replace occurs %d times in %s. It must be unique; include more surrounding context in old_string."
-                      count (gptel-yatools--display-path full)))
+              (error "Error: the text to replace occurs %d times in %s. It must be unique; include more surrounding context in old_string."
+                     count (gptel-yatools--display-path full)))
              (t
               (let* ((new-content
                       (or (and (not from-vfs)
@@ -1293,27 +1277,27 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                        (gptel-yatools-vfs--first-unencodable new-content target))))
                 (cond
                  ((string= content new-content)
-                  (format "No changes needed: %s already has the requested content."
-                          (gptel-yatools--display-path full)))
+                  (gptel-yatools-ok
+                   (format "%s already has the requested content."
+                           (gptel-yatools--display-path full))
+                   :comment "No change needed."))
                  (unencodable
-                  (format "Error: %s cannot represent %S, which the edit would introduce. Nothing was changed. Either edit without it, or pass coding=\"utf-8\" to convert %s on sync."
-                          target unencodable
-                          (gptel-yatools--display-path full)))
+                  (error "Error: %s cannot represent %S, which the edit would introduce. Nothing was changed. Either edit without it, or pass coding=\"utf-8\" to convert %s on sync."
+                         target unencodable
+                         (gptel-yatools--display-path full)))
                  (t
                   (gptel-yatools-vfs-put full new-content (gptel-yatools--flag-p overwrite) coding-sym)
                   (if (gptel-yatools-vfs-get full)
-                      (gptel-yatools--wrap
-                       t
-                       "Edit applied to the virtual filesystem. No changes have been made to disk. Use the file_sync tool to persist these changes."
+                      (gptel-yatools-ok
                        (format "Applied edit to %s in the VFS (file is now %d bytes, encoding on sync: %s). Call file_sync to write these changes to disk."
                                (gptel-yatools--display-path full)
                                (gptel-yatools-vfs--encodable-bytes new-content target)
-                               target))
-                    (gptel-yatools--wrap
-                     nil
-                     "No change needed."
+                               target)
+                       :vfs t)
+                    (gptel-yatools-ok
                      (format "%s already has the requested content on disk."
-                             (gptel-yatools--display-path full))))))))))))))
+                             (gptel-yatools--display-path full))
+                     :comment "No change needed."))))))))))))
     :description
     "Edit the file at PATH by replacing OLD_STRING with NEW_STRING in the virtual filesystem (VFS). OLD_STRING must match the file's effective (VFS-or-disk) contents exactly, including whitespace and indentation, and must occur exactly once; if it is missing or ambiguous the edit is refused and nothing is changed. The change is stored in the VFS and does NOT touch disk. Call file_sync to review the accumulated diffs and write them to disk. To create a new file or rewrite one wholesale, use write_file instead. The edit is rejected at write time if the file's encoding cannot represent NEW_STRING; pass CODING to convert the file to another encoding on sync. Pass overwrite=true to accept the current disk content as the VFS baseline, discarding any pending conflict."
     :args (list '(:name "path"
@@ -1371,37 +1355,34 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                         eligible (mapcar #'car blocked) :test #'equal)))
         (cond
          ((null all)
-          (gptel-yatools--wrap
-           nil
-           "Nothing to sync."
-           "The virtual filesystem has no pending changes."))
+          (gptel-yatools-ok "The virtual filesystem has no pending changes."
+                            :comment "Nothing to sync."))
          ((null targets)
-          (gptel-yatools--wrap
-           nil
-           "Nothing to sync for the requested path."
+          (gptel-yatools-ok
            (format "%s has no pending VFS change."
-                   (gptel-yatools--resolve-path path))))
+                   (gptel-yatools--resolve-path path))
+           :comment "Nothing to sync for the requested path."))
          ((and (null syncable) (null conflict-paths))
           (message "gptel: nothing synced — %d file(s) blocked." (length blocked))
-          (gptel-yatools--wrap
-           t
-           "All pending changes are blocked; nothing synced."
+          (gptel-yatools-ok
            (format "These files could not be synced:\n%s\n"
                    (mapconcat (lambda (pair)
                                 (format "  %s: %s"
                                         (gptel-yatools--display-path (car pair))
                                         (cdr pair)))
-                              blocked "\n"))))
+                              blocked "\n"))
+           :vfs t
+           :comment "All pending changes are blocked; nothing synced."))
          ((null syncable)
           (message "gptel: nothing synced — %d file(s) conflict with disk."
                    (length conflict-paths))
-          (gptel-yatools--wrap
-           t
-           "All pending changes conflict with disk; nothing synced."
+          (gptel-yatools-ok
            (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
                    (mapconcat (lambda (f)
                                 (format "  %s" (gptel-yatools--display-path f)))
-                              conflict-paths "\n"))))
+                              conflict-paths "\n"))
+           :vfs t
+           :comment "All pending changes conflict with disk; nothing synced."))
          ((not (gptel-yatools-vfs--confirm-sync
                 syncable
                 (append blocked
@@ -1409,14 +1390,14 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                   (cons f "conflict: changed on disk since the VFS captured it"))
                                 conflict-paths))))
           (if noninteractive
-              (gptel-yatools--wrap
-               t
-               "Sync needs an interactive user; nothing synced."
-               "This Emacs is running non-interactively (e.g. batch), so the review diff cannot be shown and NOTHING was written to disk. The pending VFS changes are intact; run file_sync from an interactive Emacs session.")
-            (gptel-yatools--wrap
-             t
-             "Sync rejected by user. VFS still holds the changes."
-             "User rejected the sync. Pending VFS changes are intact; call file_sync again after the user changes their mind.")))
+              (gptel-yatools-ok
+               "This Emacs is running non-interactively (e.g. batch), so the review diff cannot be shown and NOTHING was written to disk. The pending VFS changes are intact; run file_sync from an interactive Emacs session."
+               :vfs t
+               :comment "Sync needs an interactive user; nothing synced.")
+            (gptel-yatools-ok
+             "User rejected the sync. Pending VFS changes are intact; call file_sync again after the user changes their mind."
+             :vfs t
+             :comment "Sync rejected by user. VFS still holds the changes.")))
          (t
           ;; The review ran in another buffer and may have left it
           ;; current.  Re-enter the VFS owner before every lookup and
@@ -1440,9 +1421,7 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                      (comment (if has-problems
                                   "Sync partial: some files were not synced."
                                 "VFS synced to disk.")))
-                (gptel-yatools--wrap
-                 has-problems
-                 comment
+                (gptel-yatools-ok
                  (concat
                   (if sync-ok
                       (format "Synced %d file(s) to disk:\n%s\n"
@@ -1474,7 +1453,9 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                          (format "  %s: %s"
                                                  (gptel-yatools--display-path (car pair))
                                                  (cdr pair)))
-                                       (nreverse sync-fail) "\n"))))))))))))
+                                       (nreverse sync-fail) "\n"))))
+                 :vfs has-problems
+                 :comment comment))))))))
     :description
     "Sync the buffer-local virtual filesystem to real files on disk. Shows the user a unified diff for each syncable file and writes only after acceptance. Files whose disk contents have changed since the VFS captured them are NOT synced and are reported as conflicts (see vfs_discard and write_file overwrite=true to resolve). On success, the synced entries are removed from the VFS and subsequent reads come from disk. Pass PATH to sync a single file; omit PATH to sync everything."
     :args (list '(:name "path"
@@ -1497,50 +1478,27 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                          changed)))
         (cond
          ((null changed)
-          (gptel-yatools--wrap
-           nil
-           "No pending VFS changes."
-           "The virtual filesystem matches disk; there are no pending changes."))
+          (gptel-yatools-ok "The virtual filesystem matches disk; there are no pending changes."
+                            :comment "No pending VFS changes."))
          ((null selected)
-          (gptel-yatools--wrap
-           nil
-           "No pending VFS change for the requested path."
+          (gptel-yatools-ok
            (format "%s has no pending VFS change."
-                   (gptel-yatools--resolve-path path))))
+                   (gptel-yatools--resolve-path path))
+           :comment "No pending VFS change for the requested path."))
          (t
           (let* ((diff-text (mapconcat #'gptel-yatools-vfs--format-one-diff
                                        selected ""))
                  (omitted (- (length changed) (length selected)))
-                 (all-lines (split-string diff-text "\n"))
-                 (total (length all-lines))
-                 (start (gptel-yatools--coerce-integer offset 1 1))
-                 (want (max 1 (gptel-yatools--coerce-integer
-                               lines
-                               (- gptel-yatools--output-line-limit 10)
-                               1)))
-                 ;; Stop the page at whichever limit is hit first:
-                 ;; the requested line count, or the response size
-                 ;; budget.  Doing it here keeps the paging note
-                 ;; accurate instead of being overridden by a second,
-                 ;; character-count truncation further down.
-                 (end (let ((n 0) (used 0) (i (1- start)) (stop nil))
-                        (while (and (not stop) (< i total) (< n want))
-                          (setq used (+ used 1 (length (nth i all-lines))))
-                          (if (and (> n 0)
-                                   (> used gptel-yatools--output-char-limit))
-                              (setq stop t)
-                            (setq n (1+ n) i (1+ i))))
-                        (+ start -1 (max 1 n))))
-                 (past-end (> start total))
-                 (page (cond
-                        (past-end "")
-                        ((or (> start 1) (< end total))
-                         (mapconcat #'identity
-                                    (cl-subseq all-lines (1- start) end)
-                                    "\n"))
-                        (t diff-text)))
-                 (paged-p (and (not past-end)
-                               (not (equal page diff-text))))
+                 (paging (gptel-yatools--page-text
+                          diff-text
+                          (gptel-yatools--coerce-integer offset 1 1)
+                          (gptel-yatools--coerce-integer
+                           lines (- gptel-yatools--output-line-limit 10) 1)))
+                 (start (plist-get paging :start))
+                 (end (plist-get paging :end))
+                 (total (plist-get paging :total))
+                 (past-end (plist-get paging :past-end))
+                 (paged-p (plist-get paging :partial))
                  (banner
                   (cond
                    (past-end
@@ -1556,16 +1514,17 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
                                 (format "Call vfs_diff with offset=%d for the next chunk."
                                         (1+ end))
                               "This is the last chunk of the diff."))))))
-            (gptel-yatools--wrap
-             t
+            (gptel-yatools-ok
+             (concat (or banner "") (plist-get paging :text))
+             :vfs t
+             :comment
              (concat
               (if (> omitted 0)
                   (format "Unified diff from disk (a/) to VFS (b/) for the requested path only (%d other pending file(s) not shown; call vfs_diff without a path to see them)." omitted)
                 "Unified diff from disk (a/) to VFS (b/); this is what file_sync will apply. Files with conflicts are marked and show both the external change and the pending sync.")
               (if paged-p
                   (format " Showing lines %d-%d of %d of the diff text." start end total)
-                ""))
-             (concat (or banner "") page)))))))
+                ""))))))))
     :description
     "Show a unified diff from the current disk contents (a/) to the pending VFS contents (b/) for all changed files. Lines prefixed with `-' will be removed from disk on sync; lines prefixed with `+' will be added. For files whose disk contents have changed since the VFS captured them, both the external change (which would be lost) and the pending sync are shown, with a CONFLICT marker. Does not modify anything. Use it to preview pending changes before calling file_sync. Pass PATH to show only that file; pass OFFSET and LINES to page through a diff that is too big for one response (a partial excerpt is marked with a PARTIAL DIFF banner and is never the whole story)."
     :args (list '(:name "path"
@@ -1595,32 +1554,29 @@ guard; `gptel-yatools.el' appends this list to `gptel-yatools--tools'."
           (if (gptel-yatools-vfs-get full)
               (progn
                 (gptel-yatools-vfs-remove full)
-                (gptel-yatools--wrap
-                 t
-                 "VFS entry discarded."
+                (gptel-yatools-ok
                  (format "Removed pending VFS change for %s."
-                         (gptel-yatools--display-path full))))
-            (gptel-yatools--wrap
-             nil
-             "No pending VFS change."
+                         (gptel-yatools--display-path full))
+                 :vfs t
+                 :comment "VFS entry discarded."))
+            (gptel-yatools-ok
              (format "%s has no pending VFS entry."
-                     (gptel-yatools--display-path full))))))
+                     (gptel-yatools--display-path full))
+             :comment "No pending VFS change."))))
        (t
         (let ((all (gptel-yatools-vfs--changed-paths)))
           (if (null all)
-              (gptel-yatools--wrap
-               nil
-               "No pending VFS changes."
-               "The virtual filesystem has no pending changes.")
+              (gptel-yatools-ok "The virtual filesystem has no pending changes."
+                                :comment "No pending VFS changes.")
             (dolist (f all) (gptel-yatools-vfs-remove f))
-            (gptel-yatools--wrap
-             t
-             "All VFS entries discarded."
+            (gptel-yatools-ok
              (format "Discarded pending VFS changes for %d file(s):\n%s"
                      (length all)
                      (mapconcat (lambda (f)
                                   (format "  %s" (gptel-yatools--display-path f)))
-                                all "\n"))))))))
+                                all "\n"))
+             :vfs t
+             :comment "All VFS entries discarded."))))))
     :description
     "Discard pending virtual-filesystem changes without writing them to disk. Pass PATH to discard a single file's pending changes, or omit PATH to discard all pending changes. Use this to recover from conflicts (vfs_discard then re-read to refresh the baseline), to abandon unwanted edits, or to clear any stuck entry (for example one that file_sync cannot apply because an ancestor path is not writable). This does not touch disk."
     :args (list '(:name "path"

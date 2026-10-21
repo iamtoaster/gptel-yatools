@@ -35,3 +35,18 @@ A skill whose text the model fetched with the `skill` tool.  Loading is a
 single response and leaves no attachment behind, so it is not what the
 header-line count reports.
 _Avoid_: Attached skill, activated skill
+
+### Tools
+
+**Result**:
+What a tool function returns: the body the model reads, a flag saying
+whether it reflects pending VFS state, and an optional context comment.
+Never formatted text, and never a half-rendered envelope.
+_Avoid_: Response, output, return value
+
+**Tool boundary**:
+The one adapter that renders a Result into the envelope the model sees.
+It sizes, truncates and escapes the text, and turns a signalled error or
+an expired deadline into that same envelope, so a tool that fails and a
+tool that succeeds reach the model the same way.
+_Avoid_: Response builder, wrapper, formatter

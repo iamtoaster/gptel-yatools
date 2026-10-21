@@ -56,13 +56,10 @@
   "A response carrying raw bytes must be escaped and serialisable."
   (with-temp-buffer
     (gptel-yatools-test--vfs
-      (let ((out (gptel-yatools--wrap
-                  nil "probe"
-                  (string-to-multibyte (unibyte-string 233 0 255)))))
-        (should-not (cl-some (lambda (c) (eq (char-charset c) 'eight-bit))
-                             (string-to-list out)))
-        (should (condition-case nil (progn (json-serialize out) t)
-                  (error nil)))))))
+      (let ((out (gptel-yatools--respond
+                  (gptel-yatools-ok (string-to-multibyte
+                                     (unibyte-string 233 0 255))))))
+        (gptel-yatools-test--should-be-enveloped out)))))
 
 (ert-deftest gptel-yatools-test-command-output-is-json-serialisable ()
   "Command output with raw bytes must not break the request either."
@@ -184,7 +181,10 @@ the old code missed the bound by a factor of two."
 ;;;; 37. Missing/wrong-typed required tool arguments
 
 (ert-deftest gptel-yatools-test-non-string-tool-arguments-are-clean ()
-  "A nil or numeric path/command must yield a readable error."
+  "A nil or numeric path/command must yield a readable, enveloped error.
+
+The tool signals; the boundary renders it.  What the model must never
+see is a raw condition string such as `error Wrong type argument'."
   (with-temp-buffer
     (gptel-yatools-test--vfs
       (dolist (case '(("read_path" (nil))
@@ -198,9 +198,9 @@ the old code missed the bound by a factor of two."
                       ("vfs_discard" (42))))
         (let* ((name (car case))
                (args (cadr case))
-               (err (should-error
-                     (apply (gptel-yatools-test--tool name) args))))
-          (should (string-match-p "must be a string" (cadr err))))))))
+               (out (apply (gptel-yatools-test--tool name) args)))
+          (should (string-match-p "must be a string" out))
+          (gptel-yatools-test--should-be-enveloped out))))))
 
 
 ;;;; 40. `execute_elisp' output was unbounded
@@ -789,6 +789,110 @@ the status slot that gptel rewrites in place."
         (should (string-match-p "3" out))
         (should (equal (nth 1 header-line-format)
                        " Evaluating Elisp..."))))))
+
+
+;;;; Tool boundary: one response shape, one place that renders it
+
+(ert-deftest gptel-yatools-test-every-tool-returns-an-envelope ()
+  "No tool may return bare text, and every reply must survive JSON.
+
+Calling each tool for real would run shell commands and evaluate Elisp,
+so this checks the boundary itself: whatever a tool returns or signals,
+the function installed in the registry renders an envelope."
+  (with-temp-buffer
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-test--ok (gptel-yatools-ok "body")))
+        (dolist (tool gptel-yatools--tools)
+          (let ((result
+                 (gptel-yatools--call-tool
+                  (gptel-tool-name tool)
+                  (lambda (&rest _) gptel-yatools-test--ok)
+                  nil)))
+            (should (string-match-p "body" result))
+            (gptel-yatools-test--should-be-enveloped result))))
+      ;; A tool that signals is enveloped too, including the raw bytes an
+      ;; error message can carry (a file name that does not decode).
+      (dolist (thunk (list (lambda () (error "plain failure"))
+                           (lambda ()
+                             (error "raw name: %s"
+                                    (string-to-multibyte (unibyte-string 105 233))))))
+        (let ((out (gptel-yatools--call-tool "probe" thunk nil)))
+          (gptel-yatools-test--should-be-enveloped out)
+          (should (string-match-p "Error: " out)))))))
+
+(ert-deftest gptel-yatools-test-ok-derives-the-comment-from-the-vfs-flag ()
+  "The context comment is derived from :vfs unless the caller overrides it."
+  (should (string-match-p "virtual filesystem"
+                          (gptel-yatools-result-comment (gptel-yatools-ok "body" :vfs t))))
+  (should (string-match-p "disk"
+                          (gptel-yatools-result-comment (gptel-yatools-ok "body"))))
+  (should (equal (gptel-yatools-result-comment
+                  (gptel-yatools-ok "body" :vfs t :comment "custom"))
+                 "custom")))
+
+(ert-deftest gptel-yatools-test-a-wrong-shaped-result-is-reported-not-signalled ()
+  "A tool returning something that is not a result must not kill the call.
+
+Signalling here would bypass the envelope, which is the one thing the
+boundary exists to prevent."
+  (let ((out (gptel-yatools--call-tool "probe" (lambda (&rest _) "bare text") nil)))
+    (should (string-match-p "internal error" out))
+    (gptel-yatools-test--should-be-enveloped out)))
+
+(ert-deftest gptel-yatools-test-timeout-is-an-envelope-and-a-condition ()
+  "An expired deadline must reach the model in the same envelope.
+
+The deadline guard sits inside the response boundary -- the boundary is
+what the registry calls, and the guard is what it calls -- so a timeout
+is a signal the boundary has to render like any other failure."
+  (let* ((probe (gptel-yatools--install-response
+                 (gptel-yatools--install-timeout
+                  (gptel--make-tool
+                   :name "probe_timeout"
+                   :description "Probe."
+                   :function (lambda (&rest _) (sleep-for 5) "done")
+                   :args nil))))
+         (out (funcall (gptel-tool-function probe) 1)))
+    (should (string-match-p "did not finish within its 1 second timeout" out))
+    (gptel-yatools-test--should-be-enveloped out))
+  (should-error (gptel-yatools--call-with-timeout
+                 (lambda () (sleep-for 5)) nil 1)
+                :type 'gptel-yatools-timeout-error))
+
+(ert-deftest gptel-yatools-test-asynchronous-tools-are-refused ()
+  "An asynchronous tool cannot cross the boundary, so building one must fail."
+  (gptel-yatools-test--noninteractive
+    (should-error (gptel-yatools--make-tool
+                   :name "probe_async"
+                   :description "Probe."
+                   :async t
+                   :function (lambda (_callback) nil))
+                  :type 'error)))
+
+(ert-deftest gptel-yatools-test-page-text-stops-at-the-size-budget ()
+  "A page must fit the response budget, and say what it showed."
+  (let* ((wide (make-string (1+ gptel-yatools--output-char-limit) ?x))
+         (text (mapconcat #'identity (list "one" wide "three") "\n"))
+         (page (gptel-yatools--page-text text 1 10)))
+    (should (= (plist-get page :start) 1))
+    ;; Only the first line fits, so the page is one line, not three.
+    (should (= (plist-get page :end) 1))
+    (should (plist-get page :partial))
+    (should (< (length (plist-get page :text))
+               gptel-yatools--output-char-limit))))
+
+(ert-deftest gptel-yatools-test-page-text-reports-the-last-page ()
+  "The last page must say it is the last one, not that nothing follows."
+  (let ((page (gptel-yatools--page-text "a\nb\nc" 3 10)))
+    (should (equal (plist-get page :text) "c"))
+    (should (= (plist-get page :end) (plist-get page :total)))
+    ;; A page that does not start at line 1 is still partial: the caller
+    ;; needs to know the excerpt is not the whole text.
+    (should (plist-get page :partial))
+    (should-not (plist-get page :past-end)))
+  (let ((page (gptel-yatools--page-text "a\nb\nc" 9 10)))
+    (should (plist-get page :past-end))
+    (should (equal (plist-get page :text) ""))))
 
 
 

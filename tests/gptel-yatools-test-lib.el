@@ -70,11 +70,31 @@ directory first, so that everything resolves exactly as it does here."
       (ignore-errors (delete-directory dir t)))))
 
 (defun gptel-yatools-test--tool (name)
-  "Return the callable implementing the gptel tool NAME."
+  "Return the callable implementing the gptel tool NAME.
+
+The callable is the tool boundary itself: it renders the tool's result,
+and turns a signalled error into the same envelope.  So a call made
+through it returns exactly what the model would see, which is what tests
+should assert on."
   (let ((tool (cl-find name gptel-yatools--tools
                        :key #'gptel-tool-name :test #'equal)))
     (unless tool (error "No such tool registered: %s" name))
     (gptel-tool-function tool)))
+
+(defun gptel-yatools-test--should-be-enveloped (text)
+  "Assert that TEXT is a tool envelope the model can actually be sent.
+
+Every tool response must carry both tags, and must survive JSON
+serialisation: a raw byte anywhere in it (a file name that does not
+decode, say) used to make `json-serialize' refuse the whole request."
+  (should (stringp text))
+  (should (string-prefix-p "<tool_context " text))
+  (should (string-match-p "<tool_response>" text))
+  (should (string-suffix-p "</tool_response>" text))
+  (should-not (cl-some (lambda (c) (eq (char-charset c) 'eight-bit))
+                       (string-to-list text)))
+  (should (condition-case nil (progn (json-serialize text) t)
+            (error nil))))
 
 (defun gptel-yatools-test--tool-spec (name)
   "Return the `gptel-tool' struct registered as NAME.

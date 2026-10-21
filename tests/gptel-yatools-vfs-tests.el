@@ -421,17 +421,16 @@ them as characters and make sync expand each LF into another CRLF."
 ;;;; 17/18. Directory handling
 
 (ert-deftest gptel-yatools-test-directory-read-gives-clear-error ()
-  "Reading a directory as a file must explain itself."
+  "Reading a directory as a file must explain itself, in the envelope."
   (gptel-yatools-test--in-dir
     (let ((dir (make-temp-file "sub" t)))
       (unwind-protect
           (with-temp-buffer
             (gptel-yatools-test--vfs
-              (let ((err (should-error
-                          (funcall (gptel-yatools-test--tool "read_file_from_offset")
-                                   dir 1 1))))
-                (should (string-match-p "is a directory, not a file"
-                                        (cadr err))))))
+              (let ((out (funcall (gptel-yatools-test--tool "read_file_from_offset")
+                                  dir 1 1)))
+                (should (string-match-p "is a directory, not a file" out))
+                (gptel-yatools-test--should-be-enveloped out))))
         (ignore-errors (delete-directory dir t))))))
 
 (ert-deftest gptel-yatools-test-empty-directory-listing ()
@@ -468,9 +467,9 @@ them as characters and make sync expand each LF into another CRLF."
   (skip-unless (file-exists-p "/dev/null"))
   (with-temp-buffer
     (gptel-yatools-test--vfs
-      (let ((err (should-error
-                  (funcall (gptel-yatools-test--tool "read_path") "/dev/null"))))
-        (should (string-match-p "not a regular file" (cadr err)))))))
+      (let ((out (funcall (gptel-yatools-test--tool "read_path") "/dev/null")))
+        (should (string-match-p "not a regular file" out))
+        (gptel-yatools-test--should-be-enveloped out)))))
 
 (ert-deftest gptel-yatools-test-non-regular-write-is-refused ()
   "Writing to a device or FIFO must be refused."
@@ -681,7 +680,7 @@ them as characters and make sync expand each LF into another CRLF."
 ;;;; 32. Unreadable directories leaked a raw `file-error'
 
 (ert-deftest gptel-yatools-test-unreadable-directory-is-clean ()
-  "Reading an unreadable directory must explain itself."
+  "Reading an unreadable directory must explain itself, in the envelope."
   (gptel-yatools-test--in-dir
     (let ((dir (make-temp-file "noread" t)))
       (unwind-protect
@@ -689,11 +688,9 @@ them as characters and make sync expand each LF into another CRLF."
             (set-file-modes dir #o000)
             (with-temp-buffer
               (gptel-yatools-test--vfs
-                (let ((err (should-error
-                            (funcall (gptel-yatools-test--tool "read_path")
-                                     dir))))
-                  (should (string-match-p "cannot read directory"
-                                          (cadr err)))))))
+                (let ((out (funcall (gptel-yatools-test--tool "read_path") dir)))
+                  (should (string-match-p "cannot read directory" out))
+                  (gptel-yatools-test--should-be-enveloped out)))))
         (ignore-errors (set-file-modes dir #o755))
         (ignore-errors (delete-directory dir t))))))
 

@@ -24,8 +24,14 @@
 ;; - the glue that makes a tool call run in the buffer that owns the
 ;;   request, so a chat's buffer-local VFS and `default-directory' apply;
 ;; - the helpers every tool builds on: workspace-relative paths, argument
-;;   coercion, the XML response envelope with its size limits, and binary
-;;   detection;
+;;   coercion, binary detection;
+;;
+;; - the tool boundary: the one adapter that renders what a tool returns
+;;   (`gptel-yatools-result') as the envelope the model sees.  It sizes,
+;;   truncates and escapes the text, and turns a signalled error or an
+;;   expired deadline into the same envelope, so no tool formats its own
+;;   response and every response reaches the model by the same route;
+;;
 ;; - the timeout machinery every tool is wrapped in;
 ;; - the registry: `gptel-yatools--tools', `gptel-yatools-enable' and
 ;;   friends.
@@ -374,7 +380,8 @@ without reading it first."
                        (gptel-yatools--display-path path)
                        (gptel-yatools--display-path path)
                        (gptel-yatools--display-path path))))
-    (gptel-yatools--wrap from-vfs "Binary file; contents withheld." body)))
+    (gptel-yatools-ok body :vfs from-vfs
+                      :comment "Binary file; contents withheld.")))
 
 (defconst gptel-yatools--output-char-limit 64000
   "Maximum number of characters a single tool response may contain.
@@ -487,8 +494,8 @@ nothing about STRING and walks all of it."
                           note))
         escaped))))
 
-(defun gptel-yatools--wrap (from-vfs comment body)
-  "Wrap BODY in the tool context/response XML envelope.
+(defun gptel-yatools--envelope (from-vfs comment body)
+  "Return BODY wrapped in the tool context/response XML envelope.
 
 FROM-VFS is non-nil if the content came from the virtual filesystem.
 COMMENT is a short note shown to the LLM in the context tag.
@@ -500,6 +507,155 @@ bytes that cannot be serialised for the model."
           (if from-vfs "true" "false")
           (gptel-yatools--xml-escape (gptel-yatools--escape-raw-bytes comment))
           (gptel-yatools--truncate body)))
+
+;;-------------------------------------------------------------------------
+;; The tool boundary
+;;
+;; A tool function says what it found and returns a Result; rendering that
+;; as the envelope above is this section's job, and it happens in exactly
+;; one place -- the wrapper `gptel-yatools--make-tool' installs around every
+;; tool.  Two reasons this is not left to each tool:
+;;
+;; - An error that is signalled rather than returned never reaches the
+;;   envelope.  gptel catches it, stringifies it and stores THAT as the
+;;   result, so the model would get "error <message>" with no
+;;   <tool_context>, and -- worse -- without passing through
+;;   `gptel-yatools--escape-raw-bytes'.  A raw byte in an error message
+;;   (a file name that does not decode, say) then makes `json-serialize'
+;;   refuse the whole request.  Catching here closes that hole for every
+;;   tool at once.
+;; - `vfs_diff' pages its own output, and the page has to fit the same
+;;   size budget the envelope enforces, or the truncation below would cut
+;;   it in half after the tool had already reported what it showed.
+;;   `gptel-yatools--page-text' is that budget, offered as a helper
+;;   instead of a constant each tool reads directly.
+;;-------------------------------------------------------------------------
+(cl-defstruct (gptel-yatools-result (:constructor gptel-yatools--make-result)
+                                    (:copier nil))
+  "What a tool function returns.
+
+BODY is the text the model reads.  VFS is non-nil when the reply
+describes pending virtual-filesystem state that is not on disk yet.
+COMMENT is the envelope's one-line context comment; nil means derive it
+from VFS.
+
+Build one with `gptel-yatools-ok'.  A tool never formats, truncates or
+escapes its own response: all of that happens once, at the boundary
+\(see `gptel-yatools--call-tool')."
+  (body "" :documentation "The text the model reads.")
+  (vfs nil :documentation "Non-nil if this reply reflects pending VFS state.")
+  (comment nil :documentation "Context comment, or nil to derive it from VFS."))
+
+(defconst gptel-yatools--result-comments
+  '((t . "\
+This reply reflects pending changes in the virtual filesystem that are not on disk yet. Run the file_sync tool to persist them.")
+    (nil . "This reply reflects the state of disk."))
+  "Default envelope comments, keyed by a result's VFS flag.
+
+Tools with something more specific to say pass :comment to
+`gptel-yatools-ok' instead.")
+
+(defun gptel-yatools-ok (body &rest args)
+  "Return a `gptel-yatools-result' carrying BODY.
+
+BODY is what the model reads.  It is size-limited and raw-byte-escaped
+at the boundary, so a tool can return all of it and let the boundary
+decide what fits.
+
+ARGS is a plist with two optional keys:
+
+  :vfs      non-nil when the reply describes pending virtual-filesystem
+            state that is not on disk yet, which is what the model needs
+            to know before it trusts the text as a description of disk.
+  :comment  the envelope's one-line context comment.  Defaults to a
+            sentence derived from :vfs."
+  (let ((vfs (plist-get args :vfs)))
+    (gptel-yatools--make-result
+     :body (if (stringp body) body (format "%s" body))
+     :vfs (and vfs t)
+     :comment (or (plist-get args :comment)
+                  (cdr (assq (and vfs t) gptel-yatools--result-comments))))))
+
+(defun gptel-yatools--respond (result)
+  "Render RESULT, a `gptel-yatools-result', as the envelope the model sees.
+
+A tool returning anything else is a bug in this package.  It is reported
+to the model as a failed call rather than signalled, because a signalled
+error would bypass the envelope -- and with it the escaping that keeps
+the request serialisable."
+  (if (gptel-yatools-result-p result)
+      (gptel-yatools--envelope (gptel-yatools-result-vfs result)
+                               (gptel-yatools-result-comment result)
+                               (gptel-yatools-result-body result))
+    (gptel-yatools--envelope
+     nil
+     "The tool returned no result."
+     (format "Error: internal error: the tool returned %S where a result was expected. This is a bug in gptel-yatools; nothing was changed."
+             result))))
+
+(defun gptel-yatools--call-tool (name function args)
+  "Call FUNCTION with positional ARGS and render the outcome for the model.
+
+NAME labels the tool in the envelope.  This is the tool boundary: a
+signalled error, an expired deadline and a tool that returned the wrong
+shape all become the same envelope here, sized, truncated and escaped,
+so the model never receives bare text and never receives text that
+cannot be serialised back to JSON.
+
+`quit' passes through untouched, and so does anything the user asked to
+debug: `condition-case-unless-debug' leaves the signal alone while
+`debug-on-error' is set."
+  (condition-case-unless-debug err
+      (gptel-yatools--respond (apply function args))
+    (gptel-yatools-timeout-error
+     (gptel-yatools--envelope
+      nil "Tool call timed out."
+      (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
+                                      (plist-get (cdr err) :tool))))
+    (error
+     (gptel-yatools--envelope
+      nil (format "The %s tool reported an error." name)
+      (format "Error: %s" (error-message-string err))))))
+
+(defun gptel-yatools--page-text (text offset lines)
+  "Return a page of TEXT, described by a plist.
+
+OFFSET is the 1-based number of the first line wanted, LINES how many.
+The page never exceeds `gptel-yatools--output-char-limit', so the
+boundary's truncation cannot cut it in half after the caller has said
+what it showed.  A single line longer than the limit is still returned
+whole; the boundary handles that case.
+
+The plist holds :text, :start and :end (1-based, inclusive, of the lines
+shown), :total (lines in TEXT), :past-end (OFFSET was beyond the last
+line) and :partial (the page is not the whole of TEXT)."
+  (let* ((all (split-string text "\n"))
+         (total (length all))
+         (start (max 1 offset))
+         (want (max 1 lines))
+         (past-end (> start total))
+         (end (if past-end
+                  start
+                (let ((shown 0) (used 0) (i (1- start)) (stop nil))
+                  (while (and (not stop) (< i total) (< shown want))
+                    (let ((size (1+ (length (nth i all)))))
+                      (if (and (> shown 0)
+                               (> (+ used size)
+                                  gptel-yatools--output-char-limit))
+                          (setq stop t)   ; the next line would overflow
+                        (setq used (+ used size)
+                              shown (1+ shown)
+                              i (1+ i)))))
+                  (+ start -1 (max 1 shown))))))
+    (list :text (if past-end
+                    ""
+                  (mapconcat #'identity (cl-subseq all (1- start) end) "\n"))
+          :start start
+          :end end
+          :total total
+          :past-end past-end
+          :partial (and (not past-end)
+                        (or (> start 1) (< end total))))))
 ;;-------------------------------------------------------------------------
 ;; Tool call timeouts
 ;;
@@ -544,18 +700,18 @@ keeps Emacs busy for that long, which the user pays for."
                 (gptel-yatools--resolve-timeout nil))
         :optional t))
 
-(defun gptel-yatools--timeout-response (seconds &optional name)
-  "Return the tool result reported when a call exceeds SECONDS.
+(define-error 'gptel-yatools-timeout-error
+  "Tool call did not finish within its timeout")
+
+(defun gptel-yatools--timeout-message (seconds &optional name)
+  "Return the text reported when a call exceeds SECONDS.
 
 NAME, when given, is the tool that ran out of time."
-  (gptel-yatools--wrap
-   nil
-   "Tool call timed out."
-   (format "Error: the %stool call did not finish within its %s second timeout and was aborted. Whatever it had done up to that point may or may not have happened; do not assume it completed. Retry with a larger TIMEOUT argument only if the work genuinely needs more time; otherwise split the request into smaller calls."
-           (if (and name (not (string-empty-p name)))
-               (concat name " ")
-             "")
-           seconds)))
+  (format "Error: the %stool call did not finish within its %s second timeout and was aborted. Whatever it had done up to that point may or may not have happened; do not assume it completed. Retry with a larger TIMEOUT argument only if the work genuinely needs more time; otherwise split the request into smaller calls."
+          (if (and name (not (string-empty-p name)))
+              (concat name " ")
+            "")
+          seconds))
 
 (defun gptel-yatools--description-base (description)
   "Return DESCRIPTION without the timeout note, or nil if it is not a string.
@@ -610,18 +766,24 @@ example reviewing a `file_sync' diff) does not count."
   "Call FUNCTION with positional ARGS, aborting after TIMEOUT seconds.
 
 TIMEOUT defaults to `gptel-yatools-timeout'; NAME labels the tool in the
-timeout message.  Returns FUNCTION's value, or a timeout error string
-when the deadline is hit.  A timer is used rather than `with-timeout'
-so that time spent waiting for the user (see
-`gptel-yatools--timeout-suspended') can be excluded, and because
-`with-timeout' cannot interrupt `call-process' anyway.
+error.  Returns FUNCTION's value, or signals `gptel-yatools-timeout-error'
+with the seconds and tool name in its data when the deadline is hit.  A
+timer is used rather than `with-timeout' so that time spent waiting for
+the user (see `gptel-yatools--timeout-suspended') can be excluded, and
+because `with-timeout' cannot interrupt `call-process' anyway.
 
 Timers only run while Emacs waits for input, so this bounds calls that
 block on I/O -- the case that matters -- but cannot interrupt a purely
-CPU-bound Elisp form."
+CPU-bound Elisp form.
+
+The timer can only `throw': a `signal' raised inside a timer callback is
+consumed by Emacs's timer loop and the call would carry on running.  So
+the timer throws a fresh marker, and the catch site re-signals it as the
+condition the boundary renders."
   (let* ((timeout (gptel-yatools--resolve-timeout timeout))
          (gptel-yatools--current-timeout timeout)
          (tag (make-symbol "gptel-yatools-timeout"))
+         (expired (list 'expired timeout name))
          (start (float-time))
          (paused 0.0)
          (pause-start nil)
@@ -635,10 +797,13 @@ CPU-bound Elisp form."
                        (setq paused (+ paused (- (float-time) pause-start)))
                        (setq pause-start nil))
                      (when (> (- (float-time) start paused) timeout)
-                       (throw tag
-                              (gptel-yatools--timeout-response timeout name))))))))
+                       (throw tag expired)))))))
     (unwind-protect
-        (catch tag (apply function args))
+        (let ((value (catch tag (apply function args))))
+          (if (eq value expired)
+              (signal 'gptel-yatools-timeout-error
+                      (list :seconds timeout :tool name))
+            value))
       (cancel-timer timer))))
 
 (defun gptel-yatools--install-timeout (tool)
@@ -680,14 +845,39 @@ Returns TOOL."
                     (gptel-yatools--timeout-note)))
       tool)))
 
+(defun gptel-yatools--install-response (tool)
+  "Make TOOL's function cross the tool boundary, and return TOOL.
+
+The tool's own function keeps returning a `gptel-yatools-result'; the
+wrapper installed here is what renders it, and what catches the errors
+the function signals on the way out."
+  (let ((function (gptel-tool-function tool))
+        (name (gptel-tool-name tool)))
+    (setf (gptel-tool-function tool)
+          (lambda (&rest args)
+            (gptel-yatools--call-tool name function args)))
+    tool))
+
 (defun gptel-yatools--make-tool (&rest slots)
-  "Create a tool from SLOTS, register it, and give it the shared timeout.
+  "Create a tool from SLOTS, register it, and put it behind the boundary.
 
 SLOTS are the arguments of `gptel-make-tool'.  The tool is added to
 gptel's registry, which is what `gptel-menu' lists, and comes back with
-its TIMEOUT argument and deadline guard already installed: enabling a
-tool later needs no further work on it."
-  (gptel-yatools--install-timeout (apply #'gptel-make-tool slots)))
+its TIMEOUT argument, its deadline guard and the response boundary
+already installed: enabling a tool later needs no further work on it, and
+creating one any other way is what would leave it without them.
+
+An asynchronous tool is refused here rather than accepted and quietly
+left outside the boundary: gptel calls such a tool with a callback and
+the tool returns before its work is done, so there is no value for this
+function to render.  This package defines none, and a tool that needs to
+be asynchronous needs a different interface, not an exception."
+  (let ((tool (apply #'gptel-make-tool slots)))
+    (when (gptel-tool-async tool)
+      (error "gptel-yatools: %s cannot be asynchronous: an asynchronous tool returns before its work is done, so its response cannot be rendered at the tool boundary"
+             (gptel-tool-name tool)))
+    (gptel-yatools--install-response
+     (gptel-yatools--install-timeout tool))))
 
 (defun gptel-yatools-enable-all ()
   "Add every tool defined by this package to `gptel-tools'."

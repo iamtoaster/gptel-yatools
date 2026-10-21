@@ -399,19 +399,31 @@ the real (buffer-local or global) value untouched."
 ;;;; 48. Tool calls could block Emacs forever
 
 (ert-deftest gptel-yatools-test-every-tool-declares-a-timeout ()
-  "Every tool must accept TIMEOUT and tell the model not to raise it."
+  "Every tool must accept TIMEOUT and tell the model not to raise it.
+
+The guidance lives in the argument's description, which is where a model
+looks when deciding whether to pass one.  It is stated once per tool: a
+copy appended to the description as well would be re-sent on every
+request, and had to be re-appended on every reload to stay in step."
   (dolist (tool gptel-yatools--tools)
     (unless (gptel-tool-async tool)
-      (let ((description (gptel-tool-description tool))
-            (args (gptel-tool-args tool)))
-        (should (equal (plist-get (car (last args)) :name) "timeout"))
+      (let* ((description (gptel-tool-description tool))
+             (args (gptel-tool-args tool))
+             (timeout (car (last args))))
+        (should (equal (plist-get timeout :name) "timeout"))
         (should (= 1 (cl-count-if (lambda (arg)
                                     (equal (plist-get arg :name) "timeout"))
                                   args)))
-        ;; Exactly one note: installed twice, it must not pile up.
-        (should (= 1 (gptel-yatools-test--occurrences description "Timeouts: ")))
-        (should (string-match-p "do not raise the timeout unless"
-                                description))))))
+        (should (plist-get timeout :optional))
+        ;; The default is named, so the model can reason about splitting a
+        ;; call, and it is the configured one.
+        (should (string-match-p
+                 (format "default (%d seconds)" (gptel-yatools--resolve-timeout nil))
+                 (plist-get timeout :description)))
+        (should (string-match-p "Do not raise it unless"
+                                (plist-get timeout :description)))
+        ;; Nothing repeats it at the end of the description.
+        (should (= 0 (gptel-yatools-test--occurrences description "Timeouts: ")))))))
 
 (ert-deftest gptel-yatools-test-timeout-resolution ()
   "The default timeout must be used unless the model overrides it."
@@ -454,7 +466,7 @@ the real (buffer-local or global) value untouched."
       (should (= (length timer-list) before)))))
 
 (ert-deftest gptel-yatools-test-timeout-install-is-idempotent ()
-  "Installing the timeout twice must not duplicate the argument or the note.
+  "Installing the timeout twice must not duplicate the argument.
 
 `gptel--make-tool' is used instead of `gptel-make-tool' because the
 latter also registers the tool in `gptel--known-tools', which the
@@ -469,10 +481,35 @@ suite must not pollute."
     (should (= 1 (cl-count-if (lambda (arg)
                                 (equal (plist-get arg :name) "timeout"))
                               (gptel-tool-args tool))))
-    (should (= 1 (gptel-yatools-test--occurrences
-                  (gptel-tool-description tool) "Timeouts: ")))
     ;; The guard must still pass the real arguments through.
     (should (equal (funcall (gptel-tool-function tool) "value" 5) "value"))))
+
+(ert-deftest gptel-yatools-test-timeout-arg-tracks-the-setting ()
+  "Changing the timeout must update what the model is told, without reloading.
+
+The argument is the only place the default is named, so a stale number
+there would have the model reasoning about a limit that is not in force.
+`:set' runs only through `customize-set-variable', which is the path the
+user takes; a plain `setq' deliberately does not go through it."
+  (let ((tool (gptel--make-tool
+               :name "probe_tool"
+               :description "Probe."
+               :function (lambda (x) x)
+               :args (list (list :name "x" :type 'string :description "x"))))
+        (original gptel-yatools-timeout))
+    (unwind-protect
+        (progn
+          (gptel-yatools--install-timeout tool)
+          (let ((gptel-yatools--tools (list tool)))
+            (customize-set-variable 'gptel-yatools-timeout 30)
+            (should (string-match-p
+                     "default (30 seconds)"
+                     (plist-get (car (last (gptel-tool-args tool)))
+                                :description))))
+          ;; The description itself must not grow a second copy.
+          (should-not (string-match-p "Timeouts: "
+                                      (gptel-tool-description tool))))
+      (customize-set-variable 'gptel-yatools-timeout original))))
 
 (ert-deftest gptel-yatools-test-timeout-skips-async-tools ()
   "An asynchronous tool must be left exactly as it was.

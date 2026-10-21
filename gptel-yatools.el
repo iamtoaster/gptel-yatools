@@ -685,17 +685,15 @@ one second."
    (gptel-yatools--coerce-integer (bound-and-true-p gptel-yatools-timeout) 120 1)
    1))
 
-(defun gptel-yatools--timeout-note ()
-  "Return the timeout paragraph appended to every tool description.
-
-The model is the only one who can raise a timeout, so the note is
-worded for it: the default is already generous, and a longer one
-keeps Emacs busy for that long, which the user pays for."
-  (format "\n\nTimeouts: this tool call is aborted if it runs longer than %s seconds. Passing a larger TIMEOUT argument is possible, but do not raise the timeout unless the task truly cannot be completed within the default -- a longer timeout means the user waits longer."
-          (gptel-yatools--resolve-timeout nil)))
-
 (defun gptel-yatools--timeout-arg ()
-  "Return the optional TIMEOUT argument plist added to every tool."
+  "Return the optional TIMEOUT argument plist added to every tool.
+
+This is the only place the model is told about timeouts: one argument
+description, stated once, naming the default and telling the model not
+to raise it unless the work genuinely needs longer.  Saying the same
+thing again at the end of every tool description was tried and dropped
+-- it tripled the size of the whole tool interface and had to be
+re-appended on every reload to stay in step with this one."
   (list :name "timeout"
         :type "integer"
         :description
@@ -716,40 +714,25 @@ NAME, when given, is the tool that ran out of time."
             "")
           seconds))
 
-(defun gptel-yatools--description-base (description)
-  "Return DESCRIPTION without the timeout note, or nil if it is not a string.
+(defun gptel-yatools--refresh-timeout-arg ()
+  "Rewrite the TIMEOUT argument's description in every tool.
 
-Stripping the note before it is re-added is what keeps repeated installs
-from piling up copies of the same paragraph."
-  (when (stringp description)
-    (let ((pos (string-match "\n\nTimeouts: " description)))
-      (if pos (substring description 0 pos) description))))
-
-(defun gptel-yatools--refresh-timeout-notes ()
-  "Rewrite the timeout text in every tool's description and TIMEOUT argument.
-
-Kept separate from `gptel-yatools--install-timeout' so that changing
+Kept separate from the installation so that changing
 `gptel-yatools-timeout' during a session updates what the model is told
 instead of leaving a stale number behind.  The tools are taken from this
 package's own list, not from `gptel-tools': a tool that the user has not
-enabled is not in `gptel-tools', but its description must still be
-correct when it is enabled later."
+enabled is not in `gptel-tools', but its argument must still be correct
+when it is enabled later."
   (dolist (tool gptel-yatools--tools)
-    (let* ((desc (gptel-tool-description tool))
-           (args (gptel-tool-args tool))
-           (base (gptel-yatools--description-base desc))
-           (last-arg (car (last args))))
-      (when base
-        (setf (gptel-tool-description tool)
-              (concat base (gptel-yatools--timeout-note))))
-      (when (equal (plist-get last-arg :name) "timeout")
+    (let ((args (gptel-tool-args tool)))
+      (when (equal (plist-get (car (last args)) :name) "timeout")
         (setf (gptel-tool-args tool)
               (append (butlast args) (list (gptel-yatools--timeout-arg))))))))
 
 (defun gptel-yatools--set-timeout (symbol value)
-  "Set `gptel-yatools-timeout' to VALUE, updating the tool descriptions."
+  "Set `gptel-yatools-timeout' to VALUE, updating the tool arguments."
   (set-default symbol value)
-  (gptel-yatools--refresh-timeout-notes))
+  (gptel-yatools--refresh-timeout-arg))
 
 (defcustom gptel-yatools-timeout 120
   "Maximum number of seconds a gptel tool call may run before it is aborted.
@@ -812,12 +795,12 @@ condition the boundary renders."
 (defun gptel-yatools--install-timeout (tool)
   "Give TOOL a TIMEOUT argument and a guard that aborts it when it expires.
 
-The guard wraps the tool's function, so the tool definitions below
-stay written in terms of their own arguments.  Installing twice on the
-same tool changes nothing, and asynchronous tools are left untouched:
-such a tool returns before its work is done, so a deadline around the
-call could only report a timeout for work that is still running.
-Returns TOOL."
+The guard wraps the tool's function, so the tool definitions stay
+written in terms of their own arguments.  Installing twice on the same
+tool changes nothing, and asynchronous tools are left untouched: such a
+tool returns before its work is done, so a deadline around the call
+could only report a timeout for work that is still running.  Returns
+TOOL."
   (if (gptel-tool-async tool)
       tool
     (let* ((args (gptel-tool-args tool))
@@ -840,12 +823,6 @@ Returns TOOL."
                      function
                      (if has-timeout (butlast call-args) call-args)
                      timeout tool-name))))))
-      (setf (gptel-tool-description tool)
-            (concat (string-trim-right
-                     (or (gptel-yatools--description-base
-                          (gptel-tool-description tool))
-                         ""))
-                    (gptel-yatools--timeout-note)))
       tool)))
 
 (defun gptel-yatools--install-response (tool)

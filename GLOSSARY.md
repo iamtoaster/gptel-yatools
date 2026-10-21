@@ -50,3 +50,19 @@ It sizes, truncates and escapes the text, and turns a signalled error or
 an expired deadline into that same envelope, so a tool that fails and a
 tool that succeeds reach the model the same way.
 _Avoid_: Response builder, wrapper, formatter
+
+### Pending changes
+
+**VFS write interface**:
+The two entry points that own everything about a pending write: whether
+the target can be written, which encoding the sync will use, whether the
+content fits that encoding, and the baseline a conflict is detected
+against.  `write_file` and `write_file_diff` are argument adapters over
+it, so a rule about writes has one home.
+_Avoid_: Write helper, put function
+
+**Pending change**:
+A file's VFS content when it differs from disk, in text or in encoding.
+Not every VFS entry is one: writing back what the disk already holds
+leaves nothing pending.
+_Avoid_: Dirty file, buffered file

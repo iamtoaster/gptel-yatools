@@ -33,8 +33,8 @@
 (declare-function gptel-yatools--make-tool "gptel-yatools" (&rest slots))
 (declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
 (declare-function gptel-yatools--update-tool-status "gptel-yatools" (message &optional face))
-(declare-function gptel-yatools-vfs--changed-paths "gptel-yatools-vfs" ())
-(declare-function gptel-yatools-vfs--invalidate-header-line "gptel-yatools-vfs" ())
+(declare-function gptel-yatools-vfs-pending-paths "gptel-yatools-vfs" ())
+(declare-function gptel-yatools-vfs-forget-pending-cache "gptel-yatools-vfs" ())
 
 (defun gptel-yatools-tools--command-result (output)
   "Return the result for a finished command whose combined output is OUTPUT.
@@ -44,7 +44,7 @@ that the command ran against disk, not the VFS: a file it expected to
 find may only exist in the pending changes, and one it read may be
 stale.  That warning is the whole reason a command result carries the
 VFS flag, since the output itself always describes the disk."
-  (let ((changed (gptel-yatools-vfs--changed-paths)))
+  (let ((changed (gptel-yatools-vfs-pending-paths)))
     (gptel-yatools-ok
      output
      :vfs (and changed t)
@@ -162,7 +162,7 @@ uses a real process and polls it instead."
                 ;; The command may have changed files on disk, which can
                 ;; change which pending entries still differ, so the cached
                 ;; header-line count must not outlive it.
-                (gptel-yatools-vfs--invalidate-header-line)
+                (gptel-yatools-vfs-forget-pending-cache)
                 (gptel-yatools-tools--command-result
                  (cond
                   (start-error

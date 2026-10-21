@@ -50,12 +50,12 @@
 ;; the rest of the package has been loaded.
 (declare-function gptel-yatools--make-tool "gptel-yatools" (&rest slots))
 (declare-function gptel-yatools--workspace-root "gptel-yatools" ())
-(declare-function gptel-yatools-vfs--effective-content "gptel-yatools-vfs" (path))
+(declare-function gptel-yatools-vfs-read "gptel-yatools-vfs" (path))
+(declare-function gptel-yatools-vfs-pending-p "gptel-yatools-vfs" (path))
 (declare-function gptel-yatools-ok "gptel-yatools" (body &rest args))
 (declare-function gptel-yatools--require-string "gptel-yatools" (value what))
 (declare-function gptel-yatools--binary-p "gptel-yatools" (string))
 (declare-function gptel-yatools--binary-notice "gptel-yatools" (path content from-vfs))
-(declare-function gptel-yatools-vfs-get "gptel-yatools-vfs" (path))
 (defvar gptel-context)
 ;; Declared with a value as well as its definition in `gptel-yatools.el':
 ;; this file is loaded both after that one and, at compile time, on its own,
@@ -295,9 +295,9 @@ there is one, wins over the file on disk just as it does for `read_path'.
 The directory name, not the `name' field, is the skill's identity."
   (let* ((dirname (file-name-nondirectory (directory-file-name dir)))
          (path (expand-file-name "SKILL.md" dir))
-         (effective (gptel-yatools-vfs--effective-content path))
-         (text (car-safe effective))
-         (from-vfs (cdr-safe effective))
+         (read (ignore-errors (gptel-yatools-vfs-read path)))
+         (text (plist-get read :content))
+         (from-vfs (plist-get read :from-vfs))
          (split (and text (gptel-yatools-skills--frontmatter text)))
          (frontmatter nil)
          (problems nil))
@@ -339,7 +339,7 @@ The directory name, not the `name' field, is the skill's identity."
 A pending VFS copy counts, so a skill being authored in the buffer is
 found before its `SKILL.md' exists on disk."
   (let ((path (expand-file-name "SKILL.md" dir)))
-    (or (gptel-yatools-vfs-get path)
+    (or (gptel-yatools-vfs-pending-p path)
         (file-regular-p path))))
 
 (defun gptel-yatools-skills--subdirectories (dir)
@@ -686,7 +686,7 @@ a truename."
          (full (expand-file-name file dir)))
     (cond
      ((not (string-prefix-p dir full)) nil)
-     ((gptel-yatools-vfs-get full) full)
+     ((gptel-yatools-vfs-pending-p full) full)
      ((not (file-regular-p full)) nil)
      (t
       (let ((true (ignore-errors (file-truename full)))
@@ -702,9 +702,9 @@ a truename."
          (format "Error: %S is not a readable file inside the skill directory. Pass a path relative to the skill root, like \"references/REFERENCE.md\" or \"scripts/extract.py\"."
                  file)
          :comment "File is not inside the skill.")
-      (let* ((effective (gptel-yatools-vfs--effective-content full))
-             (content (car-safe effective))
-             (from-vfs (cdr-safe effective)))
+      (let* ((read (ignore-errors (gptel-yatools-vfs-read full)))
+             (content (plist-get read :content))
+             (from-vfs (plist-get read :from-vfs)))
         (cond
          ((null content)
           (gptel-yatools-ok

@@ -635,7 +635,10 @@ them as characters and make sync expand each LF into another CRLF."
 ;;;; 30. Editing unreadable or special files
 
 (ert-deftest gptel-yatools-test-write-file-diff-refuses-unreadable-and-special ()
-  "An unreadable file or a device must yield a message, not nil internals."
+  "An unreadable file or a device must yield a message, not nil internals.
+
+The message names the actual reason: an unreadable file and a device are
+different problems, and the model can act on each of them differently."
   (gptel-yatools-test--in-dir
     (let ((file (expand-file-name "unreadable.txt" default-directory)))
       (gptel-yatools-test--write file "secret\n")
@@ -644,18 +647,18 @@ them as characters and make sync expand each LF into another CRLF."
             (set-file-modes file #o000)
             (with-temp-buffer
               (gptel-yatools-test--vfs
-                (should (string-match-p
-                         "not a readable regular file"
-                         (funcall (gptel-yatools-test--tool "write_file_diff")
-                                  file "secret" "public"))))))
+                (let ((out (funcall (gptel-yatools-test--tool "write_file_diff")
+                                    file "secret" "public")))
+                  (should (string-match-p "not readable" out))
+                  (gptel-yatools-test--should-be-enveloped out)))))
         (ignore-errors (set-file-modes file #o644)))
       (when (file-exists-p "/dev/null")
         (with-temp-buffer
           (gptel-yatools-test--vfs
-            (should (string-match-p
-                     "not a readable regular file"
-                     (funcall (gptel-yatools-test--tool "write_file_diff")
-                              "/dev/null" "x" "y")))))))))
+            (let ((out (funcall (gptel-yatools-test--tool "write_file_diff")
+                                "/dev/null" "x" "y")))
+              (should (string-match-p "not a regular file" out))
+              (gptel-yatools-test--should-be-enveloped out))))))))
 
 
 ;;;; 31. Generic "undecided" coding crashed `gptel-yatools-vfs--resolve-coding'
@@ -970,6 +973,131 @@ not merely cosmetic."
           (should (eq (current-buffer) owner))
           (should-not (get-buffer "*gptel VFS sync diff*")))))))
 
+
+;;;; The VFS write interface: one place that decides what a pending write is
+
+(ert-deftest gptel-yatools-test-vfs-write-reports-what-changed ()
+  "A write must say whether anything is pending, in bytes and encoding."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "w.txt" default-directory)))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (let ((written (gptel-yatools-vfs-write file "new\n")))
+            (should (plist-get written :changed))
+            (should (equal (plist-get written :full) file))
+            (should (= (plist-get written :bytes) 4))
+            (should (equal (gptel-yatools-vfs-get file) "new\n")))
+          ;; Writing what is already there is not a change.
+          (let ((written (gptel-yatools-vfs-write file "old\n")))
+            (should-not (plist-get written :changed))
+            (should-not (gptel-yatools-vfs-get file))))))))
+
+(ert-deftest gptel-yatools-test-vfs-write-settles-the-encoding ()
+  "The encoding is decided by the interface, not by each caller."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "l1.txt" default-directory)))
+      (gptel-yatools-test--write file "café\n")   ; UTF-8 on disk
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; Keep the file's own encoding...
+          (should (equal (plist-get (gptel-yatools-vfs-write file "naïve\n")
+                                    :coding)
+                         'utf-8-unix))
+          ;; ...or convert it deliberately.
+          (should (equal (plist-get (gptel-yatools-vfs-write
+                                     file "naïve\n" nil "iso-latin-1")
+                                    :coding)
+                         (gptel-yatools-vfs--resolve-coding 'iso-latin-1)))
+          ;; A character the chosen encoding cannot carry is refused, not
+          ;; silently mangled.
+          (should-error (gptel-yatools-vfs-write file "日本語\n" nil "iso-latin-1")
+                        :type 'error))))))
+
+(ert-deftest gptel-yatools-test-vfs-write-refuses-and-changes-nothing ()
+  "Every refusal must leave the VFS untouched: nothing is written halfway."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "target.txt" default-directory))
+          (dir (expand-file-name "adir" default-directory)))
+      (gptel-yatools-test--write file "orig\n")
+      (make-directory dir)
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (dolist (case (list (list "content is not a string" nil nil nil)
+                              (list "unknown coding system" "x" nil "no-such-coding")))
+            (should-error (apply #'gptel-yatools-vfs-write file (cdr case))
+                          :type 'error))
+          (should-not (gptel-yatools-vfs-get file))
+          ;; A directory, and a path whose ancestor is a file, are refused too.
+          (should-error (gptel-yatools-vfs-write dir "x") :type 'error)
+          (gptel-yatools-vfs-write file "pending\n")
+          (should-error (gptel-yatools-vfs-write (expand-file-name "target.txt/child" default-directory) "x")
+                        :type 'error))))))
+
+(ert-deftest gptel-yatools-test-vfs-edit-needs-one-occurrence ()
+  "An edit must be unambiguous, and say how many matches it found."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "e.txt" default-directory)))
+      (gptel-yatools-test--write file "one two one\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (should-error (gptel-yatools-vfs-edit file "one" "1") :type 'error)
+          (should-error (gptel-yatools-vfs-edit file "absent" "1") :type 'error)
+          (should-error (gptel-yatools-vfs-edit file "" "1") :type 'error)
+          (should-not (gptel-yatools-vfs-get file))
+          (let ((edited (gptel-yatools-vfs-edit file "two" "2")))
+            (should (plist-get edited :changed))
+            (should (equal (gptel-yatools-vfs-get file) "one 2 one\n"))))))))
+
+(ert-deftest gptel-yatools-test-vfs-edit-reads-the-pending-copy ()
+  "An edit applies to what the model was shown, not to what is on disk.
+
+The model reads a file, gets the VFS copy, and edits that; applying the
+edit to the disk version would silently undo the earlier write."
+  (gptel-yatools-test--in-dir
+    (let ((file (expand-file-name "p.txt" default-directory)))
+      (gptel-yatools-test--write file "disk\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-write file "pending\n")
+          (gptel-yatools-vfs-edit file "pending" "edited")
+          (should (equal (gptel-yatools-vfs-get file) "edited\n"))
+          ;; Disk is untouched until a sync.
+          (should (equal (gptel-yatools-vfs--disk-content file) "disk\n")))))))
+
+(ert-deftest gptel-yatools-test-vfs-edit-is-not-slower-than-the-tools ()
+  "A literal edit must not depend on external programs or whole-file regexps.
+
+`replace-regexp-in-string' over a megabyte took hundreds of
+milliseconds; searching a temp buffer is the fast path, and it also
+removes the raw-bytes-versus-decoded-text split that grep had.  This is
+a budget, not a benchmark: it fails only if the old slow path returns."
+  (gptel-yatools-test--in-dir
+    (let* ((file (expand-file-name "big.txt" default-directory))
+           (line "the quick brown fox jumps over the lazy dog\n")
+           (content (concat (mapconcat #'identity (make-list 20000 line))
+                            "UNIQUE NEEDLE HERE\n")))
+      (gptel-yatools-test--write file content)
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (let ((start (float-time)))
+            (gptel-yatools-vfs-edit file "UNIQUE NEEDLE" "REPLACED")
+            (should (< (- (float-time) start) 0.5))
+            (should (string-match-p "REPLACED HERE" (gptel-yatools-vfs-get file)))))))))
+
+(ert-deftest gptel-yatools-test-vfs-discard-reports-what-it-dropped ()
+  "Discarding must name what it discarded, and say when there was nothing."
+  (gptel-yatools-test--in-dir
+    (let ((one (expand-file-name "one.txt" default-directory))
+          (two (expand-file-name "two.txt" default-directory)))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-write one "a\n")
+          (gptel-yatools-vfs-write two "b\n")
+          (should (equal (gptel-yatools-vfs-discard two) (list two)))
+          (should (equal (gptel-yatools-vfs-pending-paths) (list one)))
+          (should (equal (gptel-yatools-vfs-discard) (list one)))
+          (should-not (gptel-yatools-vfs-discard)))))))
 
 
 (provide 'gptel-yatools-vfs-tests)

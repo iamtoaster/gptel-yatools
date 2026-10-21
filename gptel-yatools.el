@@ -98,6 +98,8 @@ to know about it.
 The functions are called on every redisplay, so they must be cheap: the
 VFS count, for example, is what the header-line cache exists for.")
 
+(declare-function gptel-yatools-vfs-reset-buffer-state "gptel-yatools-vfs" ())
+
 ;;-------------------------------------------------------------------------
 ;; A tool call must run in the buffer that owns the request
 ;;
@@ -200,10 +202,7 @@ when the buffer is created, but nothing resolves paths against it any
 more."
   (when (get-buffer "*gptel-tool-calls*")
     (with-current-buffer (get-buffer "*gptel-tool-calls*")
-      (when (local-variable-p 'gptel-yatools-vfs)
-        (kill-local-variable 'gptel-yatools-vfs))
-      (when (local-variable-p 'gptel-yatools-vfs--header-line-cache)
-        (kill-local-variable 'gptel-yatools-vfs--header-line-cache)))))
+      (gptel-yatools-vfs-reset-buffer-state))))
 
 ;; `advice-add' is idempotent for an identical advice function, but the
 ;; guard makes the intent explicit and keeps the load path obviously safe

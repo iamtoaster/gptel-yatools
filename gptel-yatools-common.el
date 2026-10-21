@@ -392,21 +392,39 @@ calls."
             (gptel-yatools--truncate-slow string)))
       (gptel-yatools--truncate-slow string))))
 
+(defun gptel-yatools--line-count (string)
+  "Return the number of lines in STRING.
+
+A trailing newline does not start another line, so \"a\\nb\\n\" holds two
+lines and \"\" holds none.  That is the answer `count-lines' gives for
+the same text in a buffer, and so the answer `read_file_from_offset'
+reports.  Truncation and paging count lines through this function too,
+so no two replies can disagree about how many lines a text has.
+
+The temptation is `(length (split-string string \"\\n\"))', which is one
+too high for any text ending in a newline -- that is, for every diff."
+  (if (string-empty-p string)
+      0
+    (let ((newlines 0)
+          (pos 0))
+      (while (setq pos (string-search "\n" string pos))
+        (setq newlines (1+ newlines)
+              pos (1+ pos)))
+      (if (string-suffix-p "\n" string)
+          newlines
+        (1+ newlines)))))
+
 (defun gptel-yatools--truncate-slow (string)
   "Return STRING cut to the response limits, with a note saying what was cut.
 
 This is the general path behind `gptel-yatools--truncate'; it assumes
 nothing about STRING and walks all of it."
   (let* ((total-chars (length string))
-         ;; `split-string' keeps a trailing empty field when the text
-         ;; ends with a newline, so that the pieces rejoin into the
-         ;; original text.  That field is not a line: counting it made a
-         ;; file of exactly the line limit look over it (and get cut
-         ;; mid-file), and made every count one too high.
+         ;; `split-string' keeps an empty field after a trailing
+         ;; newline so that the pieces rejoin into the original text;
+         ;; `gptel-yatools--line-count' knows that field is not a line.
          (lines (split-string string "\n"))
-         (total-lines (if (string-suffix-p "\n" string)
-                          (1- (length lines))
-                        (length lines)))
+         (total-lines (gptel-yatools--line-count string))
          (kept (if (> total-lines gptel-yatools--output-line-limit)
                    (cl-subseq lines 0 gptel-yatools--output-line-limit)
                  lines))
@@ -753,11 +771,15 @@ boundary's truncation cannot cut it in half after the caller has said
 what it showed.  A single line longer than the limit is still returned
 whole; the boundary handles that case.
 
+Lines are counted by `gptel-yatools--line-count', so a text that ends in
+a newline has no phantom last line to page onto, and the page text is
+exactly the text of the lines it reports.
+
 The plist holds :text, :start and :end (1-based, inclusive, of the lines
 shown), :total (lines in TEXT), :past-end (OFFSET was beyond the last
 line) and :partial (the page is not the whole of TEXT)."
   (let* ((all (split-string text "\n"))
-         (total (length all))
+         (total (gptel-yatools--line-count text))
          (start (max 1 offset))
          (want (max 1 lines))
          (past-end (> start total))
@@ -773,10 +795,15 @@ line) and :partial (the page is not the whole of TEXT)."
                         (setq used (+ used size)
                               shown (1+ shown)
                               i (1+ i)))))
-                  (+ start -1 (max 1 shown))))))
+                  (+ start -1 (max 1 shown)))))
+         ;; `all' holds one field more than there are lines when TEXT
+         ;; ends in a newline.  A page that reaches the last line keeps
+         ;; that field, so the page rejoins into the text it reports;
+         ;; any earlier page stops at the line boundary as usual.
+         (up-to (if (= end total) (length all) end)))
     (list :text (if past-end
                     ""
-                  (mapconcat #'identity (cl-subseq all (1- start) end) "\n"))
+                  (mapconcat #'identity (cl-subseq all (1- start) up-to) "\n"))
           :start start
           :end end
           :total total

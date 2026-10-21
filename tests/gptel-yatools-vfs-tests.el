@@ -686,12 +686,37 @@ the model would read it."
       (gptel-yatools-test--with-file file "old\n"
         (gptel-yatools-vfs-put file "new\n")
         (let* ((diff (gptel-yatools-vfs--format-one-diff file))
-               (total (length (split-string diff "\n")))
+               (total (gptel-yatools--line-count diff))
                (out (funcall (gptel-yatools-test--tool "vfs_diff")
                              file total 20)))
           (should (string-match-p "last chunk" out))
           (should-not (string-match-p (format "offset=%d" (1+ total))
                                       out)))))))
+
+(ert-deftest gptel-yatools-test-vfs-diff-line-count-has-no-phantom-last-line ()
+  "A diff must be paged by the lines it has, not by the newline it ends with.
+
+Diff text always ends in a newline, so counting the field after it made
+the reported total one too high and let a page land on a phantom blank
+line past the end of the diff.  The count must agree with the one
+`read_file_from_offset' reports."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "count.txt")))
+      (gptel-yatools-test--with-file file "old\n"
+        (gptel-yatools-vfs-put file "new\n")
+        (let* ((diff (gptel-yatools-vfs--format-one-diff file))
+               (lines (split-string diff "\n"))
+               (real (1- (length lines)))   ; the last field is not a line
+               (last-line (nth (- real 1) lines))
+               (out (funcall (gptel-yatools-test--tool "vfs_diff")
+                             file real 1000)))
+          (should (string-match-p (format "lines %d-%d of %d"
+                                          real real real)
+                                  out))
+          (should (string-match-p "last chunk" out))
+          (should-not (string-match-p "OFFSET PAST END" out))
+          ;; The last page shows the last real line, not a blank one.
+          (should (string-match-p (regexp-quote last-line) out)))))))
 
 (ert-deftest gptel-yatools-test-vfs-diff-float-offset-is-clean ()
   "A float offset from JSON must be truncated, not passed to `nth'."

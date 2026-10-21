@@ -64,7 +64,7 @@
 (ert-deftest gptel-yatools-test-command-output-is-json-serialisable ()
   "Command output with raw bytes must not break the request either."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "raw.bin" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "raw.bin")))
       (gptel-yatools-test--write file (unibyte-string 99 97 102 233 10))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -132,7 +132,7 @@ and takes the best of five runs, so a loaded machine does not make it
 flake: the escaping alone now takes a fraction of a millisecond, while
 the old code missed the bound by a factor of two."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "big.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "big.txt")))
       (gptel-yatools-test--write
        file (make-string 64000 ?x))
       (with-temp-buffer
@@ -372,6 +372,97 @@ the just-compiled modules rather than the source ones."
           (should (string-match-p "succeeded in \\. " here)))))))
 
 
+;;;; 46b. One name means one file, whichever tool receives it
+
+(ert-deftest gptel-yatools-test-one-name-is-one-file ()
+  "Every tool must resolve a relative path against the workspace root.
+
+The buffer's `default-directory' is `sub/' of the workspace root here,
+as it is when a chat is started from a file in `proj/src/'.  Resolving
+against it instead -- which half the filesystem tools used to do --
+made `write_file \"p.txt\"' store a file that `read_path \"p.txt\"'
+could not find, and made `vfs_diff' report no pending change for a path
+that was sitting in the VFS."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let* ((tool (lambda (name) (gptel-yatools-test--tool name)))
+               (written (funcall (funcall tool "write_file") "p.txt" "x\n"))
+               (root-file (gptel-yatools-test--root-file "p.txt")))
+          ;; The write landed at the workspace root, not in sub/.
+          (should (equal (gptel-yatools-vfs-get root-file) "x\n"))
+          (should (string-match-p "Wrote p.txt to the VFS" written))
+          ;; Every reader agrees with it, and none of them reports that
+          ;; the file does not exist.
+          (dolist (name '("read_path"
+                          "read_file_from_offset"
+                          "fetch_lines_from_file_using_regex"))
+            (let ((out (pcase name
+                         ("read_path" (funcall (funcall tool name) "p.txt"))
+                         ("read_file_from_offset"
+                          (funcall (funcall tool name) "p.txt" 1 10))
+                         (_ (funcall (funcall tool name) "p.txt" "x")))))
+              (should (string-match-p "x" out))
+              (should-not (string-match-p "does not exist" out))
+              (should (string-match-p "vfs=\"true\"" out))))
+          ;; And the diff tools find the pending change by that name.
+          (should (string-match-p "p.txt"
+                                  (funcall (funcall tool "vfs_diff") "p.txt")))
+          (should-not (string-match-p "no pending VFS change"
+                                      (funcall (funcall tool "vfs_diff") "p.txt")))
+          ;; A path outside the workspace root is still absolute-only.
+          (should (string-match-p
+                   "Removed pending VFS change for p.txt"
+                   (funcall (funcall tool "vfs_discard") "p.txt")))
+          (should-not (gptel-yatools-vfs-get root-file)))))))
+
+
+(ert-deftest gptel-yatools-test-vfs-refuses-a-relative-path ()
+  "The VFS interface takes resolved paths only.
+
+A relative path crossing that seam is a bug in this package, and is
+reported as one rather than quietly resolved against whichever buffer
+happens to be current -- which is how the tools came to disagree about
+what a single name meant."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (should-error (gptel-yatools-vfs-get "relative.txt") :type 'error)
+        (should-error (gptel-yatools-vfs-read "relative.txt") :type 'error)
+        (should-error (gptel-yatools-vfs-put "relative.txt" "x") :type 'error)
+        (should-error (gptel-yatools-vfs-remove "relative.txt") :type 'error)
+        (should-error (gptel-yatools-vfs-pending-p "relative.txt") :type 'error)
+        (should-error (gptel-yatools-vfs-discard-pending "relative.txt")
+                      :type 'error)
+        ;; An absolute path is accepted, and lands at that path.
+        (let ((full (gptel-yatools-test--root-file "ok.txt")))
+          (gptel-yatools-vfs-put full "x\n")
+          (should (equal (gptel-yatools-vfs-get full) "x\n")))))))
+
+
+(ert-deftest gptel-yatools-test-shell-keeps-the-workspace-root ()
+  "Rebinding `default-directory' inside a call must not move the root.
+
+The shell runner rebinds `default-directory' to run in a subdirectory.
+If the root were recomputed after that, a message about a missing
+directory would be rendered relative to a different base -- and a
+tool that resolved a path afterwards would resolve it elsewhere."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (make-directory (expand-file-name "inside" gptel-yatools-test--root) t)
+        (let ((out (funcall (gptel-yatools-test--tool "execute_command")
+                            "pwd" "inside")))
+          ;; It ran in the requested subdirectory...
+          (should (string-match-p "inside" out))
+          ;; ...and the root it reports paths against is still the root.
+          (should (string-match-p (regexp-quote gptel-yatools-test--root)
+                                  (gptel-yatools--detect-workspace-root)))
+          ;; A tool called afterwards still resolves against the root.
+          (should (equal (gptel-yatools--resolve-path "x")
+                         (gptel-yatools-test--root-file "x"))))))))
+
+
 ;;;; 47. Buffer-local variables must stay special when compiled
 
 (ert-deftest gptel-yatools-test-variables-are-declared-special ()
@@ -541,7 +632,7 @@ mislabell it as timed out while it still runs."
 (ert-deftest gptel-yatools-test-tool-call-runs-in-request-buffer ()
   "A write confirmed from another buffer must land in the chat's VFS."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "f.txt" default-directory))
+    (let ((file (gptel-yatools-test--root-file "f.txt"))
           (chat (gptel-yatools-test--request-buffer))
           (inspect (gptel-yatools-test--request-buffer "*gptel-tool-calls*")))
       (unwind-protect
@@ -566,7 +657,7 @@ mislabell it as timed out while it still runs."
 Reporting \"no pending changes\" here is not a cosmetic difference: it
 tells the model the work is done when nothing was written at all."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "f.txt" default-directory))
+    (let ((file (gptel-yatools-test--root-file "f.txt"))
           (chat (gptel-yatools-test--request-buffer))
           (inspect (gptel-yatools-test--request-buffer "*gptel-tool-calls*")))
       (unwind-protect
@@ -595,7 +686,7 @@ The XML provenance tag promises the model that the command ran against
 disk and says whether pending VFS changes may explain the output.  Read
 from the wrong buffer it claims there are none."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "f.txt" default-directory))
+    (let ((file (gptel-yatools-test--root-file "f.txt"))
           (chat (gptel-yatools-test--request-buffer))
           (inspect (gptel-yatools-test--request-buffer "*gptel-tool-calls*")))
       (unwind-protect
@@ -621,7 +712,7 @@ gptel re-enters `(plist-get info :buffer)' itself here; this test pins
 that down, so a future gptel change that drops the wrapper is noticed
 rather than silently losing the VFS."
   (gptel-yatools-test--in-dir
-    (let* ((file (expand-file-name "f.txt" default-directory))
+    (let* ((file (gptel-yatools-test--root-file "f.txt"))
            (chat (gptel-yatools-test--request-buffer))
            (decoy (gptel-yatools-test--request-buffer " *gptel-yatools-test-decoy*"))
            (tool (gptel-yatools-test--tool-spec "write_file"))
@@ -658,7 +749,7 @@ This drives the real inspection command, so it also covers the
 `quit-window' and `gptel--fsm-last' plumbing that a synthetic call
 would skip."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "f.txt" default-directory))
+    (let ((file (gptel-yatools-test--root-file "f.txt"))
           (chat (gptel-yatools-test--request-buffer))
           (inspect (gptel-yatools-test--request-buffer "*gptel-tool-calls*")))
       (unwind-protect
@@ -721,7 +812,7 @@ gptel itself raises `Selecting deleted buffer' in this situation; the
 point of the check is that the tool never runs against some unrelated
 buffer's VFS or directory."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "f.txt" default-directory))
+    (let ((file (gptel-yatools-test--root-file "f.txt"))
           (chat (gptel-yatools-test--request-buffer))
           (inspect (gptel-yatools-test--request-buffer "*gptel-tool-calls*")))
       (unwind-protect
@@ -744,7 +835,7 @@ buffer's VFS or directory."
 (ert-deftest gptel-yatools-test-tool-calls-do-not-share-a-vfs ()
   "Anchoring the dispatcher must not merge two chats' VFS tables."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "f.txt" default-directory))
+    (let ((file (gptel-yatools-test--root-file "f.txt"))
           (first (gptel-yatools-test--request-buffer))
           (second (gptel-yatools-test--request-buffer))
           (inspect (gptel-yatools-test--request-buffer "*gptel-tool-calls*")))

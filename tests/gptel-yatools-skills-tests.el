@@ -94,7 +94,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-roots-accept-functions ()
   "A function may stand in for one root, or for the whole list."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name ".agents/skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file ".agents/skills")))
       (gptel-yatools-skills-test--skill root "one")
       (should (string-match-p
                "one — "
@@ -108,11 +108,10 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
                      (gptel-yatools-skills-test--call)))))))))
 
 (ert-deftest gptel-yatools-skills-test-relative-root-uses-workspace ()
-  "A relative root must resolve against the workspace, like every other path."
+  "A relative root must resolve against the workspace, not `default-directory'."
   (gptel-yatools-test--in-dir
-    (gptel-yatools-skills-test--skill (expand-file-name ".agents/skills"
-                                                        default-directory)
-                                      "relative")
+    (gptel-yatools-skills-test--skill
+     (gptel-yatools-test--root-file ".agents/skills") "relative")
     (with-temp-buffer
       (gptel-yatools-test--vfs
         (gptel-yatools-skills-test--with-roots '(".agents/skills")
@@ -126,7 +125,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
       (gptel-yatools-test--vfs
         (gptel-yatools-skills-test--with-roots
             (list (lambda () (error "no project"))
-                  (expand-file-name "nope" default-directory))
+                  (gptel-yatools-test--root-file "nope"))
           (let ((out (gptel-yatools-skills-test--call)))
             (should (string-match-p "No skills found" out))
             (should (string-match-p "no project" out))
@@ -135,7 +134,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-nested-skills-are-found ()
   "A skill inside a group directory must be found, listed and loadable."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill
                  (expand-file-name "engineering" root) "code-review")))
       ;; `--skill' puts the skill in ROOT/NAME, so this laid it out as
@@ -154,7 +153,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-group-path-is-a-handle ()
   "A skill can be loaded by its path relative to the root."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill
        (expand-file-name "engineering" root) "tdd")
       (gptel-yatools-skills-test--indexed root
@@ -167,7 +166,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-ambiguous-name-is-refused ()
   "A name in two groups must be reported, not resolved to the first one."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill
        (expand-file-name "engineering" root) "review" nil "Engineering body.\n")
       (gptel-yatools-skills-test--skill
@@ -197,8 +196,8 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-same-name-in-two-roots-is-ambiguous ()
   "Two roots holding one name each must be reported too, not deduplicated."
   (gptel-yatools-test--in-dir
-    (let* ((first (expand-file-name "a" default-directory))
-           (second (expand-file-name "b" default-directory)))
+    (let* ((first (gptel-yatools-test--root-file "a"))
+           (second (gptel-yatools-test--root-file "b")))
       (gptel-yatools-skills-test--skill first "twice" nil "First.\n")
       (gptel-yatools-skills-test--skill second "twice" nil "Second.\n")
       (with-temp-buffer
@@ -213,7 +212,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-overlapping-roots-list-a-skill-once ()
   "The same directory reached through two roots must not be listed twice."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (inner (expand-file-name "engineering" root)))
       (gptel-yatools-skills-test--skill inner "once")
       (with-temp-buffer
@@ -229,7 +228,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-depth-limit-is-reported ()
   "A skill below the depth limit must be visible as a prune, not vanish."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       ;; skills/a/b/c/deep/SKILL.md: a skill at level 4.
       (gptel-yatools-skills-test--skill
        (expand-file-name "a/b/c" root) "deep")
@@ -249,7 +248,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-skill-subdirectories-are-not-skills ()
   "A directory inside a skill must not be mistaken for a skill."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill root "outer")))
       ;; A nested SKILL.md inside a skill's own references directory.
       (make-directory (expand-file-name "references/inner" dir) t)
@@ -265,7 +264,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-index-is-name-and-description ()
   "The no-argument call must be the cheap metadata layer."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "beta" nil "Beta body.\n")
       (gptel-yatools-skills-test--skill root "alpha" nil "Alpha body.\n")
       (gptel-yatools-skills-test--indexed root
@@ -284,7 +283,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-activation-includes-body-and-files ()
   "Loading must return the instructions, the file tree and the directory."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill
        root "pdf-processing"
        (concat "name: pdf-processing\n"
@@ -319,7 +318,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-name-mismatch-warns-but-loads ()
   "A `name' that disagrees with the directory is a warning, not a refusal."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill
        root "on-disk" "name: something-else\ndescription: Mismatched.\n")
       (gptel-yatools-skills-test--indexed root
@@ -332,7 +331,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-invalid-skill-is-listed-not-loadable ()
   "A skill without a valid `description' must be visible but refused."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "broken" "name: broken\n")
       (gptel-yatools-skills-test--skill root "fine")
       (gptel-yatools-skills-test--indexed root
@@ -350,7 +349,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-no-frontmatter-is-a-problem ()
   "A `SKILL.md' without a frontmatter block must be reported as such."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill root "bare")))
       (gptel-yatools-test--write (expand-file-name "SKILL.md" dir)
                                  "# Just a heading\n")
@@ -362,7 +361,7 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
 (ert-deftest gptel-yatools-skills-test-unknown-name-lists-the-alternatives ()
   "An unknown name must tell the model what it could have asked for."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "real")
       (gptel-yatools-skills-test--indexed root
         (let ((out (gptel-yatools-skills-test--call "imaginary")))
@@ -405,7 +404,7 @@ survive that."
 (ert-deftest gptel-yatools-skills-test-invalid-yaml-is-one-problem ()
   "A broken YAML block must be reported once, not also as an empty one."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill root "unparsable")))
       (gptel-yatools-test--write (expand-file-name "SKILL.md" dir)
                                  "---\nname: [unclosed\n---\n\nBody.\n")
@@ -419,7 +418,7 @@ survive that."
 (ert-deftest gptel-yatools-skills-test-file-is-readable ()
   "A relative path inside the skill must be returned."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "reader")
       (gptel-yatools-skills-test--indexed root
         (let ((out (gptel-yatools-skills-test--call
@@ -430,9 +429,9 @@ survive that."
 (ert-deftest gptel-yatools-skills-test-file-cannot-escape-the-skill ()
   "Absolute paths, `..' segments and escaping symlinks must be refused."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill root "contained"))
-           (outside (expand-file-name "outside.txt" default-directory)))
+           (outside (gptel-yatools-test--root-file "outside.txt")))
       (gptel-yatools-test--write outside "secret\n")
       (make-symbolic-link outside (expand-file-name "link.txt" dir))
       (gptel-yatools-skills-test--indexed root
@@ -455,7 +454,7 @@ survive that."
 (ert-deftest gptel-yatools-skills-test-pending-vfs-copy-wins ()
   "A pending edit to `SKILL.md' must be what the tool reads."
   (gptel-yatools-test--in-dir
-    (let* ((root (expand-file-name "skills" default-directory))
+    (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill root "edited")))
       (gptel-yatools-skills-test--indexed root
         (gptel-yatools-vfs-put
@@ -482,7 +481,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-listing-command-shows-what-it-found ()
   "`gptel-yatools-skills' must show the discovered skills and their status."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "good")
       (gptel-yatools-skills-test--skill root "bad" "name: bad\n")
       (gptel-yatools-skills-test--with-roots (list root)
@@ -505,7 +504,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-payload-matches-what-the-tool-returns ()
   "The manual payload must be what the tool would have returned."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "shared")
       (gptel-yatools-skills-test--indexed root
         (let* ((skill (car (plist-get (gptel-yatools-skills--discover) :skills)))
@@ -523,7 +522,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-add-attaches-to-the-context ()
   "Adding a skill must put its text in `gptel-context', once."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "sent")
       (gptel-yatools-skills-test--indexed root
         (let ((gptel-context nil))
@@ -554,7 +553,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-header-line-counts-skills ()
   "The header-line label must show how many skills are attached, not their names."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "first")
       (gptel-yatools-skills-test--skill root "second")
       (gptel-yatools-skills-test--indexed root
@@ -577,7 +576,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-remove-detaches ()
   "Removing a skill must drop it from the context and kill its buffer."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "gone")
       (gptel-yatools-skills-test--indexed root
         (let ((gptel-context nil))
@@ -597,7 +596,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-add-with-prefix-inserts-instead ()
   "With a prefix argument the text must land in the buffer, not the context."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "inline")
       (gptel-yatools-skills-test--indexed root
         (let ((gptel-context nil))
@@ -610,7 +609,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-add-refuses-unknown-and-invalid ()
   "An unknown or unusable skill must not reach the context."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "fine")
       (gptel-yatools-skills-test--skill root "broken" "name: broken\n")
       (gptel-yatools-skills-test--indexed root
@@ -623,7 +622,7 @@ library stays loaded."
 (ert-deftest gptel-yatools-skills-test-add-completes-by-path-when-ambiguous ()
   "The completion candidates must identify each skill when names clash."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill (expand-file-name "a" root) "clash")
       (gptel-yatools-skills-test--skill (expand-file-name "b" root) "clash")
       (gptel-yatools-skills-test--indexed root
@@ -640,7 +639,7 @@ library stays loaded."
 The indicator reads `gptel-context' rather than a list of its own, so
 there is no second state to fall out of sync."
   (gptel-yatools-test--in-dir
-    (let ((root (expand-file-name "skills" default-directory)))
+    (let ((root (gptel-yatools-test--root-file "skills")))
       (gptel-yatools-skills-test--skill root "borrowed")
       (gptel-yatools-skills-test--indexed root
         (let ((gptel-context nil)

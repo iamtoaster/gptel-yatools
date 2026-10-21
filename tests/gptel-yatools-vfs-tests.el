@@ -32,7 +32,7 @@
 (ert-deftest gptel-yatools-test-sync-preview-shows-both-sides ()
   "The sync preview must show '+' lines, not only '-' lines."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "a.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "a.txt")))
       (gptel-yatools-test--with-file file "one\ntwo\n"
         (gptel-yatools-vfs-put file "one\nTWO\n")
         (let ((buf (gptel-yatools-vfs--build-sync-diff-buffer (list file))))
@@ -45,7 +45,7 @@
 (ert-deftest gptel-yatools-test-sync-preview-new-file-has-hunk ()
   "A brand-new file must render a real hunk, not a bare header."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "new.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "new.txt")))
       (with-temp-buffer
         (gptel-yatools-test--vfs
           (gptel-yatools-vfs-put file "hello\n")
@@ -66,7 +66,7 @@
 (ert-deftest gptel-yatools-test-write-file-reports-bytes-not-chars ()
   "The reported size must be the encoded size, not the character count."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "uni.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "uni.txt")))
       (with-temp-buffer
         (gptel-yatools-test--vfs
           (let ((out (funcall (gptel-yatools-test--tool "write_file")
@@ -80,7 +80,7 @@
 (ert-deftest gptel-yatools-test-sync-preserves-iso-latin-1 ()
   "Editing a Latin-1 file must not convert it to UTF-8."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "l1.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "l1.txt")))
       (gptel-yatools-test--write file (encode-coding-string "café\n" 'iso-latin-1))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -98,7 +98,7 @@ coding system (utf-8-dos here) is what turns those LFs back into
 CRLF on sync.  Putting literal CRs in the VFS content would store
 them as characters and make sync expand each LF into another CRLF."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "c.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "c.txt")))
       (gptel-yatools-test--write file "one\r\ntwo\r\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -109,7 +109,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-sync-preserves-bom ()
   "A UTF-8 BOM must survive an edit."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "bom.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "bom.txt")))
       (gptel-yatools-test--write file "\357\273\277hello\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -120,7 +120,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-coding-change-is-a-conflict ()
   "A re-encoding on disk must count as a change, not be overwritten."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "e.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "e.txt")))
       (gptel-yatools-test--write file "aaa\nbbb\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -136,7 +136,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-write-file-diff-handles-latin-1 ()
   "An edit matching decoded text must be found in a Latin-1 file."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "l2.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "l2.txt")))
       (gptel-yatools-test--write file (encode-coding-string "naïve café\n" 'iso-latin-1))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -151,7 +151,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-deleted-file-is-a-conflict-not-empty-file ()
   "A pending file deleted from disk must be a CONFLICT."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "g.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "g.txt")))
       (gptel-yatools-test--with-file file "gone\n"
         (gptel-yatools-vfs-put file "")
         (delete-file file)
@@ -177,7 +177,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-unrepresentable-content-is-refused ()
   "Writing an emoji into a Latin-1 file must be refused up front."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "l3.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "l3.txt")))
       (gptel-yatools-test--write file (encode-coding-string "café\n" 'iso-latin-1))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -190,7 +190,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-sync-refuses-unrepresentable ()
   "Sync must refuse rather than write replacement characters."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "l4.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "l4.txt")))
       (gptel-yatools-test--write file (encode-coding-string "café\n" 'iso-latin-1))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -206,7 +206,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-explicit-coding-converts ()
   "Passing CODING must write the file in that encoding."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "conv.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "conv.txt")))
       (gptel-yatools-test--write file (encode-coding-string "café\n" 'iso-latin-1))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -224,7 +224,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-binary-content-is-encodable ()
   "Binary content must not be rejected as unrepresentable."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "b.bin" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "b.bin")))
       (gptel-yatools-test--write file (unibyte-string 0 1 255 254 10))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -238,7 +238,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-binary-sync-is-byte-exact ()
   "A binary file must round-trip byte for byte."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "b2.bin" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "b2.bin")))
       (gptel-yatools-test--write file (unibyte-string 0 1 255 254 10 0 7))
       (let ((before (gptel-yatools-test--raw file)))
         (with-temp-buffer
@@ -274,7 +274,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-binary-read-is-withheld ()
   "Binary content must be reported, not returned."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "x.bin" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "x.bin")))
       (gptel-yatools-test--write file (unibyte-string 80 78 71 0 1 2))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -285,7 +285,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-binary-diff-edit-is-refused ()
   "Editing binary content as text must be refused."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "y.bin" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "y.bin")))
       (gptel-yatools-test--write file (unibyte-string 80 78 71 0 74 70 73 70))
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -305,7 +305,7 @@ them as characters and make sync expand each LF into another CRLF."
         (should (string-match-p
                  "unknown coding system"
                  (funcall (gptel-yatools-test--tool "write_file")
-                          (expand-file-name "n.txt" default-directory)
+                          (gptel-yatools-test--root-file "n.txt")
                           "x" nil "no-such-coding")))))))
 
 
@@ -314,7 +314,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-dirty-buffer-is-marked-in-diff ()
   "A file blocked by an unsaved buffer must be marked NOT SYNCED."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "d.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "d.txt")))
       (gptel-yatools-test--write file "orig\n")
       (gptel-yatools-test--with-open-buffer file
         (goto-char (point-max))
@@ -328,7 +328,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-blocker-reasons ()
   "`gptel-yatools-vfs--sync-blocker' must explain itself or return nil."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "blk.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "blk.txt")))
       (gptel-yatools-test--write file "orig\n")
       (gptel-yatools-test--with-open-buffer file
         ;; Dirty the visiting buffer itself: that is what the blocker
@@ -348,7 +348,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-unsaved-buffer-blocks-sync ()
   "Syncing must refuse and leave both disk and buffer untouched."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "u.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "u.txt")))
       (gptel-yatools-test--write file "orig\n")
       (gptel-yatools-test--with-open-buffer file
         (goto-char (point-max))
@@ -366,7 +366,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-clean-buffer-is-refreshed ()
   "After a successful sync the visiting buffer must show the new text."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "c2.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "c2.txt")))
       (gptel-yatools-test--write file "orig\n")
       (gptel-yatools-test--with-open-buffer file
         (with-temp-buffer
@@ -382,7 +382,7 @@ them as characters and make sync expand each LF into another CRLF."
 (ert-deftest gptel-yatools-test-sync-one-rechecks-conflict ()
   "`gptel-yatools-vfs--sync-one' must re-check conflicts right before writing."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "r.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "r.txt")))
       (gptel-yatools-test--with-file file "base\n"
         (gptel-yatools-vfs-put file "vfs\n")
         ;; Simulates a write landing after the pre-check, before the sync.
@@ -399,8 +399,8 @@ The sync runs unattended here (`gptel-yatools-sync-without-review'), which
 is how a batch Emacs syncs at all, and leaves the reply to be checked as
 the model would read it."
   (gptel-yatools-test--in-dir
-    (let ((blocked (expand-file-name "b1.txt" default-directory))
-          (ok (expand-file-name "ok.txt" default-directory)))
+    (let ((blocked (gptel-yatools-test--root-file "b1.txt"))
+          (ok (gptel-yatools-test--root-file "ok.txt")))
       (gptel-yatools-test--write blocked "orig\n")
       (gptel-yatools-test--write ok "orig\n")
       (gptel-yatools-test--with-open-buffer blocked
@@ -453,7 +453,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-invalid-regexp-is-a-clean-message ()
   "An invalid regexp must be reported, not signalled."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "rx.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "rx.txt")))
       (gptel-yatools-test--with-file file "abc\n"
         (should (string-match-p
                  "invalid regexp"
@@ -489,7 +489,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-unreadable-file-does-not-break-tools ()
   "An unreadable pending file must not break unrelated tool calls."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "np.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "np.txt")))
       (gptel-yatools-test--write file "secret\n")
       (unwind-protect
           (with-temp-buffer
@@ -508,7 +508,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-header-line-count-tracks-vfs ()
   "The pending count must appear and disappear with the entries."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "h.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "h.txt")))
       (gptel-yatools-test--with-file file "a\n"
         (should (null (gptel-yatools-vfs--header-line-label)))
         (gptel-yatools-vfs-put file "b\n")
@@ -520,7 +520,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-header-line-cache-expires ()
   "A cached count is reused briefly, then recomputed."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "h2.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "h2.txt")))
       (gptel-yatools-test--with-file file "a\n"
         (gptel-yatools-vfs-put file "b\n")
         (should (string-match-p "1 file pending"
@@ -535,7 +535,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-header-line-cache-is-used ()
   "Repeated redisplay must not re-read the pending files."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "h3.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "h3.txt")))
       (gptel-yatools-test--with-file file "a\n"
         (gptel-yatools-vfs-put file "b\n")
         (gptel-yatools-vfs--header-line-label)
@@ -551,7 +551,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-vfs-diff-paging-banner ()
   "A partial diff must be bannered, and offset/lines must page it."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "big.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "big.txt")))
       (gptel-yatools-test--write
        file (mapconcat (lambda (n) (format "old %d" n))
                        (number-sequence 1 200) "\n"))
@@ -570,8 +570,8 @@ the model would read it."
 (ert-deftest gptel-yatools-test-vfs-diff-path-selects-one-file ()
   "Passing PATH must restrict the diff to that file."
   (gptel-yatools-test--in-dir
-    (let ((a (expand-file-name "a.txt" default-directory))
-          (b (expand-file-name "b.txt" default-directory)))
+    (let ((a (gptel-yatools-test--root-file "a.txt"))
+          (b (gptel-yatools-test--root-file "b.txt")))
       (gptel-yatools-test--write a "a\n")
       (gptel-yatools-test--write b "b\n")
       (with-temp-buffer
@@ -589,7 +589,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-vfs-diff-offset-past-end-is-clean ()
   "An offset beyond the diff must not signal a raw Lisp error."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "off.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "off.txt")))
       (gptel-yatools-test--with-file file "old\n"
         (gptel-yatools-vfs-put file "new\n")
         (let ((out (funcall (gptel-yatools-test--tool "vfs_diff")
@@ -601,7 +601,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-vfs-diff-last-page-does-not-suggest-past-end ()
   "The final page must not tell the caller to request offset TOTAL+1."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "last.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "last.txt")))
       (gptel-yatools-test--with-file file "old\n"
         (gptel-yatools-vfs-put file "new\n")
         (let* ((diff (gptel-yatools-vfs--format-one-diff file))
@@ -615,7 +615,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-vfs-diff-float-offset-is-clean ()
   "A float offset from JSON must be truncated, not passed to `nth'."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "float.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "float.txt")))
       (gptel-yatools-test--with-file file "old\n"
         (gptel-yatools-vfs-put file "new\n")
         (let ((out (funcall (gptel-yatools-test--tool "vfs_diff")
@@ -626,7 +626,7 @@ the model would read it."
 (ert-deftest gptel-yatools-test-read-file-offset-coerces-floats ()
   "Float offset/lines must work instead of signalling wrong-type-argument."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "lines.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "lines.txt")))
       (gptel-yatools-test--with-file file "a\nb\nc\nd\n"
         (let ((out (funcall (gptel-yatools-test--tool
                              "read_file_from_offset")
@@ -642,7 +642,7 @@ the model would read it."
 The message names the actual reason: an unreadable file and a device are
 different problems, and the model can act on each of them differently."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "unreadable.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "unreadable.txt")))
       (gptel-yatools-test--write file "secret\n")
       (unwind-protect
           (progn
@@ -668,7 +668,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-undecided-coding-is-clean ()
   "Passing coding=\"undecided\" must not signal a vector/fixnum error."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "undecided.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "undecided.txt")))
       (with-temp-buffer
         (gptel-yatools-test--vfs
           (let ((out (funcall (gptel-yatools-test--tool "write_file")
@@ -705,8 +705,8 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-write-file-cannot-shadow-virtual-directory ()
   "A target with pending VFS children must be rejected up front."
   (gptel-yatools-test--in-dir
-    (let ((parent (expand-file-name "d" default-directory))
-          (child (expand-file-name "d/child.txt" default-directory)))
+    (let ((parent (gptel-yatools-test--root-file "d"))
+          (child (gptel-yatools-test--root-file "d/child.txt")))
       (with-temp-buffer
         (gptel-yatools-test--vfs
           (should (string-match-p
@@ -728,7 +728,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-header-line-cache-invalidated-on-revert ()
   "Reverting a pending entry to disk content must clear the label at once."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "h4.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "h4.txt")))
       (gptel-yatools-test--with-file file "a\n"
         (gptel-yatools-vfs-put file "b\n")
         (should (string-match-p "1 file pending"
@@ -757,7 +757,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-nil-regex-is-a-clean-message ()
   "A non-string regexp must be reported, not signalled."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "nil-rx.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "nil-rx.txt")))
       (gptel-yatools-test--with-file file "abc\n"
         (let ((out (funcall (gptel-yatools-test--tool
                              "fetch_lines_from_file_using_regex")
@@ -771,7 +771,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-file-sync-refuses-to-hang-in-batch ()
   "Non-interactive file_sync must refuse instead of entering recursive-edit."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "batch.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "batch.txt")))
       (gptel-yatools-test--with-file file "orig\n"
         (gptel-yatools-vfs-put file "vfs\n")
         (let ((noninteractive t)
@@ -787,7 +787,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-kill-buffer-guard-does-not-prompt-in-batch ()
   "The unsynced-changes kill guard must not block batch cleanup."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "kill.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "kill.txt")))
       (gptel-yatools-test--with-file file "orig\n"
         (gptel-yatools-vfs-put file "vfs\n")
         (let ((noninteractive t))
@@ -800,7 +800,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-sync-ok-even-if-buffer-refresh-fails ()
   "A refresh failure must not hide that the file was synced."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "refresh.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "refresh.txt")))
       (gptel-yatools-test--write file "orig\n")
       (gptel-yatools-test--with-open-buffer file
         (with-temp-buffer
@@ -821,7 +821,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-string-false-overwrite-keeps-conflict ()
   "A string \"false\" must behave as false, not reset the baseline."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "ow.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "ow.txt")))
       (gptel-yatools-test--with-file file "base\n"
         (gptel-yatools-vfs-put file "vfs\n")
         ;; External change lands after the VFS captured the file.
@@ -846,7 +846,7 @@ different problems, and the model can act on each of them differently."
 
 (ert-deftest gptel-yatools-test-empty-results-say-why ()
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "e.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "e.txt")))
       (gptel-yatools-test--with-file file "alpha\nbeta\n"
         (let ((no-match (funcall (gptel-yatools-test--tool
                                   "fetch_lines_from_file_using_regex")
@@ -875,7 +875,7 @@ different problems, and the model can act on each of them differently."
   (should (gptel-yatools--flag-p 1))
   (should (gptel-yatools--flag-p t))
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "ow0.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "ow0.txt")))
       (gptel-yatools-test--with-file file "base\n"
         (gptel-yatools-vfs-put file "vfs\n")
         (gptel-yatools-test--write file "external\n")
@@ -886,7 +886,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-no-op-write-creates-no-entry ()
   "Writing identical content must not create a pending entry."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "same.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "same.txt")))
       (gptel-yatools-test--with-file file "same\n"
         (should (string-match-p
                  "No change needed"
@@ -896,7 +896,7 @@ different problems, and the model can act on each of them differently."
 (ert-deftest gptel-yatools-test-sync-removes-entry ()
   "A successful sync must drop the pending entry."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "s.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "s.txt")))
       (gptel-yatools-test--with-file file "orig\n"
         (gptel-yatools-vfs-put file "new\n")
         (should (gptel-yatools-vfs--sync-one file))
@@ -921,8 +921,8 @@ before.
 The review adapter is passed in through `gptel-yatools-vfs-sync' rather
 than substituted for, which is the seam that exists for exactly this."
   (gptel-yatools-test--in-dir
-    (let ((one (expand-file-name "r1.txt" default-directory))
-          (two (expand-file-name "r2.txt" default-directory))
+    (let ((one (gptel-yatools-test--root-file "r1.txt"))
+          (two (gptel-yatools-test--root-file "r2.txt"))
           (elsewhere (get-buffer-create " *gptel-yatools-test-elsewhere*")))
       (unwind-protect
           (progn
@@ -966,7 +966,7 @@ not merely cosmetic.
 This drives the review adapter itself, because `vfs-sync' treats it as
 interchangeable; the timers below stand in for the keypresses."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "rev.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "rev.txt")))
       (ignore-errors (kill-buffer "*gptel VFS sync diff*"))
       (gptel-yatools-test--with-file file "orig\n"
         (gptel-yatools-vfs-put file "vfs\n")
@@ -986,7 +986,7 @@ interchangeable; the timers below stand in for the keypresses."
 (ert-deftest gptel-yatools-test-vfs-sync-reports-nothing-to-do ()
   "An empty VFS and an unpending path are distinguishable outcomes."
   (gptel-yatools-test--in-dir
-    (let ((other (expand-file-name "other.txt" default-directory)))
+    (let ((other (gptel-yatools-test--root-file "other.txt")))
       (with-temp-buffer
         (gptel-yatools-test--vfs
           ;; Nothing pending at all: the whole VFS is clean, which is a
@@ -1003,7 +1003,7 @@ interchangeable; the timers below stand in for the keypresses."
 (ert-deftest gptel-yatools-test-vfs-sync-needs-approval ()
   "Nothing is written when the review adapter declines."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "a.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "a.txt")))
       (gptel-yatools-test--write file "orig\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1022,8 +1022,8 @@ interchangeable; the timers below stand in for the keypresses."
 Approving a change set that silently omits two files is how a user
 agrees to something they were never shown."
   (gptel-yatools-test--in-dir
-    (let ((good (expand-file-name "good.txt" default-directory))
-          (conflicted (expand-file-name "conflict.txt" default-directory))
+    (let ((good (gptel-yatools-test--root-file "good.txt"))
+          (conflicted (gptel-yatools-test--root-file "conflict.txt"))
           (seen nil))
       (gptel-yatools-test--write good "orig\n")
       (gptel-yatools-test--write conflicted "orig\n")
@@ -1050,8 +1050,8 @@ agrees to something they were never shown."
 (ert-deftest gptel-yatools-test-sync-without-review-waives-review-not-checks ()
   "Unattended syncs still refuse conflicts and blocked files."
   (gptel-yatools-test--in-dir
-    (let ((good (expand-file-name "g.txt" default-directory))
-          (conflicted (expand-file-name "c.txt" default-directory)))
+    (let ((good (gptel-yatools-test--root-file "g.txt"))
+          (conflicted (gptel-yatools-test--root-file "c.txt")))
       (gptel-yatools-test--write good "orig\n")
       (gptel-yatools-test--write conflicted "orig\n")
       (with-temp-buffer
@@ -1078,7 +1078,7 @@ That refusal is what keeps a batch run from writing to disk with nobody
 having seen a diff, so it has to survive the option's default."
   (should-not gptel-yatools-sync-without-review)
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "n.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "n.txt")))
       (gptel-yatools-test--write file "orig\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1106,7 +1106,7 @@ user, through `message', instead."
       (should-not (string-match-p "without.review" text))))
   ;; The one reply that has a reason to mention it: the batch refusal.
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "m.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "m.txt")))
       (gptel-yatools-test--write file "orig\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1122,7 +1122,7 @@ user, through `message', instead."
 (ert-deftest gptel-yatools-test-vfs-write-reports-what-changed ()
   "A write must say whether anything is pending, in bytes and encoding."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "w.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "w.txt")))
       (gptel-yatools-test--write file "old\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1139,7 +1139,7 @@ user, through `message', instead."
 (ert-deftest gptel-yatools-test-vfs-write-settles-the-encoding ()
   "The encoding is decided by the interface, not by each caller."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "l1.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "l1.txt")))
       (gptel-yatools-test--write file "café\n")   ; UTF-8 on disk
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1160,8 +1160,8 @@ user, through `message', instead."
 (ert-deftest gptel-yatools-test-vfs-write-refuses-and-changes-nothing ()
   "Every refusal must leave the VFS untouched: nothing is written halfway."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "target.txt" default-directory))
-          (dir (expand-file-name "adir" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "target.txt"))
+          (dir (gptel-yatools-test--root-file "adir")))
       (gptel-yatools-test--write file "orig\n")
       (make-directory dir)
       (with-temp-buffer
@@ -1174,13 +1174,13 @@ user, through `message', instead."
           ;; A directory, and a path whose ancestor is a file, are refused too.
           (should-error (gptel-yatools-vfs-write dir "x") :type 'error)
           (gptel-yatools-vfs-write file "pending\n")
-          (should-error (gptel-yatools-vfs-write (expand-file-name "target.txt/child" default-directory) "x")
+          (should-error (gptel-yatools-vfs-write (gptel-yatools-test--root-file "target.txt/child") "x")
                         :type 'error))))))
 
 (ert-deftest gptel-yatools-test-vfs-edit-needs-one-occurrence ()
   "An edit must be unambiguous, and say how many matches it found."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "e.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "e.txt")))
       (gptel-yatools-test--write file "one two one\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1198,7 +1198,7 @@ user, through `message', instead."
 The model reads a file, gets the VFS copy, and edits that; applying the
 edit to the disk version would silently undo the earlier write."
   (gptel-yatools-test--in-dir
-    (let ((file (expand-file-name "p.txt" default-directory)))
+    (let ((file (gptel-yatools-test--root-file "p.txt")))
       (gptel-yatools-test--write file "disk\n")
       (with-temp-buffer
         (gptel-yatools-test--vfs
@@ -1216,7 +1216,7 @@ milliseconds; searching a temp buffer is the fast path, and it also
 removes the raw-bytes-versus-decoded-text split that grep had.  This is
 a budget, not a benchmark: it fails only if the old slow path returns."
   (gptel-yatools-test--in-dir
-    (let* ((file (expand-file-name "big.txt" default-directory))
+    (let* ((file (gptel-yatools-test--root-file "big.txt"))
            (line "the quick brown fox jumps over the lazy dog\n")
            (content (concat (mapconcat #'identity (make-list 20000 line))
                             "UNIQUE NEEDLE HERE\n")))
@@ -1231,8 +1231,8 @@ a budget, not a benchmark: it fails only if the old slow path returns."
 (ert-deftest gptel-yatools-test-vfs-discard-reports-what-it-dropped ()
   "Discarding must name what it discarded, and say when there was nothing."
   (gptel-yatools-test--in-dir
-    (let ((one (expand-file-name "one.txt" default-directory))
-          (two (expand-file-name "two.txt" default-directory)))
+    (let ((one (gptel-yatools-test--root-file "one.txt"))
+          (two (gptel-yatools-test--root-file "two.txt")))
       (with-temp-buffer
         (gptel-yatools-test--vfs
           (gptel-yatools-vfs-write one "a\n")

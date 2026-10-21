@@ -64,6 +64,21 @@ deadline instead of outliving it.")
 Time spent in that state is not counted against the timeout, so a human
 reading a `file_sync' diff for a few minutes cannot trip it.")
 
+(defvar gptel-yatools--current-root nil
+  "Workspace root of the tool call in progress, or nil.
+
+Bound by `gptel-yatools--call-tool' so that everything a single call
+does -- resolving the path the model wrote, displaying a path back to
+it, finding the skill roots -- reads one root, settled once at the
+boundary.  Otherwise a tool that rebinds `default-directory' mid-call
+\(the shell runner does, to run in a subdirectory) changes what a
+relative path means half way through, and a message printed afterwards
+describes a different directory from the one the tool acted on.
+
+This is the same shape as `gptel-yatools--current-timeout': a value the
+boundary settles, so a helper cannot recompute a slightly different
+ambient answer.")
+
 (defvar gptel-yatools--tools nil
   "The tools defined by this package, in declaration order.
 
@@ -89,22 +104,50 @@ The functions are called on every redisplay, so they must be cheap: the
 VFS count, for example, is what the header-line cache exists for.")
 
 ;;-------------------------------------------------------------------------
-;; Path helpers
+;; Paths
 ;;
 ;; Two kinds of argument reach a tool as text and mean a path: one the
 ;; model wrote (relative to the workspace root) and one this package
 ;; already resolved.  The helpers here are the only place that difference
 ;; is spelled out, so a message never mixes the two.
+;;
+;; Turning the first into the second happens in exactly one function,
+;; `gptel-yatools--resolve-path', at the tool's edge.  The VFS interface
+;; takes absolute paths only and says so loudly (see
+;; `gptel-yatools-vfs--key'), which is what stops a second tool from
+;; quietly inventing a second base.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--workspace-root ()
-  "Return the current project root, or `default-directory'."
+  "Return the root every relative path of this package is resolved against.
+
+Outside a tool call that is `project-current's root, or
+`default-directory' when there is no project.  Inside one it is the root
+captured at the boundary (see `gptel-yatools--current-root'), so a tool
+that rebinds `default-directory' half way through still resolves and
+renders paths against the root the call started in."
+  (or gptel-yatools--current-root
+      (gptel-yatools--detect-workspace-root)))
+
+(defun gptel-yatools--detect-workspace-root ()
+  "Return the workspace root implied by the current buffer, ignoring any pin.
+
+Separate from `gptel-yatools--workspace-root' so that reading the pin
+and computing a fresh answer are two different calls: the boundary needs
+the fresh one, and a function that called the pinned one to get it would
+never see the pin change."
   (let ((proj (project-current)))
     (if proj
         (file-name-as-directory (expand-file-name (project-root proj)))
       (file-name-as-directory (expand-file-name default-directory)))))
 
 (defun gptel-yatools--resolve-path (path)
-  "Resolve PATH relative to the workspace root."
+  "Return PATH as an absolute path, resolved against the workspace root.
+
+This is where a path the model wrote becomes a path this package acts
+on, and it is the only such place.  Everything past it takes absolute
+paths, so what a relative path means is decided once, by the tool that
+received it, rather than re-guessed by the VFS from whichever buffer
+happens to be current."
   (expand-file-name path (gptel-yatools--workspace-root)))
 
 (defun gptel-yatools--display-path (path)
@@ -635,21 +678,27 @@ bare text and never receives text that cannot be serialised back to JSON.
 NAME labels the tool in a timeout message.  TIMEOUT is the call's own
 deadline, or nil for `gptel-yatools-timeout'.
 
+The workspace root is settled here, once, and pinned for the whole call
+\(see `gptel-yatools--current-root'), so a tool that rebinds
+`default-directory' -- the shell runner, to run in a subdirectory --
+cannot change what a later relative path or message means.
+
 `quit' passes through untouched, and so does anything the user asked to
 debug: `condition-case-unless-debug' leaves the signal alone while
 `debug-on-error' is set."
-  (condition-case-unless-debug err
-      (gptel-yatools--respond
-       (gptel-yatools--call-with-timeout function args timeout name))
-    (gptel-yatools-timeout-error
-     (gptel-yatools--envelope
-      nil "Tool call timed out."
-      (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
-                                      (or (plist-get (cdr err) :tool) name))))
-    (error
-     (gptel-yatools--envelope
-      nil "The tool reported an error."
-      (format "Error: %s" (gptel-yatools--error-text err))))))
+  (let ((gptel-yatools--current-root (gptel-yatools--detect-workspace-root)))
+    (condition-case-unless-debug err
+        (gptel-yatools--respond
+         (gptel-yatools--call-with-timeout function args timeout name))
+      (gptel-yatools-timeout-error
+       (gptel-yatools--envelope
+        nil "Tool call timed out."
+        (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
+                                        (or (plist-get (cdr err) :tool) name))))
+      (error
+       (gptel-yatools--envelope
+        nil "The tool reported an error."
+        (format "Error: %s" (gptel-yatools--error-text err)))))))
 
 (defun gptel-yatools--page-text (text offset lines)
   "Return a page of TEXT, described by a plist.

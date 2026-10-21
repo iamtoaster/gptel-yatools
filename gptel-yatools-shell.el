@@ -61,16 +61,17 @@ hung command cannot block Emacs forever.  `call-process' cannot be
 interrupted -- timers do not run while it waits -- which is why this
 uses a real process and polls it instead."
   (let* ((root (gptel-yatools--workspace-root))
+         ;; Pin the root for the rest of this function, so that rebinding
+         ;; `default-directory' below cannot change what a relative path
+         ;; means, nor what a message renders a path as.  A missing target
+         ;; directory then still displays against the workspace root
+         ;; rather than becoming its own root.
+         (gptel-yatools--current-root root)
          (timeout (or gptel-yatools--current-timeout
                       (gptel-yatools--resolve-timeout nil)))
          (target-directory (if (and directory (not (string-empty-p directory)))
                                (expand-file-name directory root)
                              root))
-         ;; Every message below names the directory it ran in, so make
-         ;; that name workspace-relative like the other tools' paths.
-         ;; This must run before `default-directory' is rebound: the
-         ;; display helper derives the workspace root from it, and a
-         ;; missing target directory would otherwise become its own root.
          (shown-directory (gptel-yatools--display-path target-directory))
          (default-directory target-directory))
     (cond

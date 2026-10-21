@@ -125,14 +125,71 @@ multibyte text as UTF-8 and unibyte bytes verbatim instead."
          (if (multibyte-string-p content) 'utf-8-unix 'no-conversion)))
     (with-temp-file file (insert content))))
 
+(defvar gptel-yatools-test--dir nil
+  "Root of the throwaway workspace the current test is running in.")
+
+(defvar gptel-yatools-test--root nil
+  "The workspace root the current test's tools resolve relative paths against.
+
+Declared special so that `gptel-yatools-test--root-file' reads the
+binding `gptel-yatools-test--in-dir' establishes, rather than a nil
+global.")
+
+(defun gptel-yatools-test--root-file (name)
+  "Return NAME as a path under the fixture's workspace root.
+
+A test that writes a file and then hands the tool a relative path has to
+write it where that relative path points: the workspace root.  Spelling
+that out through this helper keeps the tests honest about which base the
+tools are supposed to use, instead of writing to `default-directory' and
+hoping the two are the same directory."
+  (expand-file-name name gptel-yatools-test--root))
+
+(defun gptel-yatools-test--project-find (dir)
+  "Return the throwaway workspace as a project when DIR is inside it.
+
+Installed into `project-find-functions' by `gptel-yatools-test--in-dir'
+so that the fixture has a real workspace root that is *not* the buffer's
+`default-directory'.  A `transient' project is used rather than a `.git'
+directory so the fixture does not depend on git being installed, and so
+that it models what the tools actually read -- a root -- rather than
+what happens to produce one."
+  (when (and gptel-yatools-test--dir
+             (string-prefix-p gptel-yatools-test--dir
+                              (file-name-as-directory (expand-file-name dir))))
+    (cons 'transient gptel-yatools-test--dir)))
+
 (defmacro gptel-yatools-test--in-dir (&rest body)
-  "Run BODY with `default-directory' in a fresh temp dir, then delete it."
+  "Run BODY in a fresh temp workspace, from a subdirectory of its root.
+
+`default-directory' is `sub/' inside the workspace root, not the root
+itself.  That is the ordinary case -- you start a chat from a file in
+`proj/src/' -- and it is the case the path tools used to get wrong: a
+relative path the model writes means the workspace root, while the
+buffer's own `default-directory' is somewhere else.  Splitting them here
+means a tool that resolves against `default-directory' fails a test
+instead of passing by coincidence.
+
+The two bases are checked to be different, so a fixture that silently
+collapsed them again could not quietly weaken every test in the suite.
+Tests reach the root itself with `gptel-yatools-test--root' and the
+buffer's own directory with `default-directory'."
   (declare (indent 0) (debug t))
   `(let* ((gptel-yatools-test--dir (file-name-as-directory
-                                (make-temp-file "gptel-yatools-test-" t)))
-          (default-directory gptel-yatools-test--dir))
-     (unwind-protect (progn ,@body)
-       (ignore-errors (delete-directory gptel-yatools-test--dir t)))))
+                                    (make-temp-file "gptel-yatools-test-" t)))
+          (gptel-yatools-test--root gptel-yatools-test--dir)
+          (gptel-yatools-test--subdir
+           (expand-file-name "sub/" gptel-yatools-test--dir))
+          (project-find-functions
+           (cons #'gptel-yatools-test--project-find project-find-functions)))
+     (make-directory gptel-yatools-test--subdir t)
+     (let ((default-directory gptel-yatools-test--subdir))
+       (when (equal (gptel-yatools--detect-workspace-root)
+                    (file-name-as-directory default-directory))
+         (error "test fixture: the workspace root (%S) and `default-directory' (%S) must differ, else the path tests test nothing"
+                gptel-yatools-test--root default-directory))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (delete-directory gptel-yatools-test--dir t))))))
 
 (defmacro gptel-yatools-test--vfs (&rest body)
   "Run BODY with a fresh private VFS in the current buffer."

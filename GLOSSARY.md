@@ -36,6 +36,24 @@ single response and leaves no attachment behind, so it is not what the
 header-line count reports.
 _Avoid_: Attached skill, activated skill
 
+### Paths
+
+**Workspace root**:
+The directory a relative path the model writes is resolved against, and
+the base every path is shown relative to.  `project-current`'s root, or
+the chat buffer's `default-directory` when there is no project.  Settled
+once per tool call, so a tool that changes `default-directory` -- the
+shell runner does, to run in a subdirectory -- cannot change what a path
+means half way through.
+_Avoid_: Project root, working directory, cwd
+
+**Resolved path**:
+An absolute path, made by `gptel-yatools--resolve-path` at the tool's
+edge from the text the model wrote and the workspace root.  Past that
+seam every function takes a resolved path and none of them interprets
+it again, so one name means one file whichever tool receives it.
+_Avoid_: Full path, absolute name, expanded path
+
 ### Tools
 
 **Result**:

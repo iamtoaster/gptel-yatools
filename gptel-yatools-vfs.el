@@ -93,9 +93,24 @@ proceed instead of breaking batch cleanup."
                  (length paths)
                  (mapconcat #'gptel-yatools--display-path paths ", "))))))
 
+(defun gptel-yatools-vfs--key (path)
+  "Return PATH as a VFS table key, insisting that it is absolute.
+
+The VFS interface takes resolved paths only.  A tool turns the model's
+text into an absolute path once, at its own edge, through
+`gptel-yatools--resolve-path'; past that point a path is a fact, not an
+interpretation.  A relative path arriving here is a bug in this
+package, so it is reported as one instead of being silently resolved
+against whichever buffer is current -- the failure that made
+`write_file' and `read_path' disagree about what \"p.txt\" names."
+  (if (file-name-absolute-p path)
+      (expand-file-name path)
+    (error "gptel-yatools: internal error: the VFS was given the relative path %S; tool functions must resolve paths with `gptel-yatools--resolve-path' before calling the VFS"
+           path)))
+
 (defun gptel-yatools-vfs--entry (path)
   "Return the VFS entry plist for PATH, or nil."
-  (gethash (expand-file-name path) (gptel-yatools-vfs--table)))
+  (gethash (gptel-yatools-vfs--key path) (gptel-yatools-vfs--table)))
 
 (defun gptel-yatools-vfs-get (path)
   "Return the VFS contents of PATH, or nil if PATH is not in the VFS."
@@ -134,7 +149,7 @@ When CODING is non-nil it becomes the encoding the file will be
 written with on sync, which is how a caller converts a file from
 one coding system to another.  The baseline coding is left alone,
 since it describes what the disk had when the VFS captured it."
-  (let* ((full (expand-file-name path))
+  (let* ((full (gptel-yatools-vfs--key path))
          (disk-info (gptel-yatools-vfs--disk-content-with-coding full))
          (disk (car-safe disk-info))
          (disk-coding (cdr-safe disk-info))
@@ -162,7 +177,7 @@ since it describes what the disk had when the VFS captured it."
 
 (defun gptel-yatools-vfs-remove (path)
   "Remove PATH from the VFS."
-  (remhash (expand-file-name path) (gptel-yatools-vfs--table))
+  (remhash (gptel-yatools-vfs--key path) (gptel-yatools-vfs--table))
   (gptel-yatools-vfs--invalidate-header-line)
   (force-mode-line-update t))
 
@@ -627,6 +642,9 @@ concatenate it unconditionally."
 (defun gptel-yatools-vfs-read (path)
   "Return what PATH holds, or nil if it exists nowhere.
 
+PATH must be absolute: resolution happens at the tool's edge, in
+`gptel-yatools--resolve-path'.
+
 The value is a plist with :content and :from-vfs, the latter non-nil when
 the content is a pending change rather than what is on disk.
 
@@ -634,7 +652,7 @@ A directory, a device, a FIFO or an unreadable file signals an error
 naming the reason: a caller that can do something about it (list the
 directory, refuse to read a device) checks for that case first, and a
 caller that cannot gets a message the model can act on."
-  (let* ((full (expand-file-name path))
+  (let* ((full (gptel-yatools-vfs--key path))
          (vfs (gptel-yatools-vfs-get full)))
     (cond
      (vfs (list :content vfs :from-vfs t))
@@ -680,7 +698,7 @@ occupy on disk) and :coding (what it will be written with).
 Signals an error, having changed nothing, when PATH cannot be written --
 an ancestor that is a file, a directory, a device -- or when CODING
 cannot represent CONTENT."
-  (let* ((full (expand-file-name path))
+  (let* ((full (gptel-yatools-vfs--key path))
          (validate-error (gptel-yatools-vfs--validate-insertable full))
          (target (gptel-yatools-vfs--coding full coding)))
     (cond
@@ -758,7 +776,7 @@ the edit leaves the content as it was."
   (when (string-empty-p old)
     (error "Error: old_string must not be empty."))
   (let* ((read (gptel-yatools-vfs-read path))
-         (full (expand-file-name path)))
+         (full (gptel-yatools-vfs--key path)))
     (cond
      ((null read)
       (error "Error: no such file: %s"
@@ -784,7 +802,7 @@ the edit leaves the content as it was."
 
 Unlike `gptel-yatools-vfs-read', this answers only about the pending
 change: it never looks at disk, and never reads a file to find out."
-  (and (gptel-yatools-vfs-get (expand-file-name path)) t))
+  (and (gptel-yatools-vfs-get (gptel-yatools-vfs--key path)) t))
 
 (defun gptel-yatools-vfs-pending-paths ()
   "Return the paths whose VFS content differs from disk, sorted."
@@ -805,9 +823,9 @@ I/O and cannot know that."
 (defun gptel-yatools-vfs-discard-pending (&optional path)
   "Drop PATH's pending change, or every pending change when PATH is nil.
 
-Returns the list of paths that were discarded."
+PATH must be absolute when given: resolution happens at the tool's edge."
   (let ((paths (if path
-                   (let ((full (expand-file-name path)))
+                   (let ((full (gptel-yatools-vfs--key path)))
                      (and (gptel-yatools-vfs-get full) (list full)))
                  (gptel-yatools-vfs--changed-paths))))
     (dolist (full paths) (gptel-yatools-vfs-remove full))
@@ -1138,7 +1156,8 @@ skipped."
 (defun gptel-yatools-vfs-sync (&optional path review)
   "Sync the VFS to disk, and return what happened as a plist.
 
-PATH, when non-nil, limits the sync to that one file.  REVIEW is the
+PATH, when non-nil, limits the sync to that one file and must be
+absolute: resolution happens at the tool's edge.  REVIEW is the
 adapter that asks the user to approve the change set; when non-nil it is
 authoritative, and when nil the interactive review is used, or the sync is
 refused in a non-interactive Emacs.  Nothing is written without either an
@@ -1163,8 +1182,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
   (let* ((vfs-buffer (current-buffer))
          (all (gptel-yatools-vfs-pending-paths))
          (targets (if path
-                      (let ((full (gptel-yatools--resolve-path path)))
-                        (and (member full all) (list full)))
+                      (and (member path all) (list path))
                     all)))
     (cond
      ((null all)
@@ -1255,7 +1273,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
       (:no-target
        (gptel-yatools-ok
         (format "%s has no pending VFS change."
-                (gptel-yatools--resolve-path path))
+                (gptel-yatools--display-path path))
         :comment "Nothing to sync for the requested path."))
       (:declined
        (if (eq (plist-get outcome :reason) :noninteractive)
@@ -1377,9 +1395,9 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :type integer
                  :description "Number of lines to read."))
   (gptel-yatools--require-string path "path")
-  (let* ((read (gptel-yatools-vfs-read path))
-         (content (plist-get read :content))
-         (full (gptel-yatools--resolve-path path)))
+  (let* ((full (gptel-yatools--resolve-path path))
+         (read (gptel-yatools-vfs-read full))
+         (content (plist-get read :content)))
     (unless read
       (error "File does not exist: %s" (gptel-yatools--display-path full)))
     (if (gptel-yatools--binary-p content)
@@ -1428,7 +1446,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "Emacs regular expression to match against each line."))
   (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
-         (read (gptel-yatools-vfs-read path))
+         (read (gptel-yatools-vfs-read full))
          (content (plist-get read :content))
          (regex-error
           (cond
@@ -1487,7 +1505,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "Optional Emacs coding system to write the file with on sync, e.g. \"utf-8\" or \"utf-8-dos\". Use this to convert a file to another encoding when the new content needs characters the current encoding cannot represent."
                  :optional t))
   (gptel-yatools--require-string path "path")
-  (let* ((written (gptel-yatools-vfs-write path content overwrite coding))
+  (let* ((written (gptel-yatools-vfs-write (gptel-yatools--resolve-path path)
+                                           content overwrite coding))
          (full (plist-get written :full)))
     (if (plist-get written :changed)
         (gptel-yatools-ok
@@ -1524,8 +1543,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "Optional Emacs coding system to write the file with on sync, e.g. \"utf-8\". Use this to convert the file to another encoding when the edit needs characters the current encoding cannot represent."
                  :optional t))
   (gptel-yatools--require-string path "path")
-  (let* ((edited (gptel-yatools-vfs-edit path old_string new_string
-                                         overwrite coding))
+  (let* ((edited (gptel-yatools-vfs-edit (gptel-yatools--resolve-path path)
+                                         old_string new_string overwrite coding))
          (full (plist-get edited :full)))
     (if (plist-get edited :changed)
         (gptel-yatools-ok
@@ -1550,7 +1569,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :optional t))
   (when path
     (gptel-yatools--require-string path "path"))
-  (gptel-yatools-vfs--render-sync (gptel-yatools-vfs-sync path)))
+  (gptel-yatools-vfs--render-sync
+   (gptel-yatools-vfs-sync (and path (gptel-yatools--resolve-path path)))))
 
 (gptel-yatools-define-tool gptel-yatools-vfs-diff
   :name "vfs_diff"
@@ -1583,7 +1603,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
      ((null selected)
       (gptel-yatools-ok
        (format "%s has no pending VFS change."
-               (gptel-yatools--resolve-path path))
+               (gptel-yatools--display-path (gptel-yatools--resolve-path path)))
        :comment "No pending VFS change for the requested path."))
      (t
       (let* ((diff-text (gptel-yatools-vfs-diff-text selected))
@@ -1636,7 +1656,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :optional t))
   (when path
     (gptel-yatools--require-string path "path"))
-  (let ((discarded (gptel-yatools-vfs-discard-pending path)))
+  (let ((discarded (gptel-yatools-vfs-discard-pending
+                    (and path (gptel-yatools--resolve-path path)))))
     (cond
      ((and path discarded)
       (gptel-yatools-ok

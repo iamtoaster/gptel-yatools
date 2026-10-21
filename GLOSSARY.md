@@ -97,6 +97,15 @@ a Result.  It is the half to advise when what should change is what the
 tool computes or reports.
 _Avoid_: Tool handler, tool callback
 
+**Announcement**:
+What a slow tool says in the chat's status indicator while it runs --
+"Executing command...".  Setting the text is not enough: `gptel`'s
+status helper only flags the mode line, and Emacs repaints when it next
+goes idle, which a tool call never does.  So announcing means setting
+the text *and* redrawing, once, at the start of the call; the frame then
+holds that status until the call returns.
+_Avoid_: Status message, progress indicator
+
 **Tool boundary**:
 The one adapter that renders a Result into the envelope the model sees.
 It sizes, truncates and escapes the text, and turns a signalled error or

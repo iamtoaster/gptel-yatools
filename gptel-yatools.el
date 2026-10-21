@@ -115,6 +115,19 @@ the header line says what is happening instead of continuing to show
 \"Calling tool\".  MESSAGE should start with a space, matching gptel's
 own status strings.
 
+The frame is redrawn here, and that is the point of this function rather
+than a nicety.  `gptel--update-status' ends with
+`force-mode-line-update', which only *flags* the mode line: Emacs
+redraws when it next becomes idle.  A tool call does not become idle --
+the shell runner polls `accept-process-output' until the command exits --
+so without an explicit redisplay the new status is set, is correct, and
+is never seen.  The screen keeps whatever was drawn before the call
+began, which is why a long command appeared to leave \"Typing...\" up.
+
+Measured on a terminal frame, in the polling loop the shell runner uses:
+`gptel--update-status' alone gives 0 redisplays over a two-second
+command; adding the `redisplay' below gives one, immediately.
+
 Nothing happens outside a live `gptel-mode' buffer, so calling a tool
 directly (tests, `eval', a hook) is unaffected."
   (let ((owner (gptel-yatools--tool-owner-buffer)))
@@ -122,7 +135,8 @@ directly (tests, `eval', a hook) is unaffected."
       (with-current-buffer owner
         (when (and (bound-and-true-p gptel-mode)
                    (fboundp 'gptel--update-status))
-          (gptel--update-status message face))))))
+          (gptel--update-status message face)
+          (redisplay))))))
 
 (defun gptel-yatools--forget-inspection-vfs (&rest _)
   "Drop stale buffer-local VFS state from the tool-call inspection buffer.

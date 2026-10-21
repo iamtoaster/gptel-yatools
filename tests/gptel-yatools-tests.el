@@ -901,6 +901,51 @@ the status slot that gptel rewrites in place."
         (should (equal (nth 1 header-line-format)
                        " Executing command..."))))))
 
+(ert-deftest gptel-yatools-test-announcement-redraws-the-frame ()
+  "Announcing a running command must redraw, not just set the string.
+
+`gptel--update-status' only flags the mode line; Emacs redraws when it
+next goes idle.  A tool call never goes idle -- the shell runner polls
+`accept-process-output' until the command exits -- so a status set
+without an explicit redisplay is correct in the buffer and invisible on
+screen.  Measured on a terminal frame: 0 redisplays over a two-second
+command without it, 1 with it."
+  (with-temp-buffer
+    (gptel-yatools-test--vfs
+      (gptel-yatools-test--chat-with-header-line)
+      ;; `let*' so the advice closes over REDISPLAYS: a plain `let' evaluates
+      ;; its initialiser before the binding exists, and the counter becomes a
+      ;; free variable that the assertion never reads.
+      (let* ((redisplays 0)
+             (advice (lambda (orig &rest args)
+                       (setq redisplays (1+ redisplays))
+                       (apply orig args))))
+        (advice-add 'redisplay :around advice)
+        (unwind-protect
+            (progn
+              (funcall (gptel-yatools-test--tool "execute_command") "true")
+              (should (= redisplays 1)))
+          (advice-remove 'redisplay advice))))))
+
+(ert-deftest gptel-yatools-test-announcement-is-quiet-outside-a-chat ()
+  "A tool run outside a chat buffer must not redraw anything.
+
+`redisplay' is what makes the announcement visible, so it must not be
+reached when there is no gptel buffer to announce into -- a tool called
+from `eval', a test, or a hook has no status indicator to update."
+  (with-temp-buffer
+    (gptel-yatools-test--vfs
+      (let* ((redisplays 0)
+             (advice (lambda (orig &rest args)
+                       (setq redisplays (1+ redisplays))
+                       (apply orig args))))
+        (advice-add 'redisplay :around advice)
+        (unwind-protect
+            (progn
+              (gptel-yatools--update-tool-status " Working..." 'mode-line-emphasis)
+              (should (= redisplays 0)))
+          (advice-remove 'redisplay advice))))))
+
 ;;;; 44b. One place draws the header line, and modules only contribute labels
 
 (ert-deftest gptel-yatools-test-header-line-draws-from-the-registry ()

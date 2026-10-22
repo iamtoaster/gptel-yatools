@@ -21,6 +21,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'diff-mode)
 (require 'gptel)
 (require 'subr-x)
 (require 'gptel-yatools-common)
@@ -1037,6 +1038,11 @@ One of `accept', `reject', or nil while still pending.")
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'gptel-yatools-write-diff-accept)
     (define-key map (kbd "C-c C-k") #'gptel-yatools-write-diff-reject)
+    ;; As in a magit buffer: TAB folds, S-TAB folds or unfolds everything.
+    ;; This shadows `diff-hunk-next', which is why `n'/`p' still step
+    ;; between hunks -- the diff-mode bindings for that are left alone.
+    (define-key map (kbd "TAB") #'gptel-yatools-write-diff-toggle)
+    (define-key map (kbd "<backtab>") #'gptel-yatools-write-diff-cycle)
     map)
   "Keymap for `gptel-yatools-write-diff-mode'.")
 
@@ -1060,40 +1066,343 @@ One of `accept', `reject', or nil while still pending.")
   (exit-recursive-edit))
 
 ;;-------------------------------------------------------------------------
+;; The review buffer: painted faces and folded sections
+;;
+;; The buffer is read once, by a person deciding whether to write to disk,
+;; so it has to look right the first time it is shown.  Both halves of how
+;; it does that are borrowed from magit's diff display:
+;;
+;; - Faces are painted onto the text as `font-lock-face' properties while
+;;   the lines are inserted, and syntactic fontification is switched off
+;;   with `font-lock-defaults' set to (nil t) -- exactly what
+;;   `magit-section-mode' does, with the comment "Turn off syntactic font
+;;   locking".  A face already on the text cannot arrive late; the
+;;   keyword-driven kind can, because it is context-sensitive and runs on
+;;   redisplay, so a hunk could sit unhighlighted until something else
+;;   forced a refontification.
+;;
+;;   `font-lock-face' rather than `face' for the same reason magit uses
+;;   it: fontifying a region strips the `face' property, while
+;;   `font-lock-face' survives and is what font-lock displays.
+;;
+;; - Folding is a `hidden' flag per section plus an overlay with
+;;   `invisible' and `intangible' over the body.  `invisible' alone is not
+;;   enough: point would step from a heading into the hidden body and the
+;;   section would look stuck open, which is why magit puts
+;;   `cursor-intangible' on the same overlay.
+;;
+;; A section is a struct, not a text property, because the buffer is
+;; static: nothing is edited in it, so the ranges recorded during
+;; insertion stay right, and a fold toggles without rewriting any text.
+;;-------------------------------------------------------------------------
+(defface gptel-yatools-diff-file-heading
+  '((t :inherit diff-file-header :weight bold))
+  "Face for a file heading in the VFS review buffer."
+  :group 'gptel-yatools)
+
+(defface gptel-yatools-diff-hunk-heading
+  '((t :inherit diff-hunk-header))
+  "Face for a hunk heading in the VFS review buffer."
+  :group 'gptel-yatools)
+
+(defface gptel-yatools-diff-added
+  '((t :inherit diff-added))
+  "Face for an added line in the VFS review buffer."
+  :group 'gptel-yatools)
+
+(defface gptel-yatools-diff-removed
+  '((t :inherit diff-removed))
+  "Face for a removed line in the VFS review buffer."
+  :group 'gptel-yatools)
+
+(defface gptel-yatools-diff-context
+  '((t :inherit diff-context))
+  "Face for an unchanged line in the VFS review buffer."
+  :group 'gptel-yatools)
+
+(defface gptel-yatools-diff-note
+  '((t :inherit font-lock-warning-face))
+  "Face for a warning or explanation line in the VFS review buffer."
+  :group 'gptel-yatools)
+
+(cl-defstruct (gptel-yatools-diff-section
+               (:constructor gptel-yatools-write-diff--make-section))
+  "A foldable region of the VFS review buffer.
+
+KIND is `file' or `hunk'.  START is the heading line, BODY-START the
+first line that folds away, END one past the last.  HIDDEN says whether
+the body is folded.  CHILDREN are the hunks belonging to a file."
+  (kind 'file)
+  (start 1)
+  (body-start 1)
+  (end 1)
+  (hidden nil)
+  (children nil))
+
+(defvar-local gptel-yatools-write-diff--sections nil
+  "The sections of the current review buffer, in buffer order.
+
+Files come before their own hunks, so scanning the list and keeping the
+last match finds the innermost section containing a position.")
+
+(defun gptel-yatools-write-diff--line-face ()
+  "Return the face for the review-buffer line at point."
+  (cond
+   ((looking-at "^@@") 'gptel-yatools-diff-hunk-heading)
+   ((looking-at "^\\+\\+\\+") 'gptel-yatools-diff-file-heading)
+   ((looking-at "^---") 'gptel-yatools-diff-file-heading)
+   ((looking-at "^\\+") 'gptel-yatools-diff-added)
+   ((looking-at "^-") 'gptel-yatools-diff-removed)
+   ((looking-at "^\\(CONFLICT\\|NOT SYNCED\\|(encoding\\|(new empty\\|-- \\)")
+    'gptel-yatools-diff-note)
+   (t 'gptel-yatools-diff-context)))
+
+(defun gptel-yatools-write-diff--paint (start end)
+  "Attach faces to the lines between START and END.
+
+The face goes on as `font-lock-face', so it is part of the text before
+anything is displayed and no fontification pass can be late."
+  (save-excursion
+    (goto-char start)
+    (while (< (point) end)
+      (put-text-property (point) (min end (1+ (line-end-position)))
+                         'font-lock-face (gptel-yatools-write-diff--line-face))
+      (forward-line 1))))
+
+(defun gptel-yatools-write-diff--summary (body)
+  "Return a one-line summary of the diff text BODY.
+
+The heading stays useful when the section is folded, which is most of
+the point of folding it: a folded file still says how much moved."
+  (let ((added 0) (removed 0) (hunks 0))
+    (dolist (line (split-string body "\n"))
+      (cond
+       ((string-prefix-p "@@" line) (setq hunks (1+ hunks)))
+       ((or (string-prefix-p "+++" line)
+            (string-prefix-p "---" line))
+        nil)
+       ((string-prefix-p "+" line) (setq added (1+ added)))
+       ((string-prefix-p "-" line) (setq removed (1+ removed)))))
+    (if (zerop hunks)
+        "no text change"
+      (format "%d hunk%s, +%d -%d"
+              hunks (if (= hunks 1) "" "s") added removed))))
+
+(defun gptel-yatools-write-diff--hunk-sections (body-start body-end)
+  "Return hunk sections between BODY-START and BODY-END."
+  (let ((starts nil)
+        (sections nil))
+    (save-excursion
+      (goto-char body-start)
+      (while (re-search-forward "^@@" body-end t)
+        (push (line-beginning-position) starts)))
+    (setq starts (nreverse starts))
+    (while starts
+      (let* ((start (car starts))
+             (end (or (cadr starts) body-end))
+             (body (min end (save-excursion
+                              (goto-char start)
+                              (forward-line 1)
+                              (point)))))
+        (push (gptel-yatools-write-diff--make-section
+               :kind 'hunk :start start :body-start body :end end)
+              sections))
+      (setq starts (cdr starts)))
+    (nreverse sections)))
+
+(defun gptel-yatools-write-diff--insert-file (path text)
+  "Insert PATH's pending diff, given as TEXT, as a foldable section.
+
+TEXT is what `gptel-yatools-vfs--format-one-diff' produced in the
+caller's buffer: this buffer has its own, empty, buffer-local VFS, so
+the diff has to be rendered before switching to it.  Its heading is
+this buffer's own rendering; the body is the text the model is told and
+`vfs_diff' shows, so the review cannot disagree with the reply that
+preceded it.
+
+Returns the sections it added: the file, then its hunks."
+  (let* ((newline (string-search "\n" text))
+         (body (if newline (substring text (1+ newline)) ""))
+         (file (gptel-yatools-write-diff--make-section
+                :kind 'file :start (point))))
+    (insert " "
+            (propertize (gptel-yatools--display-path path)
+                        'font-lock-face 'gptel-yatools-diff-file-heading)
+            (propertize (format "  (%s)" (gptel-yatools-write-diff--summary body))
+                        'font-lock-face 'gptel-yatools-diff-note)
+            "\n")
+    (setf (gptel-yatools-diff-section-body-start file) (point))
+    (let ((body-start (point)))
+      (insert body)
+      (unless (bolp) (insert "\n"))
+      (gptel-yatools-write-diff--paint body-start (point))
+      (let ((hunks (gptel-yatools-write-diff--hunk-sections body-start (point))))
+        (setf (gptel-yatools-diff-section-children file) hunks)
+        (setf (gptel-yatools-diff-section-end file) (point))
+        (append (list file) hunks)))))
+
+(defun gptel-yatools-write-diff--insert-preamble (skipped)
+  "Insert the explanation of the buffer, and the SKIPPED files."
+  (insert (propertize "Changes to apply to disk on sync.\n"
+                      'font-lock-face 'gptel-yatools-diff-context))
+  (insert (propertize (concat "  a/ = current disk content\n"
+                              "  b/ = VFS content (post-sync disk)\n"
+                              "  '-' lines will be removed from disk.\n"
+                              "  '+' lines will be added to disk.\n\n")
+                      'font-lock-face 'gptel-yatools-diff-context))
+  (when skipped
+    (insert (propertize "NOT SYNCED — these pending files are skipped (see reason):\n"
+                        'font-lock-face 'gptel-yatools-diff-note))
+    (dolist (pair skipped)
+      (insert (propertize (format "  %s: %s\n"
+                                  (gptel-yatools--display-path (car pair))
+                                  (cdr pair))
+                          'font-lock-face 'gptel-yatools-diff-note)))
+    (insert "\n")))
+
+(defun gptel-yatools-write-diff--section-at (position)
+  "Return the innermost section containing POSITION, or nil."
+  (let (found)
+    (dolist (section gptel-yatools-write-diff--sections found)
+      (when (and (<= (gptel-yatools-diff-section-start section) position)
+                 (< position (gptel-yatools-diff-section-end section)))
+        (setq found section)))))
+
+(defun gptel-yatools-write-diff--overlays (section)
+  "Return the overlays that fold SECTION's body."
+  (let ((body-start (gptel-yatools-diff-section-body-start section))
+        (end (gptel-yatools-diff-section-end section))
+        overlays)
+    (dolist (overlay (overlays-in body-start end) overlays)
+      (when (eq (overlay-get overlay 'gptel-yatools-diff-body) section)
+        (push overlay overlays)))))
+
+(defun gptel-yatools-write-diff--hide (section)
+  "Fold SECTION's body away."
+  (setf (gptel-yatools-diff-section-hidden section) t)
+  (let ((body-start (gptel-yatools-diff-section-body-start section))
+        (end (gptel-yatools-diff-section-end section)))
+    (when (and (< body-start (point)) (< (point) end))
+      (goto-char (gptel-yatools-diff-section-start section)))
+    (unless (gptel-yatools-write-diff--overlays section)
+      (let ((overlay (make-overlay body-start end)))
+        (overlay-put overlay 'evaporate t)
+        (overlay-put overlay 'invisible t)
+        ;; Without this, `C-n' walks from the heading into text the user
+        ;; cannot see: the fold looks open because point went in.
+        (overlay-put overlay 'intangible t)
+        (overlay-put overlay 'gptel-yatools-diff-body section)
+        (overlay-put overlay 'isearch-open-invisible
+                     #'gptel-yatools-write-diff--isearch-open)))))
+
+(defun gptel-yatools-write-diff--isearch-open (overlay)
+  "Unfold the section OVERLAY hides, so isearch can show its match."
+  (when-let* ((section (overlay-get overlay 'gptel-yatools-diff-body)))
+    (gptel-yatools-write-diff--show section)))
+
+(defun gptel-yatools-write-diff--show (section)
+  "Unfold SECTION's body, keeping its children as they were."
+  (setf (gptel-yatools-diff-section-hidden section) nil)
+  (dolist (overlay (gptel-yatools-write-diff--overlays section))
+    (delete-overlay overlay))
+  (dolist (child (gptel-yatools-diff-section-children section))
+    (if (gptel-yatools-diff-section-hidden child)
+        (gptel-yatools-write-diff--hide child)
+      (gptel-yatools-write-diff--show child))))
+
+(defun gptel-yatools-write-diff-toggle ()
+  "Fold or unfold the section at point.
+
+This is `TAB', as it is in a magit buffer: on a file heading it folds
+the whole file, on a hunk heading that hunk.  Inside a body it acts on
+the innermost section there, which is the hunk."
+  (interactive)
+  (let ((section (gptel-yatools-write-diff--section-at (point))))
+    (unless section
+      (user-error "No diff section here"))
+    (if (gptel-yatools-diff-section-hidden section)
+        (gptel-yatools-write-diff--show section)
+      (gptel-yatools-write-diff--hide section))))
+
+(defun gptel-yatools-write-diff-show-all ()
+  "Unfold every section of the review buffer."
+  (interactive)
+  (dolist (section gptel-yatools-write-diff--sections)
+    (gptel-yatools-write-diff--show section)))
+
+(defun gptel-yatools-write-diff-hide-all ()
+  "Fold every file section of the review buffer.
+
+Only the files are folded: their hunks are inside the same range, and a
+second overlay per hunk would have to be tracked for no visible gain.
+Their `hidden' flags are set too, so unfolding a file leaves the hunks
+as they were."
+  (interactive)
+  (dolist (section gptel-yatools-write-diff--sections)
+    (when (eq (gptel-yatools-diff-section-kind section) 'file)
+      (dolist (child (gptel-yatools-diff-section-children section))
+        (setf (gptel-yatools-diff-section-hidden child) t))
+      (gptel-yatools-write-diff--hide section))))
+
+(defun gptel-yatools-write-diff-cycle ()
+  "Fold everything when it is all unfolded, and unfold it when it is not.
+
+This is `S-TAB', as in a magit buffer."
+  (interactive)
+  (if (cl-every #'gptel-yatools-diff-section-hidden
+                (cl-remove-if-not
+                 (lambda (section)
+                   (eq (gptel-yatools-diff-section-kind section) 'file))
+                 gptel-yatools-write-diff--sections))
+      (gptel-yatools-write-diff-show-all)
+    (gptel-yatools-write-diff-hide-all)))
+
+;;-------------------------------------------------------------------------
 ;; Sync helpers
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs--build-sync-diff-buffer (paths &optional skipped)
-  "Build and return a `diff-mode' buffer with per-file VFS-vs-disk diffs.
+  "Build and return the review buffer for PATHS, a list of pending paths.
 
 Only non-conflicting, non-blocked paths should be passed in PATHS;
 anything that will not be synced is listed separately in SKIPPED, an
-alist of (PATH . REASON)."
-  ;; Generate the diff text HERE, in the caller's buffer.  `gptel-yatools-vfs' is
-  ;; buffer-local, so doing this inside the new diff buffer would run every
-  ;; VFS lookup against a fresh, empty table: files would render as an
-  ;; all-`-' hunk (disk -> empty) or as a bare `===== path =====' header
-  ;; with no hunk at all (empty -> empty), and conflicts would never be
-  ;; marked.  The sync itself would still write the right bytes, so the
-  ;; preview, not the disk, is what silently lies.
-  (let ((diff-text (mapconcat #'gptel-yatools-vfs--format-one-diff paths ""))
-        (diff-buf (generate-new-buffer "*gptel VFS sync diff*")))
+alist of (PATH . REASON).
+
+The buffer is a `diff-mode' buffer -- for `diff-hunk-next' and the rest
+of its navigation -- but its faces come from the painting above, not
+from `diff-mode''s keywords."
+  ;; Generate every diff HERE, in the caller's buffer, and only then switch.
+  ;; `gptel-yatools-vfs' is buffer-local, so rendering inside the new buffer
+  ;; would run every VFS lookup against a fresh, empty table: files would
+  ;; render as an all-`-' hunk (disk -> empty) or as a bare
+  ;; `===== path =====' header with no hunk at all (empty -> empty), and
+  ;; conflicts would never be marked.  The sync itself would still write the
+  ;; right bytes, so the preview, not the disk, is what silently lies.
+  (let ((texts (mapcar (lambda (path)
+                         (cons path (gptel-yatools-vfs--format-one-diff path)))
+                       paths))
+        (diff-buf (generate-new-buffer "*gptel VFS sync diff*"))
+        (sections nil))
     (with-current-buffer diff-buf
-      (insert "Changes to apply to disk on sync.\n")
-      (insert "  a/ = current disk content\n")
-      (insert "  b/ = VFS content (post-sync disk)\n")
-      (insert "  '-' lines will be removed from disk.\n")
-      (insert "  '+' lines will be added to disk.\n\n")
-      (when skipped
-        (insert "NOT SYNCED — these pending files are skipped (see reason):\n")
-        (dolist (pair skipped)
-          (insert (format "  %s: %s\n"
-                          (gptel-yatools--display-path (car pair))
-                          (cdr pair))))
-        (insert "\n"))
-      (insert diff-text)
+      (gptel-yatools-write-diff--insert-preamble skipped)
+      (dolist (pair texts)
+        (setq sections (append sections
+                               (gptel-yatools-write-diff--insert-file
+                                (car pair) (cdr pair)))))
+      ;; The major mode wipes buffer-local variables, so the sections are
+      ;; installed after it, and the text properties painted above simply
+      ;; stay where they are.
       (diff-mode)
+      (setq-local gptel-yatools-write-diff--sections sections)
       (setq-local diff-refine nil)
+      ;; As in a magit buffer: no keyword fontification, because the faces
+      ;; are already on the text and a keyword pass could only replace or
+      ;; strip them.  `font-lock-ensure' then applies every `font-lock-face'
+      ;; before the buffer is ever displayed.
+      (setq-local font-lock-defaults '(nil t))
+      (font-lock-mode 1)
+      (font-lock-ensure)
       (setq-local gptel-yatools-write-diff--decision nil)
+      (setq-local buffer-read-only t)
       (gptel-yatools-write-diff-mode 1)
       (goto-char (point-min)))
     diff-buf))

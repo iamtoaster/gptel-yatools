@@ -42,6 +42,168 @@
                 (should (string-match-p "^-two" (buffer-string))))
             (kill-buffer buf)))))))
 
+;;;; 1b. The review buffer: painted faces and folded sections
+;;
+;; The buffer borrows magit's arrangement: faces are `font-lock-face'
+;; properties painted while the text is inserted, syntactic fontification is
+;; off, and folding is an overlay with `invisible' and `intangible' over a
+;; section's body.  Both are tested here because both are easy to undo
+;; without noticing.
+
+(defun gptel-yatools-test--face-at (needle)
+  "Return the `font-lock-face' at the first occurrence of NEEDLE."
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward needle)
+    (get-text-property (match-beginning 0) 'font-lock-face)))
+
+(defun gptel-yatools-test--invisible-overlays ()
+  "Return the overlays in the current buffer that hide their text."
+  (cl-remove-if-not (lambda (overlay) (overlay-get overlay 'invisible))
+                    (overlays-in (point-min) (point-max))))
+
+(ert-deftest gptel-yatools-test-review-buffer-paints-faces-on-insert ()
+  "Faces must be on the text before the buffer is ever displayed.
+
+Keyword fontification runs on redisplay, so a diff could sit unhighlighted
+until something else forced a refontification.  Magit avoids that by
+painting `font-lock-face' while inserting and switching syntactic
+fontification off, which is what this pins."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "painted.txt")))
+      (gptel-yatools-test--write file "one\ntwo\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "one\nTWO\nthree\n")
+          (let ((buf (gptel-yatools-vfs--build-sync-diff-buffer (list file))))
+            (unwind-protect
+                (with-current-buffer buf
+                  (should (equal (gptel-yatools-test--face-at "painted.txt")
+                                 'gptel-yatools-diff-file-heading))
+                  (should (equal (gptel-yatools-test--face-at "+TWO")
+                                 'gptel-yatools-diff-added))
+                  (should (equal (gptel-yatools-test--face-at "-two")
+                                 'gptel-yatools-diff-removed))
+                  (should (equal (gptel-yatools-test--face-at "@@")
+                                 'gptel-yatools-diff-hunk-heading))
+                  ;; Nothing is left to fontify our faces away again.
+                  (should (equal font-lock-defaults '(nil t)))
+                  ;; And the heading says what moved, so folding is useful.
+                  ;; (Quoted: `+' is a regexp operator.)
+                  (should (string-match-p (regexp-quote "1 hunk, +2 -1")
+                                          (buffer-string))))
+              (kill-buffer buf))))))))
+
+(ert-deftest gptel-yatools-test-review-buffer-folds-a-section ()
+  "TAB must fold the body, and unfolded it must come back unchanged.
+
+Folding is an overlay, not an edit: the text stays exactly as it was, so
+what the user approves is still what the sync will apply."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "folded.txt")))
+      (gptel-yatools-test--write file "one\ntwo\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "one\nTWO\n")
+          (let ((buf (gptel-yatools-vfs--build-sync-diff-buffer (list file))))
+            (unwind-protect
+                (with-current-buffer buf
+                  (let ((text (buffer-string))
+                        (section (car gptel-yatools-write-diff--sections)))
+                    (goto-char (gptel-yatools-diff-section-start section))
+                    (gptel-yatools-write-diff-toggle)
+                    (should (gptel-yatools-diff-section-hidden section))
+                    (should (= (length (gptel-yatools-test--invisible-overlays)) 1))
+                    ;; Each overlay covers exactly the hidden body.
+                    (should (= (overlay-start (car (gptel-yatools-test--invisible-overlays)))
+                               (gptel-yatools-diff-section-body-start section)))
+                    (should (equal (buffer-string) text))
+                    (gptel-yatools-write-diff-toggle)
+                    (should-not (gptel-yatools-diff-section-hidden section))
+                    (should-not (gptel-yatools-test--invisible-overlays))
+                    (should (equal (buffer-string) text))))
+              (kill-buffer buf))))))))
+
+(ert-deftest gptel-yatools-test-review-buffer-folds-every-file ()
+  "S-TAB must fold every file at once, and unfold them again."
+  (gptel-yatools-test--in-dir
+    (let ((first (gptel-yatools-test--root-file "one.txt"))
+          (second (gptel-yatools-test--root-file "two.txt")))
+      (gptel-yatools-test--write first "a\n")
+      (gptel-yatools-test--write second "b\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put first "A\n")
+          (gptel-yatools-vfs-put second "B\n")
+          (let ((buf (gptel-yatools-vfs--build-sync-diff-buffer
+                      (list first second))))
+            (unwind-protect
+                (with-current-buffer buf
+                  (gptel-yatools-write-diff-cycle)
+                  (should (= (length (gptel-yatools-test--invisible-overlays)) 2))
+                  (gptel-yatools-write-diff-cycle)
+                  (should-not (gptel-yatools-test--invisible-overlays)))
+              (kill-buffer buf))))))))
+
+(ert-deftest gptel-yatools-test-review-buffer-folds-a-hunk ()
+  "A hunk heading must fold only that hunk, not its file."
+  (gptel-yatools-test--in-dir
+    (let* ((file (gptel-yatools-test--root-file "hunks.txt"))
+           (lines (number-sequence 1 20))
+           (disk (mapconcat (lambda (n) (format "line %d" n)) lines "\n"))
+           (vfs (mapconcat (lambda (n)
+                             (format "line %d%s" n (if (memq n '(2 18)) "!" "")))
+                           lines "\n")))
+      (gptel-yatools-test--write file (concat disk "\n"))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file (concat vfs "\n"))
+          (let ((buf (gptel-yatools-vfs--build-sync-diff-buffer (list file))))
+            (unwind-protect
+                (with-current-buffer buf
+                  (let* ((sections gptel-yatools-write-diff--sections)
+                         (hunks (cl-remove-if-not
+                                 (lambda (s)
+                                   (eq (gptel-yatools-diff-section-kind s) 'hunk))
+                                 sections)))
+                    (should (= (length hunks) 2))
+                    (goto-char (gptel-yatools-diff-section-start (car hunks)))
+                    (gptel-yatools-write-diff-toggle)
+                    ;; The hunk is folded, the file is not.
+                    (should (gptel-yatools-diff-section-hidden (car hunks)))
+                    (should-not (gptel-yatools-diff-section-hidden
+                                 (car (cl-remove-if-not
+                                       (lambda (s)
+                                         (eq (gptel-yatools-diff-section-kind s) 'file))
+                                       sections))))
+                    (should-not (gptel-yatools-diff-section-hidden (cadr hunks)))
+                    (should (= (length (gptel-yatools-test--invisible-overlays)) 1))))
+              (kill-buffer buf))))))))
+
+(ert-deftest gptel-yatools-test-review-buffer-reads-the-callers-vfs ()
+  "The preview must be rendered in the caller's VFS, not the new buffer's.
+
+The review buffer has its own, empty, buffer-local table.  Rendering the
+diff after switching to it produced an empty diff -- disk to nothing --
+while the sync would still have written the right bytes: the preview, not
+the disk, would have been the lie.
+
+`gptel-yatools-test--vfs' binds the table with a dynamic `let', which is
+visible from the new buffer and hides exactly this mistake, so this test
+binds it buffer-locally on purpose."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "own-vfs.txt")))
+      (gptel-yatools-test--write file "one\ntwo\n")
+      (with-temp-buffer
+        (setq-local gptel-yatools-vfs (make-hash-table :test #'equal))
+        (gptel-yatools-vfs-put file "one\nTWO\nthree\n")
+        (let ((buf (gptel-yatools-vfs--build-sync-diff-buffer (list file))))
+          (unwind-protect
+              (with-current-buffer buf
+                (should (string-match-p "^+TWO" (buffer-string)))
+                (should (string-match-p "^-two" (buffer-string))))
+            (kill-buffer buf)))))))
+
 (ert-deftest gptel-yatools-test-sync-preview-new-file-has-hunk ()
   "A brand-new file must render a real hunk, not a bare header."
   (gptel-yatools-test--in-dir

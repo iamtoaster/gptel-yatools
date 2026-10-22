@@ -192,7 +192,12 @@ buffer's own directory with `default-directory'."
          (ignore-errors (delete-directory gptel-yatools-test--dir t))))))
 
 (defmacro gptel-yatools-test--vfs (&rest body)
-  "Run BODY with a fresh private VFS in the current buffer."
+  "Run BODY with a fresh private VFS in the current buffer.
+
+The table is bound with `let', so it is visible from buffers BODY creates
+as well.  That is what most tests want, but a test that has to catch a
+mistake about buffer-local state -- rendering a diff in the review buffer
+instead of the caller's, say -- has to bind `gptel-yatools-vfs' itself."
   (declare (indent 0) (debug t))
   `(let ((gptel-yatools-vfs (make-hash-table :test #'equal)))
      (setq gptel-yatools-vfs--header-line-cache nil)

@@ -122,9 +122,17 @@ regular file, a coding system the text cannot be represented in — are
 reported instead of silently resolved, and are decided by one function, so
 the files the review offers to sync are exactly the files the sync writes.
 
-The review UI is `gptel-yatools-write-diff-mode`, a minor mode with
-<kbd>C-c C-c</kbd> / <kbd>C-c C-k</kbd> bound to accept and reject, active in
-the buffer where `file_sync` shows its diff.
+The review UI is `gptel-yatools-write-diff-mode`, a minor mode active in the
+buffer where `file_sync` shows its diff: <kbd>C-c C-c</kbd> accepts and
+<kbd>C-c C-k</kbd> rejects, <kbd>TAB</kbd> folds the file or hunk at point, and
+<kbd>S-TAB</kbd> folds or unfolds every file.  Each file is headed by its path
+and how much moved (`+12 -3`), so a folded file still says what it changes,
+and the body is the same text `vfs_diff` shows the model.
+
+Faces are painted onto the text as it is inserted, the way a magit buffer
+does it, rather than left to font-lock on redisplay: a diff is highlighted
+the moment it appears, and folding is an overlay, so the text the user
+approves is exactly the text that was shown.
 
 ### Skills
 
@@ -202,7 +210,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-192 ERT tests, no network, no prompts, every one of them in a throwaway temp
+197 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

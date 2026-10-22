@@ -56,19 +56,17 @@ The result always carries a body: the command's exit code and combined
 output, or a description of why it could not be started.
 
 The command is killed once it outlives the current tool timeout
-\(`gptel-yatools--current-timeout', or `gptel-yatools-timeout'), so a
-hung command cannot block Emacs forever.  `call-process' cannot be
-interrupted -- timers do not run while it waits -- which is why this
-uses a real process and polls it instead."
+\(the call's deadline, or `gptel-yatools-timeout'), so a hung command
+cannot block Emacs forever.  `call-process' cannot be interrupted --
+timers do not run while it waits -- which is why this uses a real
+process and polls it instead."
   (let* ((root (gptel-yatools--workspace-root))
-         ;; Pin the root for the rest of this function, so that rebinding
-         ;; `default-directory' below cannot change what a relative path
-         ;; means, nor what a message renders a path as.  A missing target
-         ;; directory then still displays against the workspace root
-         ;; rather than becoming its own root.
-         (gptel-yatools--current-root root)
-         (timeout (or gptel-yatools--current-timeout
-                      (gptel-yatools--resolve-timeout nil)))
+         ;; Ask for the root once, before `default-directory' is rebound
+         ;; below: a relative path and a message must both mean the
+         ;; directory the call started in, not the subdirectory it runs
+         ;; in.  The call's context already pins it, so there is nothing
+         ;; to re-bind here.
+         (timeout (gptel-yatools--call-deadline))
          (target-directory (if (and directory (not (string-empty-p directory)))
                                (expand-file-name directory root)
                              root))
@@ -154,7 +152,7 @@ uses a real process and polls it instead."
                 ;; The command may have changed files on disk, which can
                 ;; change which pending entries still differ, so the cached
                 ;; header-line count must not outlive it.
-                (gptel-yatools-vfs-forget-pending-cache)
+                (gptel-yatools-vfs-disk-moved-externally)
                 (gptel-yatools-shell--command-result
                  (cond
                   (start-error

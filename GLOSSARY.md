@@ -30,6 +30,12 @@ _Avoid_: Skill id, qualified name
 **Skill catalog**:
 The module that answers what the skill roots hold: which skills exist,
 which one a name means, what each is called, and what loading one says.
+Resolving a name is one answer, not two: an outcome of `loaded`,
+`ambiguous`, `unknown` or `invalid`, with a one-line summary and a full
+detail text.  The `skill' tool and the commands that send a skill by
+hand both adapt that same outcome, so they cannot disagree about a name
+-- and deciding loadability is part of resolving, not a second question
+each caller asks for itself.
 It is also where the parse of a `SKILL.md` is cached -- by the text
 itself, so two chats holding different pending copies of one file each
 parse their own, and nothing has to invalidate the cache when a file
@@ -140,10 +146,28 @@ _Avoid_: Write helper, put function
 A file's VFS content when it differs from disk, in text or in encoding.
 Not every VFS entry is one: writing back what the disk already holds
 leaves nothing pending, and an entry that stops differing -- disk
-caught up with it -- is reaped the next time that file is read or
-pending changes are enumerated, rather than lingering as a shadow of
-disk.
+caught up with it -- is dropped rather than left shadowing disk with a
+copy that says nothing new.  Whether an entry is a pending change is
+`gptel-yatools-vfs-pending`'s answer, and no other function decides it.
 _Avoid_: Dirty file, buffered file
+
+**Pending-change module**:
+The module that answers whether a VFS entry is a pending change, lists
+the ones that are, and drops the ones disk has caught up with.  It
+answers two questions, deliberately: `entry` ("is there an entry here?",
+no disk read) and `pending` ("…and does it still differ?").  Keeping the
+cheap question public is a decision with a reason behind it -- see
+docs/adr/0001-pending-ness-keeps-a-cheap-predicate.md.
+_Avoid_: VFS layer, storage
+
+**Shadowed path**:
+A path that has a VFS entry.  It is *not* necessarily a pending change:
+an entry whose content disk now holds shadows nothing, and only the next
+lookup will notice.  The distinction exists because structural checks --
+can this be written?, is an ancestor a file?, does this path hold
+pending children? -- need the cheap answer and must not pay a disk read
+for it.
+_Avoid_: Dirty path, virtual path
 
 **Review**:
 The step between deciding to sync and writing: the pending changes are
@@ -158,6 +182,16 @@ the files refused with the reason for each.  The tool reply and the review
 buffer are both renderings of it, so neither can describe a sync the other
 did not perform.
 _Avoid_: Sync result, report
+
+**Text-file reader**:
+The module that answers what text is at a path, and where it came from.
+It answers with a kind -- text, binary, missing, a directory, a special
+file, unreadable -- rather than signalling or returning a rendered
+string, so a tool can turn each case into its own message while the
+wording of a refusal is written once.  It owns the binary policy: a tool
+never decides for itself whether content is text, and never builds its
+own notice.
+_Avoid_: Read helper, file loader
 
 **Refusal**:
 The one answer to "can this file be written right now?": nil, or a kind

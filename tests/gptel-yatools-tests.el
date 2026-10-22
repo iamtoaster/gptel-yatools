@@ -400,7 +400,7 @@ that was sitting in the VFS."
                (written (funcall (funcall tool "write_file") "p.txt" "x\n"))
                (root-file (gptel-yatools-test--root-file "p.txt")))
           ;; The write landed at the workspace root, not in sub/.
-          (should (equal (gptel-yatools-vfs-get root-file) "x\n"))
+          (should (equal (plist-get (gptel-yatools-vfs-entry root-file) :content) "x\n"))
           (should (string-match-p "Wrote p.txt to the VFS" written))
           ;; Every reader agrees with it, and none of them reports that
           ;; the file does not exist.
@@ -424,7 +424,7 @@ that was sitting in the VFS."
           (should (string-match-p
                    "Removed pending VFS change for p.txt"
                    (funcall (funcall tool "vfs_discard") "p.txt")))
-          (should-not (gptel-yatools-vfs-get root-file)))))))
+          (should-not (gptel-yatools-vfs-entry root-file)))))))
 
 
 (ert-deftest gptel-yatools-test-vfs-refuses-a-relative-path ()
@@ -437,17 +437,17 @@ what a single name meant."
   (gptel-yatools-test--in-dir
     (with-temp-buffer
       (gptel-yatools-test--vfs
-        (should-error (gptel-yatools-vfs-get "relative.txt") :type 'error)
+        (should-error (plist-get (gptel-yatools-vfs-entry "relative.txt") :content) :type 'error)
         (should-error (gptel-yatools-vfs-read "relative.txt") :type 'error)
         (should-error (gptel-yatools-vfs-put "relative.txt" "x") :type 'error)
         (should-error (gptel-yatools-vfs-remove "relative.txt") :type 'error)
-        (should-error (gptel-yatools-vfs-pending-p "relative.txt") :type 'error)
+        (should-error (gptel-yatools-vfs-entry "relative.txt") :type 'error)
         (should-error (gptel-yatools-vfs-discard-pending "relative.txt")
                       :type 'error)
         ;; An absolute path is accepted, and lands at that path.
         (let ((full (gptel-yatools-test--root-file "ok.txt")))
           (gptel-yatools-vfs-put full "x\n")
-          (should (equal (gptel-yatools-vfs-get full) "x\n")))))))
+          (should (equal (plist-get (gptel-yatools-vfs-entry full) :content) "x\n")))))))
 
 
 (ert-deftest gptel-yatools-test-shell-keeps-the-workspace-root ()
@@ -482,7 +482,7 @@ A `defvar' hidden inside the quoted `use-package' body is invisible to
 the byte compiler, which then binds the variable lexically and leaves
 the real (buffer-local or global) value untouched."
   (dolist (symbol '(gptel-yatools-vfs gptel-yatools-vfs--header-line-cache
-                   gptel-yatools--current-timeout gptel-yatools--timeout-suspended))
+                   gptel-yatools--call))
     (should (special-variable-p symbol))))
 
 
@@ -539,6 +539,42 @@ request, and had to be re-appended on every reload to stay in step."
   (let ((gptel-yatools-timeout "not a number"))
     (should (= (gptel-yatools--resolve-timeout nil) 120))))
 
+(ert-deftest gptel-yatools-test-call-context-falls-back-outside-a-call ()
+  "Outside a tool call the context accessors must answer as before.
+
+Tests, `eval' and hooks call tool functions directly, with no call bound.
+An accessor that refused to answer there would break every one of them, so
+each falls back on what it would have computed anyway."
+  (gptel-yatools-test--in-dir
+    (should-not gptel-yatools--call)
+    (should (equal (gptel-yatools--call-root)
+                   (gptel-yatools--detect-workspace-root)))
+    (should (equal (gptel-yatools--call-deadline)
+                   (gptel-yatools--resolve-timeout nil)))
+    (should-not (gptel-yatools--call-suspended-p))))
+
+(ert-deftest gptel-yatools-test-call-context-is-bound-for-the-whole-call ()
+  "A tool call must see one root and one deadline for its whole duration.
+
+Both are settled at the boundary.  A tool that rebinds `default-directory'
+-- the shell runner does, to run in a subdirectory -- must not change what
+a path means half way through the call."
+  (gptel-yatools-test--in-dir
+    (let (seen)
+      (gptel-yatools--call-with-timeout
+       (lambda ()
+         (push (list (gptel-yatools--call-root) (gptel-yatools--call-deadline))
+               seen)
+         ;; Changing the ambient directory must not change the answer.
+         (let ((default-directory temporary-file-directory))
+           (push (list (gptel-yatools--call-root) (gptel-yatools--call-deadline))
+                 seen)))
+       nil 7)
+      (should (equal (car seen) (cadr seen)))
+      (should (equal (cadr (car seen)) 7))
+      ;; Nothing leaks out of the call.
+      (should-not gptel-yatools--call))))
+
 (ert-deftest gptel-yatools-test-timeout-kills-command ()
   "A command that outlives the timeout must be killed, keeping its output."
   (let ((start (float-time))
@@ -553,7 +589,7 @@ request, and had to be re-appended on every reload to stay in step."
   "Time the tool spends waiting for the user must not count."
   (should (eq (gptel-yatools--call-with-timeout
                (lambda ()
-                 (let ((gptel-yatools--timeout-suspended t))
+                 (gptel-yatools--with-deadline-suspended
                    (sleep-for 2))
                  'reviewed)
                nil 1)
@@ -660,9 +696,9 @@ mislabell it as timed out while it still runs."
               (gptel-yatools-test--accept-in
                inspect chat (gptel-yatools-test--tool-spec "write_file")
                (list :path "f.txt" :content "new\n")))
-            (should (equal (with-current-buffer chat (gptel-yatools-vfs-get file))
+            (should (equal (with-current-buffer chat (plist-get (gptel-yatools-vfs-entry file) :content))
                            "new\n"))
-            (should-not (with-current-buffer inspect (gptel-yatools-vfs-get file)))
+            (should-not (with-current-buffer inspect (plist-get (gptel-yatools-vfs-entry file) :content)))
             (should (equal (with-current-buffer chat
                              (gptel-yatools-vfs--changed-paths))
                            (list file))))
@@ -693,7 +729,7 @@ tells the model the work is done when nothing was written at all."
               (should-not (string-match-p "no pending changes" out))
               (should (string-match-p "non-interactively" out))
               (should (equal (gptel-yatools-vfs--disk-content file) "orig\n"))
-              (should (with-current-buffer chat (gptel-yatools-vfs-get file)))))
+              (should (with-current-buffer chat (plist-get (gptel-yatools-vfs-entry file) :content)))))
         (gptel-yatools-test--kill-request-buffer chat)
         (gptel-yatools-test--kill-request-buffer inspect)))))
 
@@ -754,9 +790,9 @@ rather than silently losing the VFS."
               (with-current-buffer decoy
                 (gptel-yatools-test--noninteractive
                   (gptel--handle-tool-use fsm))))
-            (should (equal (with-current-buffer chat (gptel-yatools-vfs-get file))
+            (should (equal (with-current-buffer chat (plist-get (gptel-yatools-vfs-entry file) :content))
                            "auto\n"))
-            (should-not (with-current-buffer decoy (gptel-yatools-vfs-get file))))
+            (should-not (with-current-buffer decoy (plist-get (gptel-yatools-vfs-entry file) :content))))
         (gptel-yatools-test--kill-request-buffer chat)
         (gptel-yatools-test--kill-request-buffer decoy)))))
 
@@ -784,9 +820,9 @@ would skip."
                                    :tool-display (list (list tool-call) nil))))
                 (gptel-yatools-test--noninteractive
                   (gptel--inspect-accept-tool-calls))))
-            (should (equal (with-current-buffer chat (gptel-yatools-vfs-get file))
+            (should (equal (with-current-buffer chat (plist-get (gptel-yatools-vfs-entry file) :content))
                            "inspected\n"))
-            (should-not (with-current-buffer inspect (gptel-yatools-vfs-get file))))
+            (should-not (with-current-buffer inspect (plist-get (gptel-yatools-vfs-entry file) :content))))
         (gptel-yatools-test--kill-request-buffer chat)
         (gptel-yatools-test--kill-request-buffer inspect)))))
 
@@ -847,7 +883,7 @@ buffer's VFS or directory."
               (should (string-match-p "no longer exists"
                                       (error-message-string err))))
             (should (equal (gptel-yatools-vfs--disk-content file) "orig\n"))
-            (should-not (with-current-buffer inspect (gptel-yatools-vfs-get file))))
+            (should-not (with-current-buffer inspect (plist-get (gptel-yatools-vfs-entry file) :content))))
         (gptel-yatools-test--kill-request-buffer inspect)))))
 
 (ert-deftest gptel-yatools-test-tool-calls-do-not-share-a-vfs ()
@@ -865,9 +901,9 @@ buffer's VFS or directory."
               (gptel-yatools-test--accept-in
                inspect first (gptel-yatools-test--tool-spec "write_file")
                (list :path "f.txt" :content "for-first\n")))
-            (should (equal (with-current-buffer first (gptel-yatools-vfs-get file))
+            (should (equal (with-current-buffer first (plist-get (gptel-yatools-vfs-entry file) :content))
                            "for-first\n"))
-            (should (equal (with-current-buffer second (gptel-yatools-vfs-get file))
+            (should (equal (with-current-buffer second (plist-get (gptel-yatools-vfs-entry file) :content))
                            "for-second\n"))
             (should (equal (with-current-buffer first
                              (gptel-yatools-vfs--changed-paths))
@@ -1215,11 +1251,40 @@ them."
               "probe" (lambda (&rest _) (error "Wrong type argument: listp, 5")) nil)))
     (should (string-match-p "Error: Wrong type argument: listp, 5" out))))
 
-(ert-deftest gptel-yatools-test-page-text-stops-at-the-size-budget ()
+(ert-deftest gptel-yatools-test-response-machinery-is-crossed-at-one-seam ()
+  "No tool module may reach into the response machinery.
+
+`common.el' declares three interfaces -- respond, call, define -- and the
+response one hides sizing, truncation, escaping and the envelope.  A tool
+that calls `--truncate' or `--envelope' itself has reached past the seam,
+and the guarantee that no reply is ever sent unsized or unserialisable
+stops holding for that tool.  `gptel-yatools-page' is the stated exception:
+the budget is offered because `vfs_diff' has to page its own output."
+  (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
+                                        "")))
+         (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"))
+         (offenders nil))
+    (dolist (file files)
+      (let ((path (expand-file-name file root)))
+        (when (file-readable-p path)
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (while (re-search-forward
+                    "gptel-yatools--\\(truncate\\|truncate-slow\\|envelope\\|escape-raw-bytes\\|hard-cut\\|respond\\|page-text\\)"
+                    nil t)
+              (push (format "%s:%d"
+                            file
+                            (line-number-at-pos (match-beginning 0)))
+                    offenders))))))
+    (should (null offenders))))
+
+(ert-deftest gptel-yatools-test-page-fits-the-size-budget ()
   "A page must fit the response budget, and say what it showed."
   (let* ((wide (make-string (1+ gptel-yatools--output-char-limit) ?x))
          (text (mapconcat #'identity (list "one" wide "three") "\n"))
-         (page (gptel-yatools--page-text text 1 10)))
+         (page (gptel-yatools-page text 1 10)))
     (should (= (plist-get page :start) 1))
     ;; Only the first line fits, so the page is one line, not three.
     (should (= (plist-get page :end) 1))
@@ -1227,16 +1292,16 @@ them."
     (should (< (length (plist-get page :text))
                gptel-yatools--output-char-limit))))
 
-(ert-deftest gptel-yatools-test-page-text-reports-the-last-page ()
+(ert-deftest gptel-yatools-test-page-reports-the-last-page ()
   "The last page must say it is the last one, not that nothing follows."
-  (let ((page (gptel-yatools--page-text "a\nb\nc" 3 10)))
+  (let ((page (gptel-yatools-page "a\nb\nc" 3 10)))
     (should (equal (plist-get page :text) "c"))
     (should (= (plist-get page :end) (plist-get page :total)))
     ;; A page that does not start at line 1 is still partial: the caller
     ;; needs to know the excerpt is not the whole text.
     (should (plist-get page :partial))
     (should-not (plist-get page :past-end)))
-  (let ((page (gptel-yatools--page-text "a\nb\nc" 9 10)))
+  (let ((page (gptel-yatools-page "a\nb\nc" 9 10)))
     (should (plist-get page :past-end))
     (should (equal (plist-get page :text) ""))))
 

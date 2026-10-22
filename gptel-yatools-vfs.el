@@ -108,29 +108,81 @@ against whichever buffer is current -- the failure that made
     (error "gptel-yatools: internal error: the VFS was given the relative path %S; tool functions must resolve paths with `gptel-yatools--resolve-path' before calling the VFS"
            path)))
 
-(defun gptel-yatools-vfs--entry (path)
-  "Return the VFS entry plist for PATH, or nil."
+;;-------------------------------------------------------------------------
+;; The pending-change module
+;;
+;; One answer to one question: which VFS entries still differ from disk.
+;; Everything that needs to know asks here, because the two questions the
+;; VFS table can answer are different ones and used to be spelled the same
+;; way:
+;;
+;;   entry    "is there an entry here?"  No disk I/O, no reaping.
+;;   pending  "...and does it still differ?"  One disk read; an entry disk
+;;            has caught up with is dropped on the way.
+;;
+;; A path with an entry is *shadowed*, not necessarily *pending*: three
+;; structural checks (can this be written?, is an ancestor a file?, does
+;; this path hold pending children?) and the two skill-file checks need
+;; the cheap answer and must not pay a disk read for a comparison they do
+;; not use.  See docs/adr/0001-pending-ness-keeps-a-cheap-predicate.md.
+;;
+;; Reaping is a consequence of asking, not a separate sweep.  `pending'
+;; and `pending-paths' are the only things that read disk to compare, so
+;; they are the only places that can notice; a caller that had to remember
+;; to sweep would eventually stop remembering, which is how this file came
+;; to hold three copies of the same stanza.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-vfs-entry (path)
+  "Return PATH's VFS entry plist, or nil when there is no entry.
+
+This is the cheap question -- \"is there an entry here?\" -- and it
+never reads disk and never drops anything.  A caller that also needs to
+know whether the entry still differs from disk wants
+`gptel-yatools-vfs-pending'; a caller that needs only the structural
+fact (is this ancestor a file in the VFS? may I insert under it?) wants
+this one, and gets it without a disk read.
+
+The plist is the entry itself: `:content', `:baseline', `:coding' and
+`:baseline-coding'.  It is read-only; do not `plist-put' into it, since
+it is the table's own value."
   (gethash (gptel-yatools-vfs--key path) (gptel-yatools-vfs--table)))
 
-(defun gptel-yatools-vfs-get (path)
-  "Return the VFS contents of PATH, or nil if PATH is not in the VFS."
-  (when-let* ((entry (gptel-yatools-vfs--entry path)))
-    (plist-get entry :content)))
+(defun gptel-yatools-vfs-pending (path)
+  "Return PATH's VFS entry if it still differs from disk, else nil.
 
-(defun gptel-yatools-vfs--baseline (path)
-  "Return PATH's baseline (disk content at VFS capture time), or nil."
-  (when-let* ((entry (gptel-yatools-vfs--entry path)))
-    (plist-get entry :baseline)))
+This is the question every tool actually asks, so the value is the
+entry rather than a boolean: a caller that wants the content, the
+baseline and both codings needs all three, and a predicate would make
+it look every one of them up a second time.
+
+Comparing an entry with disk costs one disk read, and the entry disk has
+caught up with is dropped as a side effect: it is no longer pending, so
+leaving it in the table would make every later reader believe the file
+differs from disk when it does not.  Reaping here rather than in a
+separate sweep is what keeps that rule in one place -- see the section
+comment above."
+  (let ((entry (gptel-yatools-vfs-entry path)))
+    (cond
+     ((null entry) nil)
+     ((gptel-yatools-vfs--changed-p path) entry)
+     (t
+      (gptel-yatools-vfs-remove path)
+      nil))))
+
+(defun gptel-yatools-vfs--reap (paths)
+  "Drop PATHS from the table: disk has caught up with what they held.
+
+Only the walk in `gptel-yatools-vfs--changed-paths' needs this as a
+separate step, because it must not change the table while `maphash' is
+iterating it.  Every other caller reaps by asking
+`gptel-yatools-vfs-pending'."
+  (dolist (path paths)
+    (gptel-yatools-vfs-remove path)))
 
 (defun gptel-yatools-vfs--entry-coding (path)
   "Return the coding system recorded for PATH's VFS entry, or nil."
-  (when-let* ((entry (gptel-yatools-vfs--entry path)))
+  (when-let* ((entry (gptel-yatools-vfs-entry path)))
     (plist-get entry :coding)))
-
-(defun gptel-yatools-vfs--baseline-coding (path)
-  "Return the coding system PATH had on disk when the VFS captured it."
-  (when-let* ((entry (gptel-yatools-vfs--entry path)))
-    (plist-get entry :baseline-coding)))
 
 (defun gptel-yatools-vfs-put (path content &optional reset-baseline coding)
   "Store CONTENT at PATH in the VFS.
@@ -258,9 +310,13 @@ input.  Returns nil when every character is representable."
 (defun gptel-yatools-vfs--changed-p (path)
   "Return non-nil if PATH differs between the VFS and disk.
 
+The pure comparison behind `gptel-yatools-vfs-pending', with no side
+effects: a caller that wants the entry too asks that function, which
+reaps an entry this returns nil for.
+
 Both the text and the encoding are compared, so a pending
 encoding conversion is a change even when the text is identical."
-  (let ((entry (gptel-yatools-vfs--entry path)))
+  (let ((entry (gptel-yatools-vfs-entry path)))
     (when entry
       (let ((disk-info (gptel-yatools-vfs--disk-content-with-coding path)))
         (or (not (equal (plist-get entry :content)
@@ -276,8 +332,14 @@ conflict means the file was modified on disk outside the VFS
 after the VFS first captured it, and syncing would overwrite
 those external changes.  Both the decoded text and the coding
 system are compared, so a pure re-encoding (for example CRLF
-turned into LF) also counts as a change."
-  (let ((entry (gptel-yatools-vfs--entry path)))
+turned into LF) also counts as a change.
+
+This is the boolean form of one `gptel-yatools-vfs-refusal' kind, and
+exists only because that function asks it first.  Every other caller
+asks `gptel-yatools-vfs-refusal', so that the answer \"is this a
+conflict?\" has one source and the review and the report cannot
+disagree about which files are conflicts."
+  (let ((entry (gptel-yatools-vfs-entry path)))
     (when entry
       (let ((disk-info (gptel-yatools-vfs--disk-content-with-coding path)))
         (or (not (equal (plist-get entry :baseline)
@@ -292,19 +354,19 @@ Entries that no longer differ are dropped on the way: disk caught up
 with the pending copy, so there is nothing left to sync.  This is the
 one place that already reads every pending file to answer, which is why
 the reaping is here and not in the callers -- and why `vfs_discard' does
-not rely on this list to find entries, only `vfs-pending-p' -- the cheap
-\"is there an entry?\" question -- still answers about them.
+not rely on this list to find entries, only `gptel-yatools-vfs-entry'
+-- the cheap \"is there an entry?\" question -- still answers about them.
 
 The removal happens after the walk: `maphash' must not see its table
-change underneath it."
+change underneath it, so this is the one caller that reaps through
+`gptel-yatools-vfs--reap' instead of asking `gptel-yatools-vfs-pending'."
   (let (result stale)
     (maphash (lambda (path _entry)
                (if (gptel-yatools-vfs--changed-p path)
                    (push path result)
                  (push path stale)))
              (gptel-yatools-vfs--table))
-    (dolist (path stale)
-      (gptel-yatools-vfs-remove path))
+    (gptel-yatools-vfs--reap stale)
     (sort result #'string-lessp)))
 
 (defun gptel-yatools-vfs--has-children-p (full)
@@ -404,7 +466,7 @@ the tools return."
           (equal ancestor "/")
           (equal ancestor full))
       nil)
-     ((gptel-yatools-vfs-get ancestor)
+     ((gptel-yatools-vfs-entry ancestor)
       (format "Error: cannot write %s: ancestor %s is a file in the VFS. Use vfs_discard to remove it first."
               (gptel-yatools--display-path full)
               (gptel-yatools--display-path ancestor)))
@@ -535,17 +597,21 @@ to VFS.  For conflicting files, both the external change (baseline
 to disk) and what file_sync would apply (disk to VFS) are shown so
 the caller can see what would be lost."
   (let* ((label (gptel-yatools--display-path path))
+         (entry (gptel-yatools-vfs-entry path))
          (disk-info (gptel-yatools-vfs--disk-content-with-coding path))
          (disk (car-safe disk-info))
          (disk-coding (cdr-safe disk-info))
-         (vfs  (gptel-yatools-vfs-get path))
-         (baseline (gptel-yatools-vfs--baseline path))
-         (baseline-coding (gptel-yatools-vfs--baseline-coding path)))
+         (vfs  (plist-get entry :content))
+         (baseline (plist-get entry :baseline))
+         (baseline-coding (plist-get entry :baseline-coding)))
     (cond
      ;; Conflict is checked first: a pending file that was deleted from
      ;; disk and rewritten to "" would otherwise be reported as a new
-     ;; empty file, hiding the deletion.
-     ((gptel-yatools-vfs--conflict-p path)
+     ;; empty file, hiding the deletion.  The question is asked of
+     ;; `gptel-yatools-vfs-refusal', not of the private predicate, so that
+     ;; the diff header and the sync partition cannot disagree about
+     ;; which files are conflicts.
+     ((eq (plist-get (gptel-yatools-vfs-refusal path) :kind) :conflict)
       (let ((external
              (gptel-yatools-vfs--unified-diff
               (or baseline "") (or disk "")
@@ -585,7 +651,7 @@ with overwrite=true to force the VFS version.\n\n\
               label
               ;; Say up front when file_sync will refuse this file, so
               ;; vfs_diff and the sync review buffer never disagree.
-              (let ((refusal (gptel-yatools-vfs--refusal path)))
+              (let ((refusal (gptel-yatools-vfs-refusal path)))
                 (if refusal
                     (format "NOT SYNCED: %s\n" (plist-get refusal :reason))
                   ""))
@@ -619,48 +685,147 @@ concatenate it unconditionally."
 ;; against.  Both the tools and the skill code go through them, which is
 ;; why a rule can only be changed in one place.
 ;;-------------------------------------------------------------------------
+;;-------------------------------------------------------------------------
+;; Reading a text file
+;;
+;; One reader answers "what text is at this path, and where did it come
+;; from?" for every tool that reads one: `read_path',
+;; `read_file_from_offset', `fetch_lines_from_file_using_regex' and the
+;; skill file reader.  It owns the binary policy too, which used to be
+;; written out five times as "call --binary-p, then build a notice".
+;;
+;; The answer is a value with a `:kind', not a signal and not a rendered
+;; string: a tool has to be able to turn a missing path into *its own*
+;; message, and the skill reader needs the text before deciding how to
+;; frame it.  The wording of a refusal is a separate function below, so
+;; four tools share one voice without the reader deciding what a tool says.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-vfs--binary-p (text)
+  "Return non-nil if TEXT looks like binary content.
+
+The test is the conventional one: presence of a NUL byte.  Text files
+essentially never contain one, while images, PDFs, archives and
+compiled artifacts almost always do."
+  (and (stringp text) (string-match-p "\0" text)))
+
+(defun gptel-yatools-vfs--text-size (text)
+  "Return the number of bytes TEXT occupies when written unchanged.
+
+A pending copy is sized by the bytes it will be written as, not by the
+disk file it will replace, so both sides of a read report the same way."
+  (or (condition-case nil
+          (string-bytes (encode-coding-string text 'no-conversion))
+        (error nil))
+      (length text)))
+
+(defun gptel-yatools-vfs--binary-notice (read)
+  "Return a Result reporting that READ found binary content.
+
+READ is what `gptel-yatools-vfs-read' returned.  Its `:size' is the
+size of the bytes the model would have been shown, and its
+`:provenance' says which side of the VFS they came from."
+  (let ((size (plist-get read :size)))
+    (gptel-yatools-ok
+     (format "\
+%s is a binary file (%s), so its contents are not returned.
+
+Binary files cannot be meaningfully read or edited as text: the
+bytes do not form lines, and round-tripping them through text
+editing would corrupt the file.  If you need information about it,
+use the execute_command tool instead, for example:
+
+  file %s
+  ls -l %s
+  sha256sum %s
+
+If the goal is to replace the file, write it with write_file
+without reading it first."
+             (gptel-yatools--display-path (plist-get read :path))
+             (if size (format "%d bytes" size) "size unknown")
+             (gptel-yatools--display-path (plist-get read :path))
+             (gptel-yatools--display-path (plist-get read :path))
+             (gptel-yatools--display-path (plist-get read :path)))
+     :provenance (plist-get read :provenance)
+     :comment "Binary file; contents withheld.")))
+
+(defun gptel-yatools-vfs--read-problem (read)
+  "Return a sentence saying why READ is not text, or nil when it is.
+
+This is the shared wording for the three kinds that are not text and
+are not binary: a missing path, a path that is not a regular file, and
+a file that could not be decoded.  A tool that has something more
+useful to say -- `read_path' lists a directory -- branches on `:kind'
+itself instead of calling this."
+  (pcase (plist-get read :kind)
+    (:missing
+     (format "Error: no such file: %s"
+             (gptel-yatools--display-path (plist-get read :path))))
+    (:directory
+     (format "Error: %s is a directory, not a file."
+             (gptel-yatools--display-path (plist-get read :path))))
+    (:special
+     (format "Error: %s is not a regular file (device, FIFO or socket); refusing to read it."
+             (gptel-yatools--display-path (plist-get read :path))))
+    (:unreadable
+     (format "Error: %s is not readable (%s)."
+             (gptel-yatools--display-path (plist-get read :path))
+             (or (plist-get read :why) "permission denied or I/O error")))
+    (_ nil)))
+
 (defun gptel-yatools-vfs-read (path)
-  "Return what PATH holds, or nil if it exists nowhere.
+  "Return the text at PATH, and say what kind of answer it is.
 
 PATH must be absolute: resolution happens at the tool's edge, in
 `gptel-yatools--resolve-path'.
 
-The value is a plist with :content and :from-vfs, the latter non-nil when
-the content is a pending change rather than what is on disk.
+The value is a plist whose `:kind' is one of:
 
-A directory, a device, a FIFO or an unreadable file signals an error
-naming the reason: a caller that can do something about it (list the
-directory, refuse to read a device) checks for that case first, and a
-caller that cannot gets a message the model can act on."
+  :text        `:text' holds the file's contents, `:provenance' where
+               they came from (`:disk' or `:vfs').
+  :binary      `:text' holds the raw contents, `:size' the bytes,
+               `:provenance' where they came from.  The contents are
+               not returned to the model -- see
+               `gptel-yatools-vfs--binary-notice'.
+  :missing     nothing exists at PATH.
+  :directory   PATH is a directory.
+  :special     PATH exists but is not a regular file.
+  :unreadable  PATH is a regular file that could not be decoded;
+               `:why' says why.
+
+Every answer carries `:path', the key the VFS resolved.
+
+A pending VFS entry wins over disk, exactly as it does for every other
+read.  Only regular files are read from disk: reading a FIFO blocks
+forever and reading /dev/zero never ends.
+
+Ordinary outcomes do not signal.  A tool that can do something about
+one branches on `:kind'; one that cannot renders it with
+`gptel-yatools-vfs--read-problem'.  Signalling here would force every
+caller to wrap the call in `ignore-errors' and lose the reason."
   (let* ((full (gptel-yatools-vfs--key path))
-         (vfs (gptel-yatools-vfs-get full)))
-    ;; An entry whose content disk now holds is not a pending change, so
-    ;; it must not shadow what disk holds -- and since finding that out
-    ;; costs the same disk read the fallthrough below would make, the
-    ;; stale entry is dropped here too.  See
-    ;; `gptel-yatools-vfs--changed-paths' for the other place this
-    ;; happens, and `gptel-yatools-vfs-pending-p' for why the cheap
-    ;; "entry exists" question has a different answer.
-    (when (and vfs (not (gptel-yatools-vfs--changed-p full)))
-      (gptel-yatools-vfs-remove full)
-      (setq vfs nil))
+         (entry (gptel-yatools-vfs-pending full))
+         (vfs (plist-get entry :content)))
     (cond
-     (vfs (list :content vfs :from-vfs t))
-     ((file-directory-p full)
-      (error "Error: %s is a directory, not a file."
-             (gptel-yatools--display-path full)))
-     ((not (file-exists-p full)) nil)
-     ((not (file-regular-p full))
-      (error "Error: %s is not a regular file (device, FIFO or socket); refusing to read it."
-             (gptel-yatools--display-path full)))
+     (vfs
+      (if (gptel-yatools-vfs--binary-p vfs)
+          (list :kind :binary :path full :text vfs :provenance :vfs
+                :size (gptel-yatools-vfs--text-size vfs))
+        (list :kind :text :path full :text vfs :provenance :vfs)))
+     ((file-directory-p full) (list :kind :directory :path full))
+     ((not (file-exists-p full)) (list :kind :missing :path full))
+     ((not (file-regular-p full)) (list :kind :special :path full))
      ((not (file-readable-p full))
-      (error "Error: %s is not readable (permission denied)."
-             (gptel-yatools--display-path full)))
-     (t (let ((content (gptel-yatools-vfs--disk-content full)))
-          (unless content
-            (error "Error: cannot read %s (permission denied or I/O error)."
-                   (gptel-yatools--display-path full)))
-          (list :content content :from-vfs nil))))))
+      (list :kind :unreadable :path full :why "permission denied"))
+     (t
+      (let ((content (gptel-yatools-vfs--disk-content full)))
+        (cond
+         ((null content)
+          (list :kind :unreadable :path full
+                :why "permission denied or I/O error"))
+         ((gptel-yatools-vfs--binary-p content)
+          (list :kind :binary :path full :text content :provenance :disk
+                :size (gptel-yatools-vfs--text-size content)))
+         (t (list :kind :text :path full :text content :provenance :disk))))))))
 
 (defun gptel-yatools-vfs--coding (path coding)
   "Return the coding system a write to PATH should use, given CODING.
@@ -719,7 +884,7 @@ cannot represent CONTENT."
       (gptel-yatools-vfs-put full content (gptel-yatools--flag-p overwrite)
                              (and coding (intern coding)))
       (list :full full
-            :changed (and (gptel-yatools-vfs-get full) t)
+            :changed (and (gptel-yatools-vfs-entry full) t)
             :bytes (gptel-yatools-vfs--encodable-bytes content target)
             :coding target)))))
 
@@ -779,55 +944,54 @@ match with that character, while nil is not a way to spell \"delete\" --
   (when (string-empty-p old)
     (error "Error: old_string must not be empty."))
   (let* ((read (gptel-yatools-vfs-read path))
+         (kind (plist-get read :kind))
          (full (gptel-yatools-vfs--key path)))
     (cond
-     ((null read)
-      (error "Error: no such file: %s"
-             (gptel-yatools--display-path full)))
-     ;; The read tools refuse to show binary content, so an edit here
-     ;; could only be a blind guess at bytes the model has never seen.
-     ;; Replacing such a file wholesale is fine.
-     ((gptel-yatools--binary-p (plist-get read :content))
+     ((eq kind :binary)
+      ;; The read tools refuse to show binary content, so an edit here
+      ;; could only be a blind guess at bytes the model has never seen.
+      ;; Replacing such a file wholesale is fine.
       (error "Error: %s is a binary file (%s); it cannot be edited as text. Use write_file to replace it wholesale, or execute_command to inspect it."
              (gptel-yatools--display-path full)
-             (if-let* ((size (file-attribute-size (file-attributes full))))
+             (if-let* ((size (plist-get read :size)))
                  (format "%d bytes" size)
                "size unknown")))
+     ((not (eq kind :text))
+      (error "%s" (gptel-yatools-vfs--read-problem read)))
      (t
       (let ((new-content (gptel-yatools-vfs--replace-once
-                          (plist-get read :content) old new)))
-        (if (equal new-content (plist-get read :content))
+                          (plist-get read :text) old new)))
+        (if (equal new-content (plist-get read :text))
             (list :full full :changed nil)
           (gptel-yatools-vfs-write path new-content overwrite coding)))))))
 
-(defun gptel-yatools-vfs-pending-p (path)
-  "Return non-nil if PATH has a VFS entry in this buffer's VFS.
-
-This answers the cheap question -- \"is there an entry?\" -- and not the
-pending-change question the name suggests: an entry whose content disk
-already holds is still an entry until a read or an enumeration notices
-and drops it (see `gptel-yatools-vfs--changed-paths').  Callers that
-need to know whether something would be synced want
-`gptel-yatools-vfs-pending-paths', which looks at disk.
-
-Unlike `gptel-yatools-vfs-read', this never looks at disk, and never
-reads a file to find out."
-  (and (gptel-yatools-vfs-get (gptel-yatools-vfs--key path)) t))
-
 (defun gptel-yatools-vfs-pending-paths ()
-  "Return the paths whose VFS content differs from disk, sorted."
+  "Return the paths whose VFS content differs from disk, sorted.
+
+This is the exact list, not the header line's cached copy: a tool that
+reports what `file_sync' would write must read disk now, not up to a
+second ago.  Entries disk has caught up with are dropped on the way."
   (gptel-yatools-vfs--changed-paths))
 
 (defun gptel-yatools-vfs-diff-text (paths)
   "Return the unified diff from disk to the VFS for PATHS, concatenated."
   (mapconcat #'gptel-yatools-vfs--format-one-diff paths ""))
 
-(defun gptel-yatools-vfs-forget-pending-cache ()
-  "Drop the cached pending list, so the header line recomputes it.
+(defun gptel-yatools-vfs-disk-moved-externally ()
+  "Note that the disk changed underneath the VFS, so cached answers are stale.
 
-Needed after something outside the VFS changed the disk -- a shell
-command, typically -- since the cache is what keeps redisplay free of
-I/O and cannot know that."
+Called by something that wrote to disk behind the VFS's back -- a shell
+command, typically.  It drops the cached pending list so the header line
+recomputes it, since the cache is what keeps redisplay free of I/O and
+cannot know that the disk moved.
+
+This must not redraw.  Only `force-mode-line-update' runs here, which
+flags the mode line and lets Emacs repaint when it next goes idle; an
+explicit `redisplay' belongs to the announcement path in
+`gptel-yatools.el' and nowhere else.  A stray redisplay here would draw
+mid-tool-call and break the invariant that a command announces itself
+exactly once -- `gptel-yatools-test-announcement-redraws-the-frame'
+counts redisplays and would fail."
   (gptel-yatools-vfs--invalidate-header-line))
 
 (defun gptel-yatools-vfs-discard-pending (&optional path)
@@ -841,7 +1005,7 @@ nothing behind to surprise a later reader.
 PATH must be absolute when given: resolution happens at the tool's edge."
   (let ((paths (if path
                    (let ((full (gptel-yatools-vfs--key path)))
-                     (and (gptel-yatools-vfs-get full) (list full)))
+                     (and (gptel-yatools-vfs-entry full) (list full)))
                  (let (all)
                    (maphash (lambda (full _entry) (push full all))
                             (gptel-yatools-vfs--table))
@@ -934,7 +1098,7 @@ alist of (PATH . REASON)."
       (goto-char (point-min)))
     diff-buf))
 
-(defun gptel-yatools-vfs--refusal (full)
+(defun gptel-yatools-vfs-refusal (full)
   "Return nil if FULL can be synced now, or say why it cannot.
 
 The value is a plist of :kind and :reason.  :kind is `:conflict' when
@@ -956,7 +1120,7 @@ reported as a conflict even when the file would also fail an encoding
 test, and a target that is no longer a regular file is caught before
 `write-region' blocks on it forever."
   (let ((entry-coding (gptel-yatools-vfs--entry-coding full))
-        (content (or (gptel-yatools-vfs-get full) ""))
+        (content (or (plist-get (gptel-yatools-vfs-entry full) :content) ""))
         (existing (get-file-buffer full)))
     (cond
      ((gptel-yatools-vfs--conflict-p full)
@@ -994,7 +1158,7 @@ review never offers a file whose write is certain to fail."
                 (not (equal ancestor ""))
                 (not (equal ancestor "/"))
                 (not (equal ancestor full)))
-      (when (or (gptel-yatools-vfs-get ancestor)
+      (when (or (gptel-yatools-vfs-entry ancestor)
                 (file-regular-p ancestor))
         (setq found ancestor))
       (setq ancestor (directory-file-name (file-name-directory ancestor))))
@@ -1036,7 +1200,7 @@ would be a correctness problem, not just a cosmetic one."
                      ""))
           ;; The user may study the diff for minutes; that time must not
           ;; count against the tool timeout.
-          (let ((gptel-yatools--timeout-suspended t))
+          (gptel-yatools--with-deadline-suspended
             (condition-case nil
                 (recursive-edit)
               (quit nil)))
@@ -1086,11 +1250,11 @@ may pre-filter for a nicer message, but correctness does not depend on
 them doing so.
 
 Returns (STATUS MESSAGE) where STATUS is `:ok' or `:failed'."
-  (let ((content (gptel-yatools-vfs-get full)))
+  (let ((content (plist-get (gptel-yatools-vfs-entry full) :content)))
     (cond
      ((null content)
       (list :failed "no VFS entry"))
-     ((let ((refusal (gptel-yatools-vfs--refusal full)))
+     ((let ((refusal (gptel-yatools-vfs-refusal full)))
         (and refusal
              (list :failed (plist-get refusal :reason)))))
      (t
@@ -1169,7 +1333,7 @@ which section of the report they appear in, not a second opinion about
 whether they can be written."
   (let (conflicts blocked syncable)
     (dolist (file targets)
-      (let ((refusal (gptel-yatools-vfs--refusal file)))
+      (let ((refusal (gptel-yatools-vfs-refusal file)))
         (pcase (plist-get refusal :kind)
           ('nil (push file syncable))
           (:conflict (push file conflicts))
@@ -1255,7 +1419,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
              (syncable (plist-get partition :syncable))
              (skipped (append blocked
                               (mapcar (lambda (file)
-                                        (cons file (plist-get (gptel-yatools-vfs--refusal file)
+                                        (cons file (plist-get (gptel-yatools-vfs-refusal file)
                                                               :reason)))
                                       conflicts)))
              (approval (and syncable
@@ -1409,46 +1573,30 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "Path to read, relative to the workspace root or absolute."))
   (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
-         (vfs  (gptel-yatools-vfs-get full)))
-    ;; An entry that no longer differs from disk is not a pending change:
-    ;; drop it and read what disk holds, so the reply's provenance is the
-    ;; truth rather than a leftover.  `gptel-yatools-vfs-read' does the
-    ;; same for the other read tools.
-    (when (and vfs (not (gptel-yatools-vfs--changed-p full)))
-      (gptel-yatools-vfs-remove full)
-      (setq vfs nil))
-    (cond
-     ;; VFS-only file (shadows disk if any)
-     (vfs
-      (if (gptel-yatools--binary-p vfs)
-          (gptel-yatools--binary-notice full vfs t)
-        (gptel-yatools-ok vfs :provenance :vfs)))
-     ;; Real directory (not shadowed by a VFS file)
-     ((file-directory-p full)
-      (let* ((listing (gptel-yatools-vfs--directory-listing full))
-             (text (plist-get listing :text)))
-        (gptel-yatools-ok
-         (if (string-empty-p text) "(empty directory)" text)
-         :provenance (if (plist-get listing :pending) :mixed :disk))))
-     ;; Disk file, not shadowed
-     ((file-regular-p full)
-      (let ((read (gptel-yatools-vfs-read full)))
-        (if (gptel-yatools--binary-p (plist-get read :content))
-            (gptel-yatools--binary-notice full (plist-get read :content) nil)
-          (gptel-yatools-ok (plist-get read :content)))))
-     ;; Something that exists but is not a readable file: a device, FIFO
-     ;; or socket.  Reading it could block forever or never stop, so
-     ;; refuse instead of trying.
-     ((file-exists-p full)
-      (error "Error: %s is not a regular file (device, FIFO or socket); refusing to read it."
-             (gptel-yatools--display-path full)))
-     ;; Virtual directory (only VFS ancestors exist)
-     ((gptel-yatools-vfs--has-children-p full)
-      (gptel-yatools-ok
-       (plist-get (gptel-yatools-vfs--directory-listing full) :text)
-       :provenance :vfs))
-     (t (error "Path does not exist: %s"
-               (gptel-yatools--display-path full))))))
+         (read (gptel-yatools-vfs-read full))
+         (kind (plist-get read :kind)))
+    (pcase kind
+      (:text
+       (gptel-yatools-ok (plist-get read :text)
+                         :provenance (plist-get read :provenance)))
+      (:binary
+       (gptel-yatools-vfs--binary-notice read))
+      (:directory
+       (let* ((listing (gptel-yatools-vfs--directory-listing full))
+              (text (plist-get listing :text)))
+         (gptel-yatools-ok
+          (if (string-empty-p text) "(empty directory)" text)
+          :provenance (if (plist-get listing :pending) :mixed :disk))))
+      (:missing
+       ;; A directory can exist in the VFS alone, when pending files are
+       ;; stored under it and nothing was ever created on disk.
+       (if (gptel-yatools-vfs--has-children-p full)
+           (gptel-yatools-ok
+            (plist-get (gptel-yatools-vfs--directory-listing full) :text)
+            :provenance :vfs)
+         (error "Path does not exist: %s"
+                (gptel-yatools--display-path full))))
+      (_ (error "%s" (gptel-yatools-vfs--read-problem read))))))
 
 (gptel-yatools-define-tool gptel-yatools-read-file-from-offset
   :name "read_file_from_offset"
@@ -1467,12 +1615,12 @@ review could otherwise run against a fresh, empty table and sync nothing."
   (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
          (read (gptel-yatools-vfs-read full))
-         (content (plist-get read :content)))
-    (unless read
-      (error "File does not exist: %s" (gptel-yatools--display-path full)))
-    (if (gptel-yatools--binary-p content)
-        (gptel-yatools--binary-notice full content (plist-get read :from-vfs))
-      (let ((offset (gptel-yatools--coerce-integer offset 1 1))
+         (content (plist-get read :text)))
+    (pcase (plist-get read :kind)
+      (:binary
+       (gptel-yatools-vfs--binary-notice read))
+      (:text
+       (let ((offset (gptel-yatools--coerce-integer offset 1 1))
             (lines  (gptel-yatools--coerce-integer lines 0 0)))
         (with-temp-buffer
           (insert content)
@@ -1501,7 +1649,8 @@ review could otherwise run against a fresh, empty table and sync nothing."
                 (t
                  (format "(no text in %s after line %d.)"
                          (gptel-yatools--display-path full) offset)))
-               :provenance (if (plist-get read :from-vfs) :vfs :disk)))))))))
+               :provenance (plist-get read :provenance)))))))
+      (_ (error "%s" (gptel-yatools-vfs--read-problem read))))))
 
 (gptel-yatools-define-tool gptel-yatools-fetch-lines-from-file-using-regex
   :name "fetch_lines_from_file_using_regex"
@@ -1517,20 +1666,20 @@ review could otherwise run against a fresh, empty table and sync nothing."
   (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
          (read (gptel-yatools-vfs-read full))
-         (content (plist-get read :content))
+         (content (plist-get read :text))
          (regex-error
           (cond
            ((not (stringp regex)) "regexp must be a string")
            (t (condition-case err
                   (progn (string-match-p regex "") nil)
                 (invalid-regexp (error-message-string err)))))))
-    (unless read
-      (error "File does not exist: %s" (gptel-yatools--display-path full)))
     (cond
      (regex-error
       (error "Error: invalid regexp %S: %s" regex regex-error))
-     ((gptel-yatools--binary-p content)
-      (gptel-yatools--binary-notice full content (plist-get read :from-vfs)))
+     ((eq (plist-get read :kind) :binary)
+      (gptel-yatools-vfs--binary-notice read))
+     ((not (eq (plist-get read :kind) :text))
+      (error "%s" (gptel-yatools-vfs--read-problem read)))
      (t
       (with-temp-buffer
         (insert content)
@@ -1562,7 +1711,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
              (format "(no lines in %s match the regexp %S.)"
                      (gptel-yatools--display-path full)
                      regex))
-           :provenance (if (plist-get read :from-vfs) :vfs :disk))))))))
+           :provenance (plist-get read :provenance))))))))
 
 (gptel-yatools-define-tool gptel-yatools-write-file
   :name "write_file"
@@ -1689,7 +1838,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
      (t
       (let* ((diff-text (gptel-yatools-vfs-diff-text selected))
              (omitted (- (length changed) (length selected)))
-             (paging (gptel-yatools--page-text
+             (paging (gptel-yatools-page
                       diff-text
                       (gptel-yatools--coerce-integer offset 1 1)
                       (gptel-yatools--coerce-integer

@@ -405,8 +405,9 @@ The parse is cached by content (see
 compares the text against DIR's name and so belongs to this directory."
   (let* ((dirname (file-name-nondirectory (directory-file-name dir)))
          (path (expand-file-name "SKILL.md" dir))
-         (read (ignore-errors (gptel-yatools-vfs-read path)))
-         (text (plist-get read :content))
+         (read (gptel-yatools-vfs-read path))
+         (text (and (eq (plist-get read :kind) :text)
+                    (plist-get read :text)))
          (parsed (if text
                      (gptel-yatools-skills--parse text)
                    (list :frontmatter nil :body nil
@@ -427,7 +428,7 @@ compares the text against DIR's name and so belongs to this directory."
           :path path
           :frontmatter frontmatter
           :body (plist-get parsed :body)
-          :from-vfs (plist-get read :from-vfs)
+          :from-vfs (eq (plist-get read :provenance) :vfs)
           :problems (append problems (plist-get checked :problems))
           :warnings (plist-get checked :warnings))))
 
@@ -437,7 +438,7 @@ compares the text against DIR's name and so belongs to this directory."
 A pending VFS copy counts, so a skill being authored in the buffer is
 found before its `SKILL.md' exists on disk."
   (let ((path (expand-file-name "SKILL.md" dir)))
-    (or (gptel-yatools-vfs-pending-p path)
+    (or (gptel-yatools-vfs-entry path)
         (file-regular-p path))))
 
 (defun gptel-yatools-skills--subdirectories (dir)
@@ -753,6 +754,57 @@ identifies one skill on its own."
                        matches "\n")))
    "\n\n"))
 
+(defun gptel-yatools-skills-resolve (found name)
+  "Return what NAME means among the skills FOUND, as one outcome.
+
+FOUND is what `gptel-yatools-skills--discover' returned.  The value is a
+plist:
+
+  :kind     `:loaded' (exactly one skill, and it can be loaded),
+            `:ambiguous' (the name identifies more than one skill),
+            `:unknown' (it identifies none), or `:invalid' (it identifies
+            one, but its `SKILL.md' does not satisfy the specification).
+  :skill    the skill, for `:loaded' and `:invalid'.
+  :matches  the candidates, for `:ambiguous'.
+  :summary  one line, for an echo area.
+  :detail   the full text, for a tool reply.
+
+Deciding loadability here is the point.  Resolution used to answer only
+\"which skill does this name mean\", and every caller then asked \"is it
+valid?\" itself -- so the `skill' tool and `gptel-yatools-skills-add'
+could answer the same name differently, and did: the command threw the
+ambiguity away and told the user to run the command they had just run.
+
+The two renderings exist because the two callers need different lengths,
+not different wording: both come from here, so neither invents its own
+sentence about an ambiguous or invalid skill."
+  (pcase (gptel-yatools-skills--lookup (plist-get found :skills) name)
+    (`(:skill ,skill)
+     (if (plist-get skill :problems)
+         (list :kind :invalid
+               :skill skill
+               :summary (format "%s cannot be used: %s"
+                                (gptel-yatools-skills-handle skill)
+                                (car (plist-get skill :problems)))
+               :detail (gptel-yatools-skills--invalid-message skill))
+       (list :kind :loaded
+             :skill skill
+             :summary (format "Sending %s"
+                              (gptel-yatools-skills-handle skill)))))
+    (`(:ambiguous ,matches)
+     (list :kind :ambiguous
+           :matches matches
+           :summary (format "%S does not identify one skill; it matches %d"
+                            name (length matches))
+           :detail (gptel-yatools-skills--ambiguous-message name matches)))
+    (_
+     (list :kind :unknown
+           :summary (format "No skill named %S%s" name
+                            (if (plist-get found :skills)
+                                "; run `gptel-yatools-skills-add' to pick one"
+                              " (no skills were found at all)"))
+           :detail (gptel-yatools-skills--unknown-message found name)))))
+
 (defun gptel-yatools-skills--unknown-message (found name)
   "Return why FOUND holds no skill called NAME, and what it does hold."
   (let ((skills (plist-get found :skills)))
@@ -841,7 +893,7 @@ a truename."
          (full (expand-file-name file dir)))
     (cond
      ((not (string-prefix-p dir full)) nil)
-     ((gptel-yatools-vfs-pending-p full) full)
+     ((gptel-yatools-vfs-entry full) full)
      ((not (file-regular-p full)) nil)
      (t
       (let ((true (ignore-errors (file-truename full)))
@@ -857,22 +909,20 @@ a truename."
          (format "Error: %S is not a readable file inside the skill directory. Pass a path relative to the skill root, like \"references/REFERENCE.md\" or \"scripts/extract.py\"."
                  file)
          :comment "File is not inside the skill.")
-      (let* ((read (ignore-errors (gptel-yatools-vfs-read full)))
-             (content (plist-get read :content))
-             (from-vfs (plist-get read :from-vfs)))
-        (cond
-         ((null content)
-          (gptel-yatools-ok
-           (format "Error: %s could not be read." full)
-           :comment "Unreadable skill file."))
-         ((gptel-yatools--binary-p content)
-          (gptel-yatools--binary-notice full content from-vfs))
-         (t
-          (gptel-yatools-ok
-           (format "File: %s\nSkill: %s\n\n%s"
-                   file (plist-get skill :name) content)
-           :provenance (if from-vfs :vfs :disk)
-           :comment "Skill file read.")))))))
+      (let ((read (gptel-yatools-vfs-read full)))
+        (pcase (plist-get read :kind)
+          (:text
+           (gptel-yatools-ok
+            (format "File: %s\nSkill: %s\n\n%s"
+                    file (plist-get skill :name) (plist-get read :text))
+            :provenance (plist-get read :provenance)
+            :comment "Skill file read."))
+          (:binary
+           (gptel-yatools-vfs--binary-notice read))
+          (_
+           (gptel-yatools-ok
+            (gptel-yatools-vfs--read-problem read)
+            :comment "Unreadable skill file.")))))))
 
 ;;-------------------------------------------------------------------------
 ;; The tool
@@ -904,31 +954,29 @@ Use `file' together with `name' to read one of the files the skill lists, such a
   (when file (gptel-yatools--require-string file "file"))
   (let* ((present (and (stringp name) (not (string-empty-p (string-trim name)))))
          (found (gptel-yatools-skills--discover))
-         (resolved (and present
-                        (gptel-yatools-skills--lookup (plist-get found :skills) name))))
-    (cond
-     ((and file (not present))
-      (gptel-yatools-ok
-       "Error: reading a skill file needs both `name' and `file', since `file' is relative to the skill's own directory."
-       :comment "Missing skill name."))
-     ((not present)
-      (gptel-yatools-ok (gptel-yatools-skills--index-body found)
-                        :comment "Skill index."))
-     ((plist-get resolved :ambiguous)
-      (gptel-yatools-ok
-       (gptel-yatools-skills--ambiguous-message name (plist-get resolved :ambiguous))
-       :comment "Ambiguous skill name."))
-     ((null resolved)
-      (gptel-yatools-ok (gptel-yatools-skills--unknown-message found name)
-                        :comment "No such skill."))
-     ((plist-get (plist-get resolved :skill) :problems)
-      (gptel-yatools-ok
-       (gptel-yatools-skills--invalid-message (plist-get resolved :skill))
-       :comment "Skill is not valid."))
-     (file
-      (gptel-yatools-skills--file-result (plist-get resolved :skill) file))
-     (t
-      (gptel-yatools-skills--skill-result (plist-get resolved :skill))))))
+         (outcome (and present (gptel-yatools-skills-resolve found name))))
+    (pcase (and outcome (plist-get outcome :kind))
+      ('nil
+       (if file
+           (gptel-yatools-ok
+            "Error: reading a skill file needs both `name' and `file', since `file' is relative to the skill's own directory."
+            :comment "Missing skill name.")
+         (gptel-yatools-ok (gptel-yatools-skills--index-body found)
+                           :comment "Skill index.")))
+      (:loaded
+       (let ((skill (plist-get outcome :skill)))
+         (if file
+             (gptel-yatools-skills--file-result skill file)
+           (gptel-yatools-skills--skill-result skill))))
+      (:ambiguous
+       (gptel-yatools-ok (plist-get outcome :detail)
+                         :comment "Ambiguous skill name."))
+      (:invalid
+       (gptel-yatools-ok (plist-get outcome :detail)
+                         :comment "Skill is not valid."))
+      (_
+       (gptel-yatools-ok (plist-get outcome :detail)
+                         :comment "No such skill.")))))
 
 ;;-------------------------------------------------------------------------
 ;; Sending a skill by hand
@@ -1016,44 +1064,31 @@ does not have to disambiguate anything itself."
             (cons (gptel-yatools-skills-handle skill) skill))
           skills))
 
-(defun gptel-yatools-skills--resolve (candidates name)
-  "Return the skill NAME refers to, or nil.
-
-NAME is what completion returned: a display string from CANDIDATES, or
-free text the user typed, which is looked up the way the tool would."
-  (or (cdr (assoc name candidates))
-      (pcase (gptel-yatools-skills--lookup
-              (mapcar #'cdr candidates) name)
-        (`(:skill ,skill) skill)
-        (_ nil))))
-
 (defun gptel-yatools-skills--add-names (names &optional insert)
   "Add the skills called NAMES, or insert them at point if INSERT is non-nil.
 
 This is the work behind `gptel-yatools-skills-add', split out so it can
 be called (and tested) without a prompt.  Returns the list of skills
-actually sent."
+actually sent.
+
+Every name goes through `gptel-yatools-skills-resolve', the same outcome
+the `skill' tool adapts, so an ambiguous or invalid name is reported here
+the way it is reported to the model.  It used to be resolved separately,
+which is why this command could answer \"no skill named X; run
+`gptel-yatools-skills-add' to pick one\" for a name that matched two."
   (require 'gptel-context)
   (let* ((found (gptel-yatools-skills--discover))
-         (skills (plist-get found :skills))
-         (candidates (gptel-yatools-skills--candidates skills))
          (sent nil))
     (dolist (name names)
-      (let ((skill (gptel-yatools-skills--resolve candidates name)))
-        (cond
-         ((null skill)
-          (message "gptel: no skill named %S; %s" name
-                   (if skills "run `gptel-yatools-skills-add' to pick one"
-                     "no skills were found at all")))
-         ((plist-get skill :problems)
-          (message "gptel: %s cannot be used: %s"
-                   (gptel-yatools-skills-handle skill)
-                   (car (plist-get skill :problems))))
-         (t
-          (if insert
-              (gptel-yatools-skills--insert skill)
-            (gptel-yatools-skills--attach skill))
-          (push skill sent)))))
+      (let* ((outcome (gptel-yatools-skills-resolve found name))
+             (skill (plist-get outcome :skill)))
+        (if (eq (plist-get outcome :kind) :loaded)
+            (progn
+              (if insert
+                  (gptel-yatools-skills--insert skill)
+                (gptel-yatools-skills--attach skill))
+              (push skill sent))
+          (message "gptel: %s" (plist-get outcome :summary)))))
     (when (and sent (not insert))
       (message "gptel: sending %s with each request (`gptel-yatools-skills-remove' to stop)"
                (mapconcat #'gptel-yatools-skills-handle (nreverse sent) ", ")))

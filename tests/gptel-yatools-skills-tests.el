@@ -193,6 +193,62 @@ INSERT is passed through: non-nil inserts at point instead of attaching."
                  "Productivity body"
                  (gptel-yatools-skills-test--call "productivity/review")))))))
 
+(ert-deftest gptel-yatools-skills-test-manual-send-reports-ambiguity ()
+  "The manual-send command must report ambiguity the way the tool does.
+
+`--resolve' threw the ambiguous outcome away and returned nil, so attaching
+a name that matched two skills said \"no skill named X; run
+`gptel-yatools-skills-add' to pick one\" -- advice to run the very command
+the user had just run.  Both callers now adapt one outcome."
+  (gptel-yatools-test--in-dir
+    (let ((root (gptel-yatools-test--root-file "skills")))
+      (gptel-yatools-skills-test--skill
+       (expand-file-name "engineering" root) "review" nil "Engineering body.\n")
+      (gptel-yatools-skills-test--skill
+       (expand-file-name "productivity" root) "review" nil "Productivity body.\n")
+      (gptel-yatools-skills-test--indexed root
+        (let ((gptel-context nil)
+              (messages nil))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages))))
+            (should-not (gptel-yatools-skills-test--add "review")))
+          (should messages)
+          ;; It names the ambiguity and the candidates, not "no such skill".
+          (should (string-match-p "matches 2" (car messages)))
+          (should-not (string-match-p "No skill named" (car messages)))
+          (should-not gptel-context))))))
+
+(ert-deftest gptel-yatools-skills-test-resolve-answers-with-one-outcome ()
+  "Resolution must answer with a kind, and decide loadability itself.
+
+\"Which skill does this name mean\" and \"can I load it?\" used to be two
+questions asked by different callers, which is how the tool and the
+manual-send command came to disagree.  One outcome answers both."
+  (gptel-yatools-test--in-dir
+    (let* ((root (gptel-yatools-test--root-file "skills"))
+           (broken (gptel-yatools-skills-test--skill root "no-desc")))
+      ;; A skill whose frontmatter fails the specification.
+      (with-temp-file (expand-file-name "SKILL.md" broken)
+        (insert "---\nname: no-desc\n---\n\nBody.\n"))
+      (gptel-yatools-skills-test--skill
+       (expand-file-name "engineering" root) "review" nil "Engineering body.\n")
+      (gptel-yatools-skills-test--skill
+       (expand-file-name "productivity" root) "review" nil "Productivity body.\n")
+      (gptel-yatools-skills-test--indexed root
+        (let ((found (gptel-yatools-skills--discover)))
+          (should (eq (plist-get (gptel-yatools-skills-resolve found "no-desc") :kind)
+                      :invalid))
+          (should (eq (plist-get (gptel-yatools-skills-resolve found "review") :kind)
+                      :ambiguous))
+          (should (eq (plist-get (gptel-yatools-skills-resolve found "absent") :kind)
+                      :unknown))
+          (let ((loaded (gptel-yatools-skills-resolve found "engineering/review")))
+            (should (eq (plist-get loaded :kind) :loaded))
+            (should (equal (plist-get (plist-get loaded :skill) :name) "review"))
+            ;; Both renderings come from the outcome, at two lengths.
+            (should (stringp (plist-get loaded :summary)))))))))
+
 (ert-deftest gptel-yatools-skills-test-same-name-in-two-roots-is-ambiguous ()
   "Two roots holding one name each must be reported too, not deduplicated."
   (gptel-yatools-test--in-dir

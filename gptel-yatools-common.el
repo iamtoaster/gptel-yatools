@@ -33,6 +33,31 @@
 ;; rewrite its Result; advice on `NAME' sees everything, including the
 ;; deadline, and can stand in for the whole call.
 ;;
+;; This file is one module with three interfaces, and each is meant to be
+;; crossed at one seam rather than reached into.  They are declared here so
+;; that a caller knows which one it is using, and so that a later edit can
+;; tell a seam from an accident:
+;;
+;;   respond   `gptel-yatools--respond' (render a Result), and
+;;             `gptel-yatools-page' (the size budget, for a tool that pages
+;;             its own output).  Sizing, truncation, raw-byte escaping and
+;;             the envelope all live behind these; no tool does any of it
+;;             itself, and no tool calls `--truncate', `--envelope' or
+;;             `--escape-raw-bytes' directly.
+;;
+;;   call      `gptel-yatools--call-with-timeout' and the accessors that
+;;             read the `gptel-yatools-call' it binds: `--call-root',
+;;             `--call-deadline', `--call-suspended-p', and
+;;             `--with-deadline-suspended' for the one field that moves.
+;;             Everything a call settles once -- root, deadline, the pause
+;;             for a user who is reading a diff -- is asked for here.
+;;
+;;   define    `gptel-yatools-define-tool', which writes the implementation
+;;             and the boundary from one definition and registers the tool,
+;;             and `gptel-yatools-enable' / `-enable-all', which decide what
+;;             is sent.  The definition is the only place a tool's name,
+;;             arguments and model-facing description are written down.
+;;
 ;; See the README for the tool list and for installation instructions.
 
 ;;; Code:
@@ -51,33 +76,77 @@
 ;; exists -- `defcustom' calls its `:set' as it defines the variable.
 (defvar gptel-yatools-timeout)
 
-(defvar gptel-yatools--current-timeout nil
-  "Deadline in seconds of the tool call in progress, or nil.
+(cl-defstruct (gptel-yatools-call (:constructor gptel-yatools--make-call))
+  "The facts about the tool call in progress.
 
-Bound by `gptel-yatools--call-with-timeout' so that helpers which can
-block on their own (`gptel-yatools-shell--run-command') enforce the same
-deadline instead of outliving it.")
+A call settles these once, at the boundary, so that everything the call
+does reads one answer instead of recomputing a slightly different
+ambient one:
 
-(defvar gptel-yatools--timeout-suspended nil
-  "Non-nil while the current tool call is waiting for the user.
+  ROOT      the workspace root, so resolving the path the model wrote,
+            displaying a path back to it and finding the skill roots all
+            agree -- even when a tool rebinds `default-directory'
+            mid-call (the shell runner does, to run in a subdirectory).
+  DEADLINE  seconds the call may run for, enforced by
+            `gptel-yatools--call-with-timeout' and respected by helpers
+            that block on their own.
+  SUSPENDED non-nil while the call is waiting for the user, whose time
+            does not count against DEADLINE.
 
-Time spent in that state is not counted against the timeout, so a human
-reading a `file_sync' diff for a few minutes cannot trip it.")
+ROOT and DEADLINE are read-only once the call is bound.  SUSPENDED is
+the one field that moves during a call, and it moves only through
+`gptel-yatools--with-deadline-suspended'."
+  (root nil)
+  (deadline nil)
+  (suspended nil))
 
-(defvar gptel-yatools--current-root nil
-  "Workspace root of the tool call in progress, or nil.
+(defvar gptel-yatools--call nil
+  "The `gptel-yatools-call' in progress, or nil outside a tool call.
 
-Bound by `gptel-yatools--call-tool' so that everything a single call
-does -- resolving the path the model wrote, displaying a path back to
-it, finding the skill roots -- reads one root, settled once at the
-boundary.  Otherwise a tool that rebinds `default-directory' mid-call
-\(the shell runner does, to run in a subdirectory) changes what a
-relative path means half way through, and a message printed afterwards
-describes a different directory from the one the tool acted on.
+Bound by `gptel-yatools--call-with-timeout'.  nil is an ordinary state,
+not an error: tests, `eval' and hooks call tool functions directly, and
+every accessor below answers for that case by falling back on what it
+would have computed anyway.")
 
-This is the same shape as `gptel-yatools--current-timeout': a value the
-boundary settles, so a helper cannot recompute a slightly different
-ambient answer.")
+(defun gptel-yatools--call-root ()
+  "Return the workspace root of the call in progress, or detect one.
+
+Outside a call -- a tool function invoked from `eval', a test or a hook --
+this is `gptel-yatools--detect-workspace-root', exactly as it was before
+a call context existed.  Inside one it is the root settled at the
+boundary, so a tool that rebinds `default-directory' half way through
+still resolves and renders paths against the root the call started in."
+  (or (and gptel-yatools--call (gptel-yatools-call-root gptel-yatools--call))
+      (gptel-yatools--detect-workspace-root)))
+
+(defun gptel-yatools--call-deadline ()
+  "Return the deadline in seconds of the call in progress.
+
+Falls back on `gptel-yatools-timeout' outside a call, which is what a
+helper called directly used to read anyway."
+  (or (and gptel-yatools--call
+           (gptel-yatools-call-deadline gptel-yatools--call))
+      (gptel-yatools--resolve-timeout nil)))
+
+(defun gptel-yatools--call-suspended-p ()
+  "Return non-nil while the call in progress is waiting for the user."
+  (and gptel-yatools--call
+       (gptel-yatools-call-suspended gptel-yatools--call)))
+
+(defmacro gptel-yatools--with-deadline-suspended (&rest body)
+  "Run BODY without counting its time against the call's deadline.
+
+This is the only way SUSPENDED moves: a review that sits in
+`recursive-edit' for a few minutes must not trip the timeout, and the
+flag must be cleared however BODY exits, including a `quit'."
+  (declare (indent 0) (debug t))
+  `(let ((call gptel-yatools--call))
+     (when call
+       (setf (gptel-yatools-call-suspended call) t))
+     (unwind-protect
+         (progn ,@body)
+       (when call
+         (setf (gptel-yatools-call-suspended call) nil)))))
 
 (defvar gptel-yatools--tools nil
   "The tools defined by this package, in declaration order.
@@ -125,11 +194,10 @@ VFS count, for example, is what the header-line cache exists for.")
 
 Outside a tool call that is `project-current's root, or
 `default-directory' when there is no project.  Inside one it is the root
-captured at the boundary (see `gptel-yatools--current-root'), so a tool
-that rebinds `default-directory' half way through still resolves and
-renders paths against the root the call started in."
-  (or gptel-yatools--current-root
-      (gptel-yatools--detect-workspace-root)))
+settled at the call's boundary (see `gptel-yatools--call-root'), so a
+tool that rebinds `default-directory' half way through still resolves
+and renders paths against the root the call started in."
+  (gptel-yatools--call-root))
 
 (defun gptel-yatools--detect-workspace-root ()
   "Return the workspace root implied by the current buffer, ignoring any pin.
@@ -279,52 +347,6 @@ carry raw bytes."
                   parts)))
         (apply #'concat (nreverse parts))))))
 
-(defun gptel-yatools--binary-p (string)
-  "Return non-nil if STRING looks like binary content.
-
-The test is the conventional one: presence of a NUL byte.  Text files
-essentially never contain one, while images, PDFs, archives and
-compiled artifacts almost always do."
-  (and (stringp string) (string-match-p "\0" string)))
-
-(defun gptel-yatools--binary-notice (path content from-vfs)
-  "Return a tool response reporting that PATH is binary and withheld.
-
-CONTENT is the file's text as decoded by the read tool.  FROM-VFS says
-where the content came from, and so which size the reader is told: a
-pending copy is sized by the bytes it will be written as, not by the
-disk file it will replace."
-  (let* ((pending-size
-          (condition-case nil
-              (string-bytes (encode-coding-string content 'no-conversion))
-            (error nil)))
-         (size (if from-vfs
-                   pending-size
-                 (or (file-attribute-size (file-attributes path))
-                     ;; The file is gone or unreadable; the text that
-                     ;; was read is still the best size available.
-                     pending-size)))
-         (body (format "\
-%s is a binary file (%s), so its contents are not returned.
-
-Binary files cannot be meaningfully read or edited as text: the
-bytes do not form lines, and round-tripping them through text
-editing would corrupt the file.  If you need information about it,
-use the execute_command tool instead, for example:
-
-  file %s
-  ls -l %s
-  sha256sum %s
-
-If the goal is to replace the file, write it with write_file
-without reading it first."
-                       (gptel-yatools--display-path path)
-                       (if size (format "%d bytes" size) "size unknown")
-                       (gptel-yatools--display-path path)
-                       (gptel-yatools--display-path path)
-                       (gptel-yatools--display-path path))))
-    (gptel-yatools-ok body :provenance (if from-vfs :vfs :disk)
-                      :comment "Binary file; contents withheld.")))
 
 (defun gptel-yatools--hard-cut (string limit)
   "Return STRING cut to LIMIT characters, without splitting a \\xNN escape.
@@ -488,8 +510,8 @@ bytes that cannot be serialised for the model."
 ;; - `vfs_diff' pages its own output, and the page has to fit the same
 ;;   size budget the envelope enforces, or the truncation below would cut
 ;;   it in half after the tool had already reported what it showed.
-;;   `gptel-yatools--page-text' is that budget, offered as a helper
-;;   instead of a constant each tool reads directly.
+;;   `gptel-yatools-page' is that budget, offered as a helper instead of a
+;;   constant each tool reads directly.
 ;;-------------------------------------------------------------------------
 ;;-------------------------------------------------------------------------
 ;; The Result, and where its content came from
@@ -695,8 +717,14 @@ TIMEOUT defaults to `gptel-yatools-timeout'; NAME labels the tool in the
 error.  Returns FUNCTION's value, or signals `gptel-yatools-timeout-error'
 with the seconds and tool name in its data when the deadline is hit.  A
 timer is used rather than `with-timeout' so that time spent waiting for
-the user (see `gptel-yatools--timeout-suspended') can be excluded, and
-because `with-timeout' cannot interrupt `call-process' anyway.
+the user (see `gptel-yatools--with-deadline-suspended') can be excluded,
+and because `with-timeout' cannot interrupt `call-process' anyway.
+
+This is also where the call's context is settled: the `gptel-yatools-call'
+it binds carries the deadline, the workspace root captured at this point,
+and the pause flag, so everything the call does reads one answer.  It is
+inherited from an enclosing call when there is one -- the root never moves
+half way through.
 
 Timers only run while Emacs waits for input, so this bounds calls that
 block on I/O -- the case that matters -- but cannot interrupt a purely
@@ -707,7 +735,12 @@ consumed by Emacs's timer loop and the call would carry on running.  So
 the timer throws a fresh marker, and the catch site re-signals it as the
 condition the boundary renders."
   (let* ((timeout (gptel-yatools--resolve-timeout timeout))
-         (gptel-yatools--current-timeout timeout)
+         (outer gptel-yatools--call)
+         (call (gptel-yatools--make-call
+                :root (if outer
+                          (gptel-yatools-call-root outer)
+                        (gptel-yatools--detect-workspace-root))
+                :deadline timeout))
          (tag (make-symbol "gptel-yatools-timeout"))
          (expired (list 'expired timeout name))
          (start (float-time))
@@ -716,7 +749,7 @@ condition the boundary renders."
          (timer (run-with-timer
                  0.2 0.2
                  (lambda ()
-                   (if gptel-yatools--timeout-suspended
+                   (if (gptel-yatools-call-suspended call)
                        (unless pause-start
                          (setq pause-start (float-time)))
                      (when pause-start
@@ -726,7 +759,11 @@ condition the boundary renders."
                        (throw tag expired))
                      nil)))))
     (unwind-protect
-        (let ((value (catch tag (apply function args))))
+        ;; `let*', not `let': the call's context must be in effect before
+        ;; FUNCTION runs, so that everything inside it -- including a
+        ;; helper asking for the deadline -- sees the same call.
+        (let* ((gptel-yatools--call call)
+               (value (catch tag (apply function args))))
           (if (eq value expired)
               (signal 'gptel-yatools-timeout-error
                       (list :seconds timeout :tool name))
@@ -745,30 +782,34 @@ bare text and never receives text that cannot be serialised back to JSON.
 NAME labels the tool in a timeout message.  TIMEOUT is the call's own
 deadline, or nil for `gptel-yatools-timeout'.
 
-The workspace root is settled here, once, and pinned for the whole call
-\(see `gptel-yatools--current-root'), so a tool that rebinds
-`default-directory' -- the shell runner, to run in a subdirectory --
-cannot change what a later relative path or message means.
+The call's context -- the workspace root, settled once -- is bound by
+`gptel-yatools--call-with-timeout', so a tool that rebinds
+`default-directory' (the shell runner, to run in a subdirectory) cannot
+change what a later relative path or message means.
 
 `quit' passes through untouched, and so does anything the user asked to
 debug: `condition-case-unless-debug' leaves the signal alone while
 `debug-on-error' is set."
-  (let ((gptel-yatools--current-root (gptel-yatools--detect-workspace-root)))
-    (condition-case-unless-debug err
-        (gptel-yatools--respond
-         (gptel-yatools--call-with-timeout function args timeout name))
-      (gptel-yatools-timeout-error
-       (gptel-yatools--envelope
-        :disk "Tool call timed out."
-        (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
-                                        (or (plist-get (cdr err) :tool) name))))
-      (error
-       (gptel-yatools--envelope
-        :disk "The tool reported an error."
-        (format "Error: %s" (gptel-yatools--error-text err)))))))
+  (condition-case-unless-debug err
+      (gptel-yatools--respond
+       (gptel-yatools--call-with-timeout function args timeout name))
+    (gptel-yatools-timeout-error
+     (gptel-yatools--envelope
+      :disk "Tool call timed out."
+      (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
+                                      (or (plist-get (cdr err) :tool) name))))
+    (error
+     (gptel-yatools--envelope
+      :disk "The tool reported an error."
+      (format "Error: %s" (gptel-yatools--error-text err))))))
 
-(defun gptel-yatools--page-text (text offset lines)
+(defun gptel-yatools-page (text offset lines)
   "Return a page of TEXT, described by a plist.
+
+This is the response budget, offered as a helper rather than a constant
+each tool reads directly: a tool that pages its own output -- `vfs_diff'
+-- has to say what it showed, and a page that could be cut in half by the
+boundary's truncation would make its report a lie.
 
 OFFSET is the 1-based number of the first line wanted, LINES how many.
 The page never exceeds `gptel-yatools--output-char-limit', so the

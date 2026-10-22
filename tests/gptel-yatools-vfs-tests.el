@@ -185,7 +185,7 @@ them as characters and make sync expand each LF into another CRLF."
                    "cannot represent"
                    (funcall (gptel-yatools-test--tool "write_file")
                             file "café 😀\n")))
-          (should-not (gptel-yatools-vfs-get file)))))))
+          (should-not (gptel-yatools-vfs-entry file)))))))
 
 (ert-deftest gptel-yatools-test-sync-refuses-unrepresentable ()
   "Sync must refuse rather than write replacement characters."
@@ -271,6 +271,53 @@ them as characters and make sync expand each LF into another CRLF."
 
 ;;;; 12. Binary files were dumped as mojibake
 
+;;;; 12b. One reader answers for every tool that reads a text file
+
+(ert-deftest gptel-yatools-test-read-reports-a-kind-instead-of-signalling ()
+  "The reader must answer with a kind, not signal, for ordinary outcomes.
+
+A tool has to be able to turn a missing path into its own message, and the
+skill reader needs the text before deciding how to frame it.  Signalling
+forced every caller to wrap the call in `ignore-errors' and lose the reason.
+The kinds are the interface: a caller that can act on one branches on it."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "kind.txt"))
+          (missing (gptel-yatools-test--root-file "absent.txt"))
+          (directory (gptel-yatools-test--root-file "adir")))
+      (gptel-yatools-test--write file "hello\n")
+      (make-directory directory)
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (should (eq (plist-get (gptel-yatools-vfs-read file) :kind) :text))
+          (should (equal (plist-get (gptel-yatools-vfs-read file) :text) "hello\n"))
+          (should (eq (plist-get (gptel-yatools-vfs-read file) :provenance) :disk))
+          (should (eq (plist-get (gptel-yatools-vfs-read missing) :kind) :missing))
+          (should (eq (plist-get (gptel-yatools-vfs-read directory) :kind) :directory))
+          ;; A pending copy is text, and says so.
+          (gptel-yatools-vfs-put file "pending\n")
+          (should (eq (plist-get (gptel-yatools-vfs-read file) :provenance) :vfs)))))))
+
+(ert-deftest gptel-yatools-test-read-tools-share-one-binary-voice ()
+  "Every read tool must refuse binary content in the same words.
+
+The check used to be written out once per tool, so the notice could drift
+between them.  One reader, one notice: if these ever disagree, a tool has
+grown its own copy again."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "voice.bin")))
+      (gptel-yatools-test--write file (unibyte-string 80 78 71 0 1 2))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (let* ((read (funcall (gptel-yatools-test--tool "read_path") file))
+                 (offset (funcall (gptel-yatools-test--tool
+                                   "read_file_from_offset") file 1 1))
+                 (regexp (funcall (gptel-yatools-test--tool
+                                   "fetch_lines_from_file_using_regex")
+                                  file "PNG")))
+            (should (string-match-p "binary file (6 bytes)" read))
+            (should (equal offset read))
+            (should (equal regexp read))))))))
+
 (ert-deftest gptel-yatools-test-binary-read-is-withheld ()
   "Binary content must be reported, not returned."
   (gptel-yatools-test--in-dir
@@ -346,7 +393,7 @@ looking at."
                                     (gptel-yatools-vfs--format-one-diff file)))))))))
 
 (ert-deftest gptel-yatools-test-refusal-reasons ()
-  "`gptel-yatools-vfs--refusal' must explain itself, or return nil."
+  "`gptel-yatools-vfs-refusal' must explain itself, or return nil."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "blk.txt")))
       (gptel-yatools-test--write file "orig\n")
@@ -359,7 +406,7 @@ looking at."
         (with-temp-buffer
           (gptel-yatools-test--vfs
             (gptel-yatools-vfs-put file "vfs\n")
-            (let ((refusal (gptel-yatools-vfs--refusal file)))
+            (let ((refusal (gptel-yatools-vfs-refusal file)))
               (should (eq (plist-get refusal :kind) :blocked))
               (should (string-match-p "unsaved changes"
                                       (plist-get refusal :reason))))))))))
@@ -384,24 +431,24 @@ write used to catch on its own."
           ;; A conflict: disk moved on after the baseline was captured.
           (gptel-yatools-vfs-put conflicted "vfs\n")
           (gptel-yatools-test--write conflicted "external\n")
-          (should (eq (plist-get (gptel-yatools-vfs--refusal conflicted) :kind)
+          (should (eq (plist-get (gptel-yatools-vfs-refusal conflicted) :kind)
                       :conflict))
           ;; A target replaced by a FIFO: writing it can block forever.
           (gptel-yatools-vfs-put fifo "vfs\n")
           (delete-file fifo)
           (call-process "mkfifo" nil nil nil fifo)
-          (should (eq (plist-get (gptel-yatools-vfs--refusal fifo) :kind) :blocked))
+          (should (eq (plist-get (gptel-yatools-vfs-refusal fifo) :kind) :blocked))
           (should (string-match-p
                    "no longer a regular file"
-                   (plist-get (gptel-yatools-vfs--refusal fifo) :reason)))
+                   (plist-get (gptel-yatools-vfs-refusal fifo) :reason)))
           ;; An ancestor that is a file: the write cannot land at all.
           (gptel-yatools-vfs-put behind-file "vfs\n")
           (should (string-match-p
                    "ancestor"
-                   (plist-get (gptel-yatools-vfs--refusal behind-file) :reason)))
+                   (plist-get (gptel-yatools-vfs-refusal behind-file) :reason)))
           ;; A plain pending change has nothing to refuse.
           (gptel-yatools-vfs-put clean "vfs\n")
-          (should-not (gptel-yatools-vfs--refusal clean)))))))
+          (should-not (gptel-yatools-vfs-refusal clean)))))))
 
 (ert-deftest gptel-yatools-test-partition-and-write-agree ()
   "What the review shows as syncable is what the write accepts.
@@ -843,8 +890,8 @@ different problems, and the model can act on each of them differently."
                    "directory in the VFS"
                    (funcall (gptel-yatools-test--tool "write_file")
                             parent "y\n")))
-          (should-not (gptel-yatools-vfs-get parent))
-          (should (gptel-yatools-vfs-get child))
+          (should-not (gptel-yatools-vfs-entry parent))
+          (should (plist-get (gptel-yatools-vfs-entry child) :content))
           (should (equal (gptel-yatools-vfs--sync-one child) '(:ok "synced")))
           (should (equal (gptel-yatools-test--raw child) "x\n")))))))
 
@@ -860,7 +907,7 @@ different problems, and the model can act on each of them differently."
         (should (string-match-p "1 file pending"
                                 (gptel-yatools-vfs--header-line-label)))
         (gptel-yatools-vfs-put file "a\n")
-        (should-not (gptel-yatools-vfs-get file))
+        (should-not (gptel-yatools-vfs-entry file))
         (should (null (gptel-yatools-vfs--header-line-label)))))))
 
 
@@ -908,7 +955,7 @@ different problems, and the model can act on each of them differently."
           (should (string-match-p "non-interactively" out))
           ;; Nothing may be written without an actual confirmation.
           (should (equal (gptel-yatools-vfs--disk-content file) "orig\n"))
-          (should (gptel-yatools-vfs-get file)))))))
+          (should (plist-get (gptel-yatools-vfs-entry file) :content)))))))
 
 (ert-deftest gptel-yatools-test-kill-buffer-guard-does-not-prompt-in-batch ()
   "The unsynced-changes kill guard must not block batch cleanup."
@@ -937,7 +984,7 @@ different problems, and the model can act on each of them differently."
               (gptel-yatools-test--silencing-message
                 (should (equal (gptel-yatools-vfs--sync-one file)
                                '(:ok "synced"))))))
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           (should-not (gptel-yatools-vfs--changed-paths))
           (should (equal (gptel-yatools-vfs--disk-content file) "vfs\n")))))))
 
@@ -1017,7 +1064,7 @@ different problems, and the model can act on each of them differently."
         (should (string-match-p
                  "No change needed"
                  (funcall (gptel-yatools-test--tool "write_file") file "same\n")))
-        (should-not (gptel-yatools-vfs-get file))))))
+        (should-not (gptel-yatools-vfs-entry file))))))
 
 (ert-deftest gptel-yatools-test-sync-removes-entry ()
   "A successful sync must drop the pending entry."
@@ -1026,7 +1073,7 @@ different problems, and the model can act on each of them differently."
       (gptel-yatools-test--with-file file "orig\n"
         (gptel-yatools-vfs-put file "new\n")
         (should (gptel-yatools-vfs--sync-one file))
-        (should-not (gptel-yatools-vfs-get file))
+        (should-not (gptel-yatools-vfs-entry file))
         (should-not (gptel-yatools-vfs--changed-paths))
         (should (equal (gptel-yatools-vfs--disk-content file) "new\n"))))))
 
@@ -1140,7 +1187,7 @@ interchangeable; the timers below stand in for the keypresses."
             (should-not (plist-get outcome :synced)))
           (should (equal (gptel-yatools-vfs--disk-content file) "orig\n"))
           ;; The pending change survives the refusal.
-          (should (equal (gptel-yatools-vfs-get file) "vfs\n")))))))
+          (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "vfs\n")))))))
 
 (ert-deftest gptel-yatools-test-vfs-sync-passes-the-skipped-files-to-the-review ()
   "The review must be shown the files it is not approving, not just the rest.
@@ -1256,11 +1303,11 @@ user, through `message', instead."
             (should (plist-get written :changed))
             (should (equal (plist-get written :full) file))
             (should (= (plist-get written :bytes) 4))
-            (should (equal (gptel-yatools-vfs-get file) "new\n")))
+            (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "new\n")))
           ;; Writing what is already there is not a change.
           (let ((written (gptel-yatools-vfs-write file "old\n")))
             (should-not (plist-get written :changed))
-            (should-not (gptel-yatools-vfs-get file))))))))
+            (should-not (gptel-yatools-vfs-entry file))))))))
 
 (ert-deftest gptel-yatools-test-vfs-write-settles-the-encoding ()
   "The encoding is decided by the interface, not by each caller."
@@ -1296,7 +1343,7 @@ user, through `message', instead."
                               (list "unknown coding system" "x" nil "no-such-coding")))
             (should-error (apply #'gptel-yatools-vfs-write file (cdr case))
                           :type 'error))
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           ;; A directory, and a path whose ancestor is a file, are refused too.
           (should-error (gptel-yatools-vfs-write dir "x") :type 'error)
           (gptel-yatools-vfs-write file "pending\n")
@@ -1313,10 +1360,10 @@ user, through `message', instead."
           (should-error (gptel-yatools-vfs-edit file "one" "1") :type 'error)
           (should-error (gptel-yatools-vfs-edit file "absent" "1") :type 'error)
           (should-error (gptel-yatools-vfs-edit file "" "1") :type 'error)
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           (let ((edited (gptel-yatools-vfs-edit file "two" "2")))
             (should (plist-get edited :changed))
-            (should (equal (gptel-yatools-vfs-get file) "one 2 one\n"))))))))
+            (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "one 2 one\n"))))))))
 
 (ert-deftest gptel-yatools-test-vfs-edit-reads-the-pending-copy ()
   "An edit applies to what the model was shown, not to what is on disk.
@@ -1330,7 +1377,7 @@ edit to the disk version would silently undo the earlier write."
         (gptel-yatools-test--vfs
           (gptel-yatools-vfs-write file "pending\n")
           (gptel-yatools-vfs-edit file "pending" "edited")
-          (should (equal (gptel-yatools-vfs-get file) "edited\n"))
+          (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "edited\n"))
           ;; Disk is untouched until a sync.
           (should (equal (gptel-yatools-vfs--disk-content file) "disk\n")))))))
 
@@ -1352,7 +1399,7 @@ a budget, not a benchmark: it fails only if the old slow path returns."
           (let ((start (float-time)))
             (gptel-yatools-vfs-edit file "UNIQUE NEEDLE" "REPLACED")
             (should (< (- (float-time) start) 0.5))
-            (should (string-match-p "REPLACED HERE" (gptel-yatools-vfs-get file)))))))))
+            (should (string-match-p "REPLACED HERE" (plist-get (gptel-yatools-vfs-entry file) :content)))))))))
 
 (ert-deftest gptel-yatools-test-vfs-edit-match-case-fold-search ()
   "An edit must match the exact text the model was shown.
@@ -1368,12 +1415,12 @@ tool's promise of an exact match was false."
           ;; The model asked for lowercase; the file has none, so nothing
           ;; may change.
           (should-error (gptel-yatools-vfs-edit file "hello" "bye") :type 'error)
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           (should (equal (gptel-yatools-vfs--disk-content file)
                          "Hello world\n"))
           ;; The exact text still edits.
           (gptel-yatools-vfs-edit file "Hello" "bye")
-          (should (equal (gptel-yatools-vfs-get file) "bye world\n")))))))
+          (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "bye world\n")))))))
 
 (ert-deftest gptel-yatools-test-vfs-edit-rejects-non-string-arguments ()
   "A wrong-typed old/new string must be refused, never reinterpreted.
@@ -1393,10 +1440,10 @@ tool's edge; nil is not a way to spell \"delete\"."
                                      :type 'error)))
               (should (string-match-p "must be a string"
                                       (error-message-string err)))))
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           ;; "" is the one spelling of delete.
           (gptel-yatools-vfs-edit file "beta" "")
-          (should (equal (gptel-yatools-vfs-get file) "alpha \n")))))))
+          (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "alpha \n")))))))
 
 (ert-deftest gptel-yatools-test-write-file-diff-names-a-wrong-typed-argument ()
   "The model must read which argument was wrong, not a Lisp condition."
@@ -1410,8 +1457,56 @@ tool's edge; nil is not a way to spell \"delete\"."
             (should (string-match-p "new_string must be a string" out))
             (should-not (string-match-p "Wrong type argument" out))
             (gptel-yatools-test--should-be-enveloped out))
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           (should (equal (gptel-yatools-vfs--disk-content file) "alpha\n")))))))
+
+(ert-deftest gptel-yatools-test-entry-does-not-read-disk ()
+  "The cheap question must stay cheap.
+
+`gptel-yatools-vfs-entry' answers \"is there an entry here?\", which three
+structural checks and two skill-file checks ask while walking directories.
+If it compared content with disk it would cost a read per ancestor and per
+candidate skill directory -- see
+docs/adr/0001-pending-ness-keeps-a-cheap-predicate.md."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "cheap.txt")))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          (let* ((reads 0)
+                 (advice (lambda (orig &rest args)
+                           (setq reads (1+ reads))
+                           (apply orig args))))
+            (advice-add 'gptel-yatools-vfs--disk-content-with-coding
+                        :around advice)
+            (unwind-protect
+                (progn
+                  (should (gptel-yatools-vfs-entry file))
+                  (should (= reads 0))
+                  ;; The pending question is the one that reads disk.
+                  (should (gptel-yatools-vfs-pending file))
+                  (should (> reads 0)))
+              (advice-remove 'gptel-yatools-vfs--disk-content-with-coding
+                             advice))))))))
+
+(ert-deftest gptel-yatools-test-pending-reaps-what-disk-caught-up-with ()
+  "Asking the pending question drops an entry that is no longer a change.
+
+`vfs-get' used to answer with the stored content and leave the caller to
+notice that disk had caught up, which is how three copies of that stanza
+appeared.  `pending' answers nil and reaps in the same call."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "caught-up.txt")))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          (should (gptel-yatools-vfs-pending file))
+          ;; Someone else writes the same bytes to disk.
+          (gptel-yatools-test--write file "new\n")
+          (should-not (gptel-yatools-vfs-pending file))
+          (should-not (gptel-yatools-vfs-entry file)))))))
 
 (ert-deftest gptel-yatools-test-stale-entry-does-not-shadow-disk ()
   "An entry whose content disk now holds is not a pending change.
@@ -1431,7 +1526,7 @@ the model was told a file differed from disk when it did not."
             (should (string-match-p "vfs=\"false\"" out))
             (should (string-match-p "new" out)))
           ;; The read that found the entry stale did not keep it.
-          (should-not (gptel-yatools-vfs-get file)))))))
+          (should-not (gptel-yatools-vfs-entry file)))))))
 
 (ert-deftest gptel-yatools-test-stale-entry-is-reaped-when-enumerated ()
   "Enumerating pending changes must drop the entries that no longer are.
@@ -1447,11 +1542,11 @@ lingering to be found by something cheaper and less careful."
         (gptel-yatools-test--vfs
           (gptel-yatools-vfs-put file "new\n")
           (gptel-yatools-test--write file "new\n")
-          ;; `vfs-pending-p' asks the cheap question -- "is there an
-          ;; entry?" -- and the answer is still yes.
-          (should (gptel-yatools-vfs-pending-p file))
+          ;; `gptel-yatools-vfs-entry' asks the cheap question -- "is there
+          ;; an entry?" -- and the answer is still yes.
+          (should (gptel-yatools-vfs-entry file))
           (should-not (gptel-yatools-vfs--changed-paths))
-          (should-not (gptel-yatools-vfs-get file))
+          (should-not (gptel-yatools-vfs-entry file))
           (let ((out (funcall (gptel-yatools-test--tool "vfs_diff"))))
             (should (string-match-p "no pending changes" out))))))))
 
@@ -1469,7 +1564,7 @@ whole purpose is to leave nothing behind."
           (gptel-yatools-vfs-put file "new\n")
           (gptel-yatools-test--write file "new\n")
           (should (equal (gptel-yatools-vfs-discard-pending) (list file)))
-          (should-not (gptel-yatools-vfs-get file)))))))
+          (should-not (gptel-yatools-vfs-entry file)))))))
 
 (ert-deftest gptel-yatools-test-sync-reports-blocked-alongside-conflicts ()
   "A blocked file must not vanish from a report that also has a conflict.

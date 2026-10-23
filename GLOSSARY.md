@@ -72,6 +72,22 @@ seam every function takes a resolved path and none of them interprets
 it again, so one name means one file whichever tool receives it.
 _Avoid_: Full path, absolute name, expanded path
 
+**Printable text**:
+A string safe to put on a line the user or the model will read: every
+control and invisible character written as `<U+XXXX>`.  Paths are always
+printed this way, because a path is what the review heading is made of
+and a newline in a file name would otherwise add headings of its own.
+Tool bodies get the same treatment for the invisible characters only, via
+`gptel-yatools--escape-raw-bytes`.
+_Avoid_: Sanitised string, cleaned path
+
+**Write policy**:
+The targets no write is allowed to touch, whatever the model asks for and
+whatever the review would show: the Emacs startup files,
+`.dir-locals.el`, and the package's own source.  Enforced in the VFS write
+interface so every writing tool inherits it.
+_Avoid_: Deny list, blocklist
+
 ### Tools
 
 **Result**:

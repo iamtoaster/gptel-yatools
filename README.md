@@ -12,6 +12,23 @@ commands.
 Nothing is destructive without a visible step: a write is only buffered, and
 `file_sync` refuses to go to disk while a file changed underneath you.
 
+That review is the only control there is, so it is worth knowing what it
+assumes.  `gptel-yatools` runs with **your** permissions: it can read any file
+you can read and run any command you can run, and the text it reads is sent to
+the model's provider.  `execute_command` asks before it runs anything and
+`file_sync` shows a diff before it writes; those two prompts are the whole of
+the protection.  Do not enable the shell tool on a repository you do not
+trust, and do not set `gptel-yatools-sync-without-review` unless you have read
+what it waives.
+
+What you are shown is what will happen.  File names and file contents are
+displayed with anything invisible made visible, so a diff cannot describe
+itself as something other than what it is, and the confirmation for
+`execute_command` shows the whole command rather than its first few hundred
+characters.  A few files are off-limits to the agent entirely — your Emacs
+startup files, `.dir-locals.el`, and the package's own source — because a
+change to one of those would run the next time Emacs starts.
+
 ## Installation
 
 ### straight.el
@@ -20,7 +37,7 @@ Nothing is destructive without a visible step: a write is only buffered, and
 (use-package gptel-yatools
   :after gptel
   :straight (:type git :host github :repo "USER/gptel-yatools")
-  :config (gptel-yatools-enable-all))
+  :config (gptel-yatools-enable "filesystem"))  ; add "shell" when you want it
 ```
 
 Until the repository is public, point straight.el at a checkout:
@@ -29,7 +46,7 @@ Until the repository is public, point straight.el at a checkout:
 (use-package gptel-yatools
   :after gptel
   :straight (:local-repo "/path/to/gptel-yatools")
-  :config (gptel-yatools-enable-all))
+  :config (gptel-yatools-enable "filesystem"))   ; add "shell" when you want it
 ```
 
 ### package-vc or plain `load-path`
@@ -49,9 +66,10 @@ enable anything: which tools a request sends is `gptel-tools`, and that stays
 untouched until you say otherwise.
 
 ```elisp
-(gptel-yatools-enable-all)         ; every tool
-(gptel-yatools-enable "filesystem") ; one category
+(gptel-yatools-enable "filesystem")             ; read and write files
+(gptel-yatools-enable "shell")                  ; run shell commands
 (gptel-yatools-enable "write_file" "file_sync") ; by name
+(gptel-yatools-enable-all)                      ; every tool
 ```
 
 Enabled tools are prepended to `gptel-tools` and replace earlier entries with
@@ -132,7 +150,12 @@ and the body is the same text `vfs_diff` shows the model.
 Faces are painted onto the text as it is inserted, the way a magit buffer
 does it, rather than left to font-lock on redisplay: a diff is highlighted
 the moment it appears, and folding is an overlay, so the text the user
-approves is exactly the text that was shown.
+approves is exactly the text that was shown, and it is shown in the order it
+is stored even when it contains direction-changing characters.
+
+Two limits you do not have to police yourself: a file whose name contains a
+control character cannot be written, and overwriting a file that changed on
+disk since it was read asks you first.
 
 ### Skills
 
@@ -176,9 +199,14 @@ The scan is cheap after the first call: the directories are walked every
 time, so a skill added or removed is noticed immediately, but the YAML
 frontmatter is parsed once per distinct `SKILL.md` text and then cached. On
 a root of 38 skills that is 400 ms for the first `skill` call and about
-20 ms afterwards.  The cache is keyed by the text, not the path, so a
-pending VFS copy of a `SKILL.md` gets its own parse and never leaks into
-another chat's index.
+20 ms afterwards.  The cache is keyed by the text, not the path, so two
+skills can never be handed each other's parse.
+
+The agent only sees skills that exist **on disk**.  A `SKILL.md` that is still
+waiting to be synced is not available yet, and a pending edit to one is not in
+force until you accept it — so a skill cannot take effect before you have
+reviewed it.  The optional `allowed-tools` field is shown to the model but not
+enforced, and is labelled as advisory for that reason.
 
 Every scan validates the frontmatter against the specification: a skill whose
 `name` or `description` is missing or malformed is still listed, but cannot be
@@ -210,7 +238,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-197 ERT tests, no network, no prompts, every one of them in a throwaway temp
+215 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

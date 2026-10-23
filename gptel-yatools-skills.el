@@ -31,7 +31,14 @@
 ;; (`license', `compatibility', `metadata', `allowed-tools') are shown to the
 ;; model verbatim and otherwise left uninterpreted: `allowed-tools' is
 ;; explicitly experimental in the specification, and gptel has no per-skill
-;; tool allowlist to map it onto.
+;; tool allowlist to map it onto.  Since the field is printed but not
+;; enforced, it is printed under a label that says so -- a skill that looked
+;; scoped and was not would be worse than one that never claimed to be.
+;;
+;; Skills are read from disk only.  A `SKILL.md' that exists solely as a
+;; pending VFS write is not discovered, and a pending edit to one is not
+;; read: the model must not be able to author the instructions it is then
+;; told to treat as authoritative, with the write not yet reviewed.
 ;;
 ;; The catalog is the module that answers the questions every caller has:
 ;; which skills are there (`--discover`), which one does a name mean
@@ -395,17 +402,17 @@ call.  Everything else is fair game -- see
   "Return a skill plist for the skill directory DIR, found under ROOT.
 
 The plist carries the parsed frontmatter, the body, the validation
-result, its handle, and where the `SKILL.md' came from -- a pending VFS
-copy, if there is one, wins over the file on disk just as it does for
-`read_path'.  The directory name, not the `name' field, is the skill's
-identity.
+result, its handle, and where the `SKILL.md' came from.  It always
+comes from disk: a pending VFS copy is ignored, so instructions the
+model has written but nobody has approved cannot be in force.  The
+directory name, not the `name' field, is the skill's identity.
 
 The parse is cached by content (see
 `gptel-yatools-skills--parse-cache'); the validation is not, because it
 compares the text against DIR's name and so belongs to this directory."
   (let* ((dirname (file-name-nondirectory (directory-file-name dir)))
          (path (expand-file-name "SKILL.md" dir))
-         (read (gptel-yatools-vfs-read path))
+         (read (gptel-yatools-vfs-read path t))
          (text (and (eq (plist-get read :kind) :text)
                     (plist-get read :text)))
          (parsed (if text
@@ -428,18 +435,20 @@ compares the text against DIR's name and so belongs to this directory."
           :path path
           :frontmatter frontmatter
           :body (plist-get parsed :body)
-          :from-vfs (eq (plist-get read :provenance) :vfs)
           :problems (append problems (plist-get checked :problems))
           :warnings (plist-get checked :warnings))))
 
 (defun gptel-yatools-skills--skill-directory-p (dir)
-  "Return non-nil if DIR holds a `SKILL.md'.
+  "Return non-nil if DIR holds a `SKILL.md' on disk.
 
-A pending VFS copy counts, so a skill being authored in the buffer is
-found before its `SKILL.md' exists on disk."
-  (let ((path (expand-file-name "SKILL.md" dir)))
-    (or (gptel-yatools-vfs-entry path)
-        (file-regular-p path))))
+Disk only, deliberately.  Accepting a pending VFS copy as well would let
+the model write a `SKILL.md', load it, and be told its contents are
+authoritative -- all before the write has been reviewed, so the model
+would be authoring the rules it then obeys with the review bypassed.
+Every other agentic tool reads its rules files from disk for the same
+reason: a file the agent creates is not in force until it is written,
+and the person who reviews the write is the one who puts it in force."
+  (file-regular-p (expand-file-name "SKILL.md" dir)))
 
 (defun gptel-yatools-skills--subdirectories (dir)
   "Return (SUBDIRECTORIES . ERROR) for DIR.
@@ -851,7 +860,7 @@ cannot drift apart."
                               (gptel-yatools-skills--field frontmatter "license"))
                         (cons "Compatibility"
                               (gptel-yatools-skills--field frontmatter "compatibility"))
-                        (cons "Allowed tools"
+                        (cons "Allowed tools (advisory, not enforced)"
                               (gptel-yatools-skills--field frontmatter "allowed-tools"))))
       (let ((value (cdr pair)))
         (when (and (stringp value) (not (string-empty-p (string-trim value))))
@@ -875,9 +884,12 @@ cannot drift apart."
      "\n\n")))
 
 (defun gptel-yatools-skills--skill-result (skill)
-  "Return the result that loads SKILL: header, files, and body."
+  "Return the result that loads SKILL: header, files, and body.
+
+The provenance is `:disk' because a skill is read from disk only; a
+pending write to its `SKILL.md' is not in force."
   (gptel-yatools-ok (gptel-yatools-skills--payload skill)
-                    :provenance (if (plist-get skill :from-vfs) :vfs :disk)
+                    :provenance :disk
                     :comment "Skill loaded."))
 
 (defun gptel-yatools-skills--resolve-file (skill file)
@@ -886,14 +898,14 @@ cannot drift apart."
 FILE has to be relative and has to land inside the skill directory:
 `..' segments and symlinks that point elsewhere are refused.  Absolute
 names are refused too, since they can only be a mistake about what the
-path is relative to.  A pending VFS copy is accepted on the strength of
-the lexical check alone, because it does not exist on disk yet to have
-a truename."
+path is relative to.  A pending VFS copy is not accepted: like
+`SKILL.md' itself, a file presented as part of a skill is one that
+exists on disk, so nothing the model wrote reaches it before the write
+has been reviewed."
   (let* ((dir (file-name-as-directory (expand-file-name (plist-get skill :directory))))
          (full (expand-file-name file dir)))
     (cond
      ((not (string-prefix-p dir full)) nil)
-     ((gptel-yatools-vfs-entry full) full)
      ((not (file-regular-p full)) nil)
      (t
       (let ((true (ignore-errors (file-truename full)))

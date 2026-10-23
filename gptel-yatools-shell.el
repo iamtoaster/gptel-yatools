@@ -212,5 +212,53 @@ process and polls it instead."
   (gptel-yatools--update-tool-status " Executing command..." 'mode-line-emphasis)
   (gptel-yatools-shell--run-command command directory))
 
+;;-------------------------------------------------------------------------
+;; What the user is asked to approve
+;;
+;; gptel renders a pending tool call with `gptel--format-tool-call', which
+;; truncates every string argument at 256 characters.  For `execute_command'
+;; that is the wrong failure: a command is approved on its text, so a long
+;; one could be approved on a harmless prefix.  gptel offers
+;; `gptel--tool-preview-alist' for exactly this -- a tool-specific renderer
+;; in place of the default -- and it is registered here.
+;;
+;; The registration is guarded: the variable is gptel's, so a gptel that
+;; stops defining it simply falls back to the default rendering, which is
+;; truncated but not wrong in the way a missing prompt would be.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-shell--confirmation-text (args)
+  "Return ARGS as the one-line confirmation for an `execute_command' call.
+
+ARGS is the tool call's plist.  The command is shown in full -- that is
+the point of this function -- with control characters written as
+<U+XXXX> so that a command spanning lines cannot add lines that read
+like the rest of the prompt.  The directory is named too, because it is
+part of what runs."
+  (let ((command (plist-get args :command))
+        (directory (plist-get args :directory)))
+    (concat "(execute_command "
+            (prin1-to-string
+             (gptel-yatools--printable-string
+              (if (stringp command) command (format "%s" command))))
+            (if (and (stringp directory) (not (string-empty-p directory)))
+                (format " directory=%s"
+                        (prin1-to-string
+                         (gptel-yatools--printable-string directory)))
+              "")
+            ")\n")))
+
+(defun gptel-yatools-shell--insert-command-preview (args _info)
+  "Insert the full command for ARGS into gptel's confirmation prompt.
+
+Called by gptel as a preview-setup function; returns nil because there
+is nothing to tear down -- the text lives in the prompt the confirmation
+already deletes."
+  (insert (gptel-yatools-shell--confirmation-text args))
+  nil)
+
+(when (boundp 'gptel--tool-preview-alist)
+  (setf (alist-get "execute_command" gptel--tool-preview-alist nil nil #'equal)
+        (list #'gptel-yatools-shell--insert-command-preview)))
+
 (provide 'gptel-yatools-shell)
 ;;; gptel-yatools-shell.el ends here

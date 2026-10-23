@@ -221,19 +221,66 @@ received it, rather than re-guessed by the VFS from whichever buffer
 happens to be current."
   (expand-file-name path (gptel-yatools--workspace-root)))
 
+(defconst gptel-yatools--invisible-char-regexp
+  "[\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
+  "Regexp matching characters that are drawn as nothing or reorder text.
+
+Bidi controls (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069)
+change the order in which a line is displayed, and the zero-width
+characters (U+200B-U+200D, U+2060, U+FEFF) can hide inside an
+identifier.  The model reading a program, and the user reading a diff,
+both need to see that one is there; a character drawn as a hairline is
+as good as absent.  Newlines and tabs are deliberately not here: they
+are legitimate in text and mean what they look like.")
+
+(defconst gptel-yatools--control-char-regexp
+  "[\x00-\x1f\x7f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
+  "Regexp matching every character that may not be displayed verbatim.
+
+That is `gptel-yatools--invisible-char-regexp' plus the C0 controls and
+DEL.  A path or a command is inserted into a buffer as one line of
+output; a newline in it would add lines of its own, which is how a
+file name can forge a review heading the user will read as another
+file's.")
+
+(defun gptel-yatools--printable-string (string)
+  "Return STRING with every character in
+`gptel-yatools--control-char-regexp' written as <U+XXXX>.
+
+Text that holds none of them is returned unchanged, which is every
+reply that matters for speed.  `gptel-yatools--display-path' uses this
+for paths; a tool that shows any other model-written string on a line
+of its own -- a shell command in a confirmation, say -- should too."
+  (if (null (string-match-p gptel-yatools--control-char-regexp string))
+      string
+    (replace-regexp-in-string
+     gptel-yatools--control-char-regexp
+     (lambda (m) (format "<U+%04X>" (string-to-char m)))
+     string t t)))
+
 (defun gptel-yatools--display-path (path)
-  "Return PATH relative to the workspace root, for display.
+  "Return PATH relative to the workspace root, escaped for display.
 
 Falls back to the absolute path when PATH is outside the workspace.
 The workspace root itself is shown as \".\", the way a relative path
 would name it: stripping the root from the root leaves an empty
-string, which would read as \"the directory called nothing\"."
-  (let ((root (gptel-yatools--workspace-root)))
-    (cond
-     ((equal path root) ".")
-     ((string-prefix-p root path)
-      (substring path (length root)))
-     (t path))))
+string, which would read as \"the directory called nothing\".
+
+Control characters are written as <U+XXXX>, so that everything this
+package shows -- review headings, the skipped list, sync reports, tool
+replies -- can only ever be one line per string.  Without that, a file
+whose name holds a newline could add lines of its own to the review
+heading, and the user would approve a change set that is not the one
+being described: the review is the control, so a path must not be able
+to compose it.  Git stores arbitrary bytes in file names, so such a
+name can arrive from a cloned repository and need not be exotic."
+  (gptel-yatools--printable-string
+   (let ((root (gptel-yatools--workspace-root)))
+     (cond
+      ((equal path root) ".")
+      ((string-prefix-p root path)
+       (substring path (length root)))
+      (t path)))))
 
 (defun gptel-yatools--coerce-integer (value default &optional minimum)
   "Return VALUE coerced to an integer, or DEFAULT if that is impossible.
@@ -319,7 +366,7 @@ character -- 60 ms for a 60 kB tool response, paid on every single
 call.")
 
 (defun gptel-yatools--escape-raw-bytes (string)
-  "Return STRING with undecodable raw bytes escaped as \\xNN.
+  "Return STRING with undecodable raw bytes and invisible characters escaped.
 
 Tool responses are serialised to JSON when they are sent back to
 the model, and Emacs cannot encode a string containing raw (eight
@@ -329,6 +376,13 @@ Raw bytes appear whenever a command prints binary or non-UTF-8
 data (`cat' of an ISO-8859-1 file, `od', a PDF, ...), so every
 tool response is passed through this before it is returned.
 
+A bidi control or a zero-width character is ordinary, encodable
+Unicode, so serialisation is happy with it and the model would read a
+file whose displayed order is not its logical order without ever
+learning that.  Those are escaped too, as <U+XXXX>, which is a true
+statement about the text where an invisible character is no statement
+at all.
+
 Almost every response is ordinary text, which needs no escaping at
 all, so that case is detected first and returned as it is: the
 character loop below is only for the rare string that really does
@@ -336,16 +390,26 @@ carry raw bytes."
   (let ((s (if (multibyte-string-p string)
                string
              (string-to-multibyte string))))
-    (if (null (string-match-p gptel-yatools--raw-byte-regexp s))
-        s
-      (let (parts)
-        (dotimes (i (length s))
-          (let ((c (aref s i)))
-            (push (if (eq (char-charset c) 'eight-bit)
-                      (format "\\x%02x" (logand c #xFF))
-                    (char-to-string c))
-                  parts)))
-        (apply #'concat (nreverse parts))))))
+    (gptel-yatools--escape-invisible-chars
+     (if (null (string-match-p gptel-yatools--raw-byte-regexp s))
+         s
+       (let (parts)
+         (dotimes (i (length s))
+           (let ((c (aref s i)))
+             (push (if (eq (char-charset c) 'eight-bit)
+                       (format "\\x%02x" (logand c #xFF))
+                     (char-to-string c))
+                   parts)))
+         (apply #'concat (nreverse parts)))))))
+
+(defun gptel-yatools--escape-invisible-chars (string)
+  "Return STRING with bidi and zero-width characters written as <U+XXXX>."
+  (if (null (string-match-p gptel-yatools--invisible-char-regexp string))
+      string
+    (replace-regexp-in-string
+     gptel-yatools--invisible-char-regexp
+     (lambda (m) (format "<U+%04X>" (string-to-char m)))
+     string t t)))
 
 
 (defun gptel-yatools--hard-cut (string limit)
@@ -475,6 +539,22 @@ nothing about STRING and walks all of it."
                           note))
         escaped))))
 
+(defun gptel-yatools--escape-envelope-body (body)
+  "Return BODY with anything that could forge an envelope tag neutralised.
+
+The envelope is assembled as a string, so the only thing that tells
+tool output apart from harness chrome is that the output cannot spell
+the chrome.  Escaping every \"<\" would also achieve that, but it
+expands Lisp and HTML diffs about fourfold, and `gptel-yatools-page'
+promises a page that the envelope's own truncation will not then cut in
+half -- a promise worth more than the readability of the tag names this
+touches.  So only the starts of the two envelope tags are escaped;
+every other \"<\" is left as the file had it."
+  (replace-regexp-in-string
+   "<\\(/?tool_\\(?:context\\|response\\)\\)"
+   "&lt;\\1"
+   body))
+
 (defun gptel-yatools--envelope (provenance comment body)
   "Return BODY wrapped in the tool context/response XML envelope.
 
@@ -483,13 +563,19 @@ PROVENANCE says where BODY came from: `:disk', `:vfs' or `:mixed' (see
 attribute, which is false only for a wholly-on-disk reply.
 COMMENT is a short note shown to the LLM in the context tag.
 
-Both COMMENT and BODY are sanitised with
-`gptel-yatools--escape-raw-bytes' so that a response never carries
-bytes that cannot be serialised for the model."
+COMMENT is escaped with `gptel-yatools--xml-escape' because it sits in
+an attribute.  BODY cannot be escaped wholesale without breaking the
+page size that `vfs_diff' reports, so it is passed through
+`gptel-yatools--escape-envelope-body' instead, which neutralises the
+two tags a reply could use to forge the provenance line the package
+asks the model to trust.  Both are then run through
+`gptel-yatools--truncate', so that no response carries bytes that
+cannot be serialised for the model."
   (format "<tool_context vfs=\"%s\" comment=\"%s\"/>\n<tool_response>\n%s\n</tool_response>"
           (gptel-yatools--provenance-attr provenance)
           (gptel-yatools--xml-escape (gptel-yatools--escape-raw-bytes comment))
-          (gptel-yatools--truncate body)))
+          (gptel-yatools--truncate
+           (gptel-yatools--escape-envelope-body body))))
 
 ;;-------------------------------------------------------------------------
 ;; The tool boundary

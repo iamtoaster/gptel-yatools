@@ -196,7 +196,9 @@ which case an entry is kept so the sync re-encodes the file.
 When RESET-BASELINE is non-nil, the recorded baseline is refreshed
 to the current disk content, discarding any prior conflict.  Use
 this only when the caller has explicitly accepted the on-disk
-version of the file (e.g. `overwrite' in `write_file').
+version of the file (e.g. `overwrite' in `write_file'); that tool
+asks the user before it comes here, because discarding the conflict
+is the user's work being discarded.
 
 When CODING is non-nil it becomes the encoding the file will be
 written with on sync, which is how a caller converts a file from
@@ -627,7 +629,7 @@ the caller can see what would be lost."
 CONFLICT: file changed on disk since the VFS captured its baseline.\n\
 Syncing would overwrite those external changes.  Resolve by running\n\
 `vfs_discard' for this path and re-reading, or by calling `write_file'\n\
-with overwrite=true to force the VFS version.\n\n\
+with overwrite=true to force the VFS version (the user is asked to confirm).\n\n\
 -- External changes on disk since baseline (would be lost if synced):\n\
 %s\n\
 -- What `file_sync' would write to disk:\n\
@@ -773,11 +775,16 @@ itself instead of calling this."
              (or (plist-get read :why) "permission denied or I/O error")))
     (_ nil)))
 
-(defun gptel-yatools-vfs-read (path)
+(defun gptel-yatools-vfs-read (path &optional disk-only)
   "Return the text at PATH, and say what kind of answer it is.
 
 PATH must be absolute: resolution happens at the tool's edge, in
 `gptel-yatools--resolve-path'.
+
+DISK-ONLY, when non-nil, ignores a pending VFS entry and answers from
+disk.  A skill file uses it: instructions the model has written but
+nobody has approved must not be in force yet, which is exactly what a
+pending entry would make them.
 
 The value is a plist whose `:kind' is one of:
 
@@ -804,7 +811,7 @@ one branches on `:kind'; one that cannot renders it with
 `gptel-yatools-vfs--read-problem'.  Signalling here would force every
 caller to wrap the call in `ignore-errors' and lose the reason."
   (let* ((full (gptel-yatools-vfs--key path))
-         (entry (gptel-yatools-vfs-pending full))
+         (entry (and (not disk-only) (gptel-yatools-vfs-pending full)))
          (vfs (plist-get entry :content)))
     (cond
      (vfs
@@ -840,6 +847,126 @@ the file already has."
    (or (and coding (intern coding))
        (gptel-yatools-vfs--target-coding path))))
 
+;;-------------------------------------------------------------------------
+;; What a write is not allowed to touch
+;;
+;; The agent is not the only code in this Emacs: the package itself decides
+;; which tools exist and what the review shows, and the user's init files
+;; decide what runs on the next start.  A model that can write those has a
+;; way around every control this package offers -- not by defeating the
+;; review, but by changing the code that performs it.  Denying them costs
+;; little and is the reason the lists below exist.
+;;
+;; The directory list holds the package's own directory.  It deliberately
+;; does not hold all of `user-emacs-directory': repositories are commonly
+;; cloned inside it, and refusing to edit those would make the tool useless
+;; exactly where it was started.  What actually runs on the next start is
+;; named instead, file by file, below.
+;;-------------------------------------------------------------------------
+(defcustom gptel-yatools-write-denied-directories
+  (delq nil
+        (list (file-name-directory
+               (or load-file-name buffer-file-name
+                   (ignore-errors (locate-library "gptel-yatools-common"))
+                   ""))))
+  "Directories that the writing tools refuse to put files in.
+
+The default is this package's own directory: the code that runs tool
+calls, decides what the review lists and writes the file is not
+something the model should be able to change, because the next call
+would run the change.
+
+Matching is by `file-truename' on the target's directory, so a symlink
+into one of these directories is caught too.  Set this to nil to let
+the agent edit the harness deliberately."
+  :type '(repeat directory)
+  :group 'gptel-yatools)
+
+(defcustom gptel-yatools-write-denied-files
+  (delq nil
+        (mapcar #'expand-file-name
+                (delq nil
+                      (list user-init-file
+                            (and (boundp 'early-init-file)
+                                 (symbol-value 'early-init-file))
+                            (expand-file-name "early-init.el"
+                                              user-emacs-directory)
+                            (expand-file-name "init.el"
+                                              user-emacs-directory)))))
+  "Files that the writing tools refuse to write, whatever directory they are in.
+
+These are the files Emacs loads at startup, so a change to one is not
+a change to a repository: it is a change to what every future Emacs
+runs.  That is a different decision from the one the sync review asks
+the user to make, and it is not one a tool call may take on their
+behalf."
+  :type '(repeat file)
+  :group 'gptel-yatools)
+
+(defcustom gptel-yatools-write-denied-file-names
+  '(".dir-locals.el" ".dir-locals-2.el")
+  "File names that the writing tools refuse to write, in any directory.
+
+A `.dir-locals.el' is loaded whenever a file in its directory is
+visited, so writing one turns the next visit anywhere in that tree into
+code execution -- including the visit that would review the write."
+  :type '(repeat string)
+  :group 'gptel-yatools)
+
+(defun gptel-yatools-vfs--truename-or-path (path)
+  "Return PATH's truename if it has one, else PATH expanded."
+  (or (ignore-errors (file-truename path))
+      (expand-file-name path)))
+
+(defun gptel-yatools-vfs--write-policy-refusal (full)
+  "Return a one-line reason why FULL may not be written, or nil.
+
+Asks the three lists above -- denied directories, forbidden file names
+and startup files -- in that order, so the message names the rule that
+actually applied and the user can change that one rule."
+  (let* ((true (gptel-yatools-vfs--truename-or-path full))
+         (dir (file-name-directory true))
+         (name (file-name-nondirectory true))
+         (denied-dir
+          (cl-find-if
+           (lambda (d)
+             (and (stringp d)
+                  (string-prefix-p (file-name-as-directory
+                                    (gptel-yatools-vfs--truename-or-path d))
+                                   dir)))
+           gptel-yatools-write-denied-directories)))
+    (cond
+     ((member name gptel-yatools-write-denied-file-names)
+      (format "%s is loaded or applied by Emacs on its own, so writing it is denied by `gptel-yatools-write-denied-file-names'"
+              name))
+     ((member true (mapcar #'gptel-yatools-vfs--truename-or-path
+                           gptel-yatools-write-denied-files))
+      "it is a file Emacs loads at startup, denied by `gptel-yatools-write-denied-files'")
+     (denied-dir
+      (format "it is inside %s, denied by `gptel-yatools-write-denied-directories'"
+              (gptel-yatools--display-path
+               (file-name-as-directory
+                (gptel-yatools-vfs--truename-or-path denied-dir)))))
+     (t nil))))
+
+(defun gptel-yatools-vfs--confirm-overwrite (full)
+  "Ask the user to accept discarding FULL's external changes, or signal.
+
+`write_file' exposes `overwrite' to the model, which makes the conflict
+check -- the control the package's own description advertises -- turn
+off on the model's word alone.  The baseline is refreshed and the
+conflict disappears from the review, so the user's uncommitted work is
+overwritten with nothing but an argument to show for it.  Asking here
+puts the decision back with the person who would lose the work; the
+escape hatch survives, it just is not the model's to pull."
+  (let ((name (gptel-yatools--display-path full)))
+    (unless (and (not noninteractive)
+                 (y-or-n-p
+                  (format "%s changed on disk since this chat captured it. Overwrite those changes with the VFS version? "
+                          name)))
+      (error "Error: cannot write %s: it changed on disk since the VFS captured it. overwrite=true discards that change and needs the user's confirmation, which was not given. Nothing was written. Call vfs_discard and read the file again instead, or ask the user."
+             name))))
+
 (defun gptel-yatools-vfs-write (path content &optional overwrite coding)
   "Store CONTENT at PATH in the VFS, and return what changed.
 
@@ -852,15 +979,32 @@ the write was a no-op, so nothing is pending), :bytes (what the file will
 occupy on disk) and :coding (what it will be written with).
 
 Signals an error, having changed nothing, when PATH cannot be written --
-an ancestor that is a file, a directory, a device -- or when CODING
-cannot represent CONTENT."
+a name holding a control character, a target the write policy denies (see
+`gptel-yatools-write-denied-directories' and its siblings), an ancestor
+that is a file, a directory, a device -- or when CODING cannot represent
+CONTENT.  OVERWRITE on a file that changed on disk since the VFS captured
+it also asks the user before the baseline is refreshed."
   (let* ((full (gptel-yatools-vfs--key path))
          (validate-error (gptel-yatools-vfs--validate-insertable full))
+         (policy-error (gptel-yatools-vfs--write-policy-refusal full))
          (target (gptel-yatools-vfs--coding full coding)))
     (cond
      ((not (stringp content))
       (error "Error: content must be a string."))
      (validate-error (error "%s" validate-error))
+     ;; A path is shown to the user as a line of a review heading and to
+     ;; the model as a line of a reply.  A newline in the name would add
+     ;; lines of its own, and the review would describe a change set that
+     ;; is not the one on offer, so such a target is refused rather than
+     ;; escaped: there is no legitimate reason to create one, and the
+     ;; refusal is one place that covers every writing tool.
+     ((string-match-p gptel-yatools--control-char-regexp full)
+      (error "Error: cannot write %s: the path contains a control or invisible character. Rename the file, or write it from the shell if you really mean it. Nothing was written."
+             (gptel-yatools--display-path full)))
+     (policy-error
+      (error "Error: cannot write %s: %s. Nothing was written."
+             (gptel-yatools--display-path full)
+             policy-error))
      ((file-directory-p full)
       (error "Error: cannot write %s: it is a directory on disk."
              (gptel-yatools--display-path full)))
@@ -882,6 +1026,11 @@ cannot represent CONTENT."
                "the content as given")
              (gptel-yatools--display-path full)))
      (t
+      ;; Refreshing the baseline is what makes a conflict disappear, so the
+      ;; check is placed here, where the discarding would happen.
+      (when (and (gptel-yatools--flag-p overwrite)
+                 (gptel-yatools-vfs--conflict-p full))
+        (gptel-yatools-vfs--confirm-overwrite full))
       (gptel-yatools-vfs-put full content (gptel-yatools--flag-p overwrite)
                              (and coding (intern coding)))
       (list :full full
@@ -1046,12 +1195,44 @@ One of `accept', `reject', or nil while still pending.")
     map)
   "Keymap for `gptel-yatools-write-diff-mode'.")
 
+(defun gptel-yatools-write-diff--visible-glyphless-display ()
+  "Return a `glyphless-char-display' that draws invisible characters as hex.
+
+By default a bidi control or a zero-width character is drawn as a
+thin space, which is to say drawn as nothing worth noticing.  In a
+buffer whose whole job is to show the user the exact text a sync will
+write, \"invisible\" is the one thing a character may not be."
+  (let ((table (copy-sequence glyphless-char-display)))
+    (when (char-table-p table)
+      (set-char-table-range table (cons #x200b #x200f) 'hex-code)
+      (set-char-table-range table (cons #x202a #x202e) 'hex-code)
+      (set-char-table-range table (cons #x2066 #x2069) 'hex-code)
+      (set-char-table-range table #x061c 'hex-code)
+      (set-char-table-range table #x2060 'hex-code)
+      (set-char-table-range table #xfeff 'hex-code))
+    table))
+
 (define-minor-mode gptel-yatools-write-diff-mode
   "Review a gptel file-write diff.
 
+The buffer is made immune to the display tricks a diff can carry:
+bidi reordering is off, so each line is drawn in the order it is
+stored, and characters that are normally a hairline -- bidi controls,
+zero-width characters -- are drawn as their code points instead.  The
+user approves the logical text, so the user must see the logical text.
+Outside this buffer the same characters are escaped as <U+XXXX> in
+every tool reply, and a write whose target name holds one is refused.
+
 \\{gptel-yatools-write-diff-mode-map}"
   :lighter " gptel-diff"
-  :keymap gptel-yatools-write-diff-mode-map)
+  :keymap gptel-yatools-write-diff-mode-map
+  (if gptel-yatools-write-diff-mode
+      (progn
+        (setq-local bidi-display-reordering nil)
+        (setq-local glyphless-char-display
+                    (gptel-yatools-write-diff--visible-glyphless-display)))
+    (kill-local-variable 'bidi-display-reordering)
+    (kill-local-variable 'glyphless-char-display)))
 
 (defun gptel-yatools-write-diff-accept ()
   "Accept the pending gptel write diff."
@@ -1834,7 +2015,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
         ;; or the blocked files would not be named anywhere.
         ((and (null synced) (null failed) (null blocked) conflicts)
          (gptel-yatools-ok
-          (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
+          (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
                   (gptel-yatools-vfs--sync-file-list conflicts))
           :provenance :vfs
           :comment "All pending changes conflict with disk; nothing synced."))
@@ -1848,7 +2029,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                          (gptel-yatools-vfs--sync-file-list synced))
                "No files were synced.\n")
              (when conflicts
-               (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true.\n"
+               (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
                        (length conflicts)
                        (gptel-yatools-vfs--sync-file-list conflicts)))
              (when blocked
@@ -2026,7 +2207,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
   :name "write_file"
   :category "filesystem"
   :description
-  "Write CONTENT to the file at PATH. The write is stored in a buffer-local virtual filesystem (VFS) and does NOT touch disk. Call the file_sync tool to review the accumulated diffs and write them to disk. CONTENT must be the file's full new contents, not a patch. No user-facing diff review happens here; it happens at file_sync. The path must be writable: no ancestor of the target may be a regular file (on disk or in the VFS), and the target itself must not be a directory on disk. Content is rejected at write time if the file's encoding cannot represent it; pass CODING (e.g. \"utf-8\") to deliberately convert the file to another encoding on sync. Pass overwrite=true to accept the current disk content as the new baseline and discard any pending conflict (see file_sync); otherwise a pre-existing conflict is preserved."
+  "Write CONTENT to the file at PATH. The write is stored in a buffer-local virtual filesystem (VFS) and does NOT touch disk. Call the file_sync tool to review the accumulated diffs and write them to disk. CONTENT must be the file's full new contents, not a patch. No user-facing diff review happens here; it happens at file_sync. The path must be writable: no ancestor of the target may be a regular file (on disk or in the VFS), and the target itself must not be a directory on disk. A path holding a control character is refused, and so is a target the write policy protects — the Emacs startup files, `.dir-locals.el', and this package's own source — with an error naming the setting that denies it; both refusals are deliberate, so report them to the user rather than working around them through the shell. Content is rejected at write time if the file's encoding cannot represent it; pass CODING (e.g. \"utf-8\") to deliberately convert the file to another encoding on sync. Pass overwrite=true to accept the current disk content as the new baseline and discard any pending conflict (see file_sync); the user is asked to confirm that, and otherwise a pre-existing conflict is preserved."
   :args '((:name "path"
                  :type string
                  :description "File path to write, relative to the workspace root or absolute.")
@@ -2035,7 +2216,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "The complete new contents of the file (not a patch).")
           (:name "overwrite"
                  :type boolean
-                 :description "If true, accept the current disk content as the VFS baseline, discarding any pending conflict."
+                 :description "If true, accept the current disk content as the VFS baseline, discarding any pending conflict. The user is asked to confirm whenever this would discard a conflict, so passing it does not make the check go away."
                  :optional t)
           (:name "coding"
                  :type string
@@ -2073,7 +2254,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :description "The text to replace old_string with. Must not be identical to old_string.")
           (:name "overwrite"
                  :type boolean
-                 :description "If true, accept the current disk content as the VFS baseline, discarding any pending conflict."
+                 :description "If true, accept the current disk content as the VFS baseline, discarding any pending conflict. The user is asked to confirm whenever this would discard a conflict, so passing it does not make the check go away."
                  :optional t)
           (:name "coding"
                  :type string

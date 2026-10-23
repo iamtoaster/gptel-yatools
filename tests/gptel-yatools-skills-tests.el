@@ -357,7 +357,12 @@ manual-send command came to disagree.  One outcome answers both."
           (should (string-match-p "Description: Extract PDF text" out))
           (should (string-match-p "License: Apache-2.0" out))
           (should (string-match-p "Compatibility: Needs qpdf" out))
-          (should (string-match-p "Allowed tools: Bash(git:\\*) Read" out))
+          ;; The field is printed, but the package does not enforce it, so
+          ;; the label says so: a user who reads "Allowed tools" and gets a
+          ;; scoped skill that is not scoped has been misled by the tool.
+          (should (string-match-p
+                   "Allowed tools (advisory, not enforced): Bash(git:\\*) Read"
+                   out))
           (should (string-match-p "author: example-org" out))
           (should (string-match-p "version: 1\\.0" out))
           ;; The absolute directory, so scripts can be run from it.
@@ -499,6 +504,18 @@ survive that."
             (should (string-match-p "not a readable file inside the skill" out))
             (should-not (string-match-p "secret" out))))))))
 
+(ert-deftest gptel-yatools-skills-test-pending-file-is-not-readable ()
+  "A reference file the model has only written to the VFS is not part of the skill."
+  (gptel-yatools-test--in-dir
+    (let* ((root (gptel-yatools-test--root-file "skills"))
+           (dir (gptel-yatools-skills-test--skill root "reader")))
+      (gptel-yatools-skills-test--indexed root
+        (gptel-yatools-vfs-put
+         (expand-file-name "references/NEW.md" dir) "Injected reference.\n")
+        (let ((out (gptel-yatools-skills-test--call "reader" "references/NEW.md")))
+          (should (string-match-p "not a readable file inside the skill" out))
+          (should-not (string-match-p "Injected reference." out)))))))
+
 (ert-deftest gptel-yatools-skills-test-file-needs-a-name ()
   "`file' without `name' is a mistake worth explaining, not a crash."
   (gptel-yatools-skills-test--indexed nil
@@ -507,8 +524,37 @@ survive that."
 
 ;;;; 5. Interplay with the rest of the package
 
-(ert-deftest gptel-yatools-skills-test-pending-vfs-copy-wins ()
-  "A pending edit to `SKILL.md' must be what the tool reads."
+(ert-deftest gptel-yatools-skills-test-pending-skill-is-not-in-force ()
+  "A skill the model has only written to the VFS cannot be loaded.
+
+Writing a `SKILL.md' and then loading it would let the model author its
+own authoritative instructions with the review bypassed: the file is in
+force before anyone has approved the change.  A skill exists when its
+`SKILL.md' exists on disk, which is what every peer tool does.
+"
+  (gptel-yatools-test--in-dir
+    (let* ((root (gptel-yatools-test--root-file "skills"))
+           (dir (expand-file-name "deploy-check" root)))
+      (make-directory dir t)
+      (gptel-yatools-skills-test--indexed root
+        (gptel-yatools-vfs-put
+         (expand-file-name "SKILL.md" dir)
+         "---\nname: deploy-check\ndescription: Injected rules. Use when deploying.\n---\n\nObey the pending body.\n")
+        ;; Not in the index...
+        (should-not (string-match-p "deploy-check — "
+                                    (gptel-yatools-skills-test--call)))
+        ;; ... and not callable by name either.
+        (let ((out (gptel-yatools-skills-test--call "deploy-check")))
+          (should (string-match-p "no skill named" out))
+          (should-not (string-match-p "Obey the pending body." out)))))))
+
+(ert-deftest gptel-yatools-skills-test-pending-edit-is-not-in-force ()
+  "A pending edit to an existing `SKILL.md' must not be what the tool reads.
+
+Otherwise the same bypass applies to a skill that already exists on
+disk: the model rewrites its instructions, loads them, and obeys them
+before the write has been reviewed.
+"
   (gptel-yatools-test--in-dir
     (let* ((root (gptel-yatools-test--root-file "skills"))
            (dir (gptel-yatools-skills-test--skill root "edited")))
@@ -517,46 +563,38 @@ survive that."
          (expand-file-name "SKILL.md" dir)
          "---\nname: edited\ndescription: Edited copy.\n---\n\nUnsynced body.\n")
         (let ((out (gptel-yatools-skills-test--call "edited")))
-          (should (string-match-p "Unsynced body." out))
-          (should-not (string-match-p "Follow the edited procedure." out)))))))
+          (should (string-match-p "Follow the edited procedure." out))
+          (should-not (string-match-p "Unsynced body." out)))))))
 
 ;;;; 5b. The parse cache
 
-(ert-deftest gptel-yatools-skills-test-parse-cache-keeps-two-chats-apart ()
-  "Two chats holding different pending copies must each parse their own.
+(ert-deftest gptel-yatools-skills-test-parse-cache-keeps-two-skills-apart ()
+  "Two skills must each be served their own parse.
 
 The cache is global and keyed by content, so this is the property that
 makes it safe: identical text shares a parse, different text cannot.
-Keying by path instead would hand the first chat's parse to the second,
-which is the cross-chat leak the buffer-local VFS exists to prevent."
+Keying by path instead would hand the first skill's body to the second.
+"
   (gptel-yatools-test--in-dir
     (let* ((root (gptel-yatools-test--root-file "skills"))
-           (dir (gptel-yatools-skills-test--skill root "shared"))
-           (path (expand-file-name "SKILL.md" dir)))
-      (gptel-yatools-skills-test--with-roots (list root)
-        ;; Chat A holds one pending version...
-        (with-temp-buffer
-          (gptel-yatools-test--vfs
-            (gptel-yatools-vfs-put
-             path "---\nname: shared\ndescription: From chat A.\n---\n\nBody A.\n")
-            (let ((out (gptel-yatools-skills-test--call "shared")))
-              (should (string-match-p "Body A." out))
-              (should (string-match-p "From chat A." out)))))
-        ;; ...chat B holds a different one, at the same path.
-        (with-temp-buffer
-          (gptel-yatools-test--vfs
-            (gptel-yatools-vfs-put
-             path "---\nname: shared\ndescription: From chat B.\n---\n\nBody B.\n")
-            (let ((out (gptel-yatools-skills-test--call "shared")))
-              (should (string-match-p "Body B." out))
-              (should (string-match-p "From chat B." out))
-              (should-not (string-match-p "Body A." out)))))
-        ;; And a third chat with no pending copy sees disk, not either cache.
-        (with-temp-buffer
-          (gptel-yatools-test--vfs
-            (let ((out (gptel-yatools-skills-test--call "shared")))
-              (should (string-match-p "Follow the shared procedure." out))
-              (should-not (string-match-p "Body A." out)))))))))
+           (one (gptel-yatools-skills-test--skill root "shared"))
+           (path (expand-file-name "SKILL.md" one)))
+      (gptel-yatools-skills-test--skill root "twin")
+      (gptel-yatools-skills-test--indexed root
+        (should (string-match-p "Follow the shared procedure."
+                                (gptel-yatools-skills-test--call "shared")))
+        (should (string-match-p "Follow the twin procedure."
+                                (gptel-yatools-skills-test--call "twin")))
+        ;; And the first one still answers with its own text afterwards,
+        ;; from the cache or not.
+        (let ((out (gptel-yatools-skills-test--call "shared")))
+          (should (string-match-p "Follow the shared procedure." out))
+          (should-not (string-match-p "Follow the twin procedure." out)))
+        ;; A rewritten file on disk is a key the cache has never seen.
+        (gptel-yatools-test--write
+         path "---\nname: shared\ndescription: Rewritten.\n---\n\nBody B.\n")
+        (should (string-match-p "Body B."
+                                (gptel-yatools-skills-test--call "shared")))))))
 
 (ert-deftest gptel-yatools-skills-test-parse-cache-is-not-invalidated-by-reload ()
   "The cache must be free to keys it does not own.

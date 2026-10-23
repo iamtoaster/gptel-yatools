@@ -7,3 +7,6 @@
 .dir-locals.el
 .#*
 *~
+
+# Miscellaneous folders
+security-reports/

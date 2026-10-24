@@ -1251,6 +1251,21 @@ them."
               "probe" (lambda (&rest _) (error "Wrong type argument: listp, 5")) nil)))
     (should (string-match-p "Error: Wrong type argument: listp, 5" out))))
 
+(ert-deftest gptel-yatools-test-the-boundary-passes-arguments-through ()
+  "A call with no argument declaration must still deliver its arguments.
+
+`gptel-yatools--call-tool' is the one boundary every reply crosses, and it
+checks each value against the tool's `:args'.  A tool with no declaration
+has nothing to check against -- which is not the same as having nothing to
+pass.  The arguments were dropped, so the tool was called with none and
+the model read `Wrong number of arguments' for a call it made correctly.
+"
+  (should (string-match-p
+           "got 5"
+           (gptel-yatools--call-tool
+            "probe" (lambda (x) (gptel-yatools-ok (format "got %S" x)))
+            (list 5)))))
+
 (ert-deftest gptel-yatools-test-response-machinery-is-crossed-at-one-seam ()
   "No tool module may reach into the response machinery.
 

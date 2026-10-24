@@ -292,22 +292,28 @@ name can arrive from a cloned repository and need not be exotic."
       (t path)))))
 
 (defun gptel-yatools--integer-value (value)
-  "Return VALUE as an integer, or nil when it does not name one.
+  "Return VALUE as an integer, or nil when it names no number.
 
 Integers pass through, other numbers are truncated toward zero, and a
-string made only of digits is parsed.  Anything else -- nil, a word, a
-number with a tail -- is nil, so the caller can tell \"2\" from
-\"two\" instead of being handed a silent 0.  This is the primitive
-`gptel-yatools--coerce-integer' and `gptel-yatools--checked-arg' are
-both built from, so a tool argument is read the same way whether it is
+string is read as the number it begins with -- \"2\", \"2.0\" and
+\"7 items\" all name 7, 2 and 7.  A string holding no digit at all is
+nil, so the caller can tell \"two\" from \"2\" instead of being handed a
+silent 0.
+
+Reading the number a string begins with, rather than requiring bare
+digits, is deliberate: a model that quotes an argument sends \"2.0\"
+about as often as \"2\", and refusing the first would make it fall back
+to a default -- a wrong answer that looks like a right one.  This is the
+primitive `gptel-yatools--coerce-integer' and `gptel-yatools--checked-arg'
+are both built from, so an argument is read the same way whether it is
 being defaulted or merely normalised."
   (cond
    ((integerp value) value)
    ((numberp value)
     (condition-case nil (truncate value) (error nil)))
-   ((and (stringp value)
-         (string-match-p "\\`[ \t]*[+-]?[0-9]+[ \t]*\\'" value))
-    (string-to-number value))
+   ((and (stringp value) (string-match-p "[0-9]" value))
+    (let ((n (string-to-number value)))
+      (and (numberp n) (truncate n))))
    (t nil)))
 
 (defun gptel-yatools--coerce-integer (value default &optional minimum)
@@ -911,15 +917,24 @@ is passed through `gptel-yatools--checked-arg', so a string argument
 that arrived as a number is refused here -- with an envelope and a
 sentence -- instead of signalling from inside `string-trim'.
 
+A tool that declares no arguments keeps the ones it was given: having
+nothing to check against is not the same as having nothing to pass, and
+dropping them made the tool run with none of its arguments and report
+`wrong-number-of-arguments' for a call the model had made correctly.
+
 Nothing here is a second opinion about the tool's own defaults: an
 omitted optional argument stays nil, and an integer that names no
 number is left for the body to refuse in its own words."
-  (when arg-specs
-    (cl-mapcar (lambda (value spec)
-                 (gptel-yatools--checked-arg value (plist-get spec :type)
-                                             (plist-get spec :name)
-                                             (plist-get spec :optional)))
-               args arg-specs)))
+  (if (null arg-specs)
+      args
+    ;; `cl-mapcar' stops at the shorter list, so anything past the
+    ;; declaration is carried through rather than silently dropped.
+    (append (cl-mapcar (lambda (value spec)
+                         (gptel-yatools--checked-arg value (plist-get spec :type)
+                                                     (plist-get spec :name)
+                                                     (plist-get spec :optional)))
+                       args arg-specs)
+            (nthcdr (length arg-specs) args))))
 
 (defun gptel-yatools--call-tool (name function args &optional timeout arg-specs)
   "Call FUNCTION with positional ARGS and render the outcome for the model.
@@ -1092,7 +1107,14 @@ than as the model wrote it, since \"5\" and 5 mean the same seconds."
         (cond
          ((null position) nil)
          ((member shown required)
-          (push (gptel-yatools--preview-value value) parts))
+          (push (if (null value)
+                    ;; A required argument gptel did not pass at all.  It
+                    ;; is named rather than printed as `nil', which reads
+                    ;; as a value the user could approve instead of as an
+                    ;; argument that is missing.
+                    "<missing>"
+                  (gptel-yatools--preview-value value))
+                parts))
          ((gptel-yatools--preview-shows-p value)
           (push (format "%s=%s" shown (gptel-yatools--preview-value value))
                 parts)))))

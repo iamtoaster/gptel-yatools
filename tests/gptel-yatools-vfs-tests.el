@@ -974,6 +974,21 @@ line past the end of the diff.  The count must agree with the one
                             file 2.0 1.9)))
           (should (string-match-p "<tool_response>\nb\n" out)))))))
 
+(ert-deftest gptel-yatools-test-a-numeric-string-keeps-the-number-it-names ()
+  "A number written as a string must still be that number.
+
+A model that quotes `offset' sends \"2.0\" or \"2\", and the call has to
+page from line 2 either way.  Requiring bare digits made \"2.0\" parse as
+nothing at all, so the caller fell back to the default and silently showed
+page 1 -- a wrong answer that looks like a right one.
+"
+  (should (= 2 (gptel-yatools--coerce-integer "2.0" 1 1)))
+  (should (= 2 (gptel-yatools--coerce-integer " 2 " 1 1)))
+  (should (= 7 (gptel-yatools--coerce-integer "7 items" 1 1)))
+  (should (= 2 (gptel-yatools--coerce-integer "2abc" 1 1)))
+  ;; Text with no number in it is still not a number.
+  (should (= 7 (gptel-yatools--coerce-integer "no digits here" 7 1))))
+
 
 ;;;; 30. Editing unreadable or special files
 
@@ -2139,6 +2154,17 @@ directory called nothing rather than as \"the workspace root\".
                   "execute_command" (list :command "ls" :directory ""))
                  "(execute_command \"ls\")\n")))
 
+(ert-deftest gptel-yatools-test-command-confirmation-says-when-the-command-is-missing ()
+  "A confirmation must not describe a missing command as `nil'.
+
+This is the old positional-reader failure in its new home.  A line whose
+whole job is to say what will run must not say `nil', which reads as a
+value the user could accept rather than as an argument that was not sent.
+"
+  (let ((text (gptel-yatools-test--preview "execute_command" nil)))
+    (should (string-match-p "<missing>" text))
+    (should-not (string-match-p "nil" text))))
+
 (ert-deftest gptel-yatools-test-preview-must-name-a-real-argument ()
   "`:preview' is checked against the definition, not trusted.
 
@@ -2245,6 +2271,44 @@ and the pattern is the body.
                             "[")))
           (should (string-match-p "no such file" out))
           (should-not (string-match-p "invalid regexp" out)))))))
+
+(ert-deftest gptel-yatools-test-sync-message-is-silent-when-everything-synced ()
+  "A clean sync has nothing to add to the echo area.
+
+Every sync used to announce itself, including the ones where nothing went
+wrong: the line read \"synced 1 file(s); 0 NOT synced (conflicts: 0,
+blocked: 0, failed: 0)\".  A count is 0, and 0 is true in Lisp, so every
+branch that asked \"is anything wrong?\" answered yes.
+"
+  (should (null (gptel-yatools-vfs--sync-message
+                 '(:status :done :synced ("/x") :conflicts nil
+                   :blocked nil :failed nil))))
+  (should (null (gptel-yatools-vfs--sync-message
+                 '(:status :done :synced nil :conflicts nil
+                   :blocked nil :failed nil)))))
+
+(ert-deftest gptel-yatools-test-sync-message-names-the-one-reason-nothing-synced ()
+  "When one kind of problem is all there was, name it and nothing else.
+
+A four-part total with three zeroes in it is a worse answer than the one
+fact the user needs.
+"
+  (should (equal (gptel-yatools-vfs--sync-message
+                  '(:status :done :synced nil :conflicts nil
+                    :blocked (("/b" . "ancestor is a file")) :failed nil))
+                 "gptel: nothing synced — 1 file(s) blocked."))
+  (should (equal (gptel-yatools-vfs--sync-message
+                  '(:status :done :synced nil
+                    :conflicts ("/c") :blocked nil :failed nil))
+                 "gptel: nothing synced — 1 file(s) conflict with disk.")))
+
+(ert-deftest gptel-yatools-test-sync-message-totals-a-mixed-sync ()
+  "A sync with several kinds of trouble gets the totals line."
+  (let ((line (gptel-yatools-vfs--sync-message
+               '(:status :done :synced ("/ok") :conflicts ("/c")
+                 :blocked (("/b" . "why")) :failed nil))))
+    (should (string-match-p "synced 1 file(s)" line))
+    (should (string-match-p "2 NOT synced" line))))
 
 (provide 'gptel-yatools-vfs-tests)
 ;;; gptel-yatools-vfs-tests.el ends here

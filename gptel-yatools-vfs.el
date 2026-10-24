@@ -2071,7 +2071,13 @@ The tool reply is not the only reader of a sync, and it is the reader
 that may be skipped: in a chat the user sees the line, and the model sees
 the reply.  Both are built from the same report, so this cannot say
 \"2 blocked\" while the reply says \"1 blocked\".  The value is nil when
-there is nothing to say."
+there is nothing to say -- a sync where everything landed has no news in
+it, and a line that announced it anyway would train the user to ignore
+the line that does matter.
+
+The counts are numbers, so every question here is asked with `zerop' or
+`>'; asking whether they are nil answers \"no\" when the answer is
+\"zero\", which read as \"something went wrong\" on every clean sync."
   (let* ((sections (gptel-yatools-vfs--sync-report outcome))
          (synced (gptel-yatools-vfs--sync-count sections :synced))
          (conflicts (gptel-yatools-vfs--sync-count sections :conflicts))
@@ -2079,14 +2085,15 @@ there is nothing to say."
          (failed (gptel-yatools-vfs--sync-count sections :failed))
          (not-synced (+ conflicts blocked failed)))
     (cond
+     ((zerop not-synced) nil)
      ;; Nothing could even be attempted, and it was for one reason: say
      ;; that reason instead of a four-part total with three zeroes in it.
-     ((and (null failed) (null conflicts) blocked)
+     ((and (zerop synced) (zerop failed) (zerop conflicts))
       (format "gptel: nothing synced — %d file(s) blocked." blocked))
-     ((and (null failed) (null blocked) conflicts)
+     ((and (zerop synced) (zerop failed) (zerop blocked))
       (format "gptel: nothing synced — %d file(s) conflict with disk."
               conflicts))
-     ((or conflicts blocked failed)
+     (t
       (format "gptel: synced %d file(s); %d NOT synced (conflicts: %d, blocked: %d, failed: %d). See the tool result for details."
               synced not-synced conflicts blocked failed)))))
 

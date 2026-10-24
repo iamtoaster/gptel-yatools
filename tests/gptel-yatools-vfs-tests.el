@@ -1090,7 +1090,12 @@ different problems, and the model can act on each of them differently."
 ;;;; 36. A nil regexp signalled wrong-type-argument
 
 (ert-deftest gptel-yatools-test-nil-regex-is-a-clean-message ()
-  "A non-string regexp must be reported, not signalled."
+  "A non-string regexp must be reported, not signalled.
+
+The refusal comes from the tool boundary now, generated from the
+`:args' line that declares `regex' a string -- so it names the argument
+the way the definition does (`regex', not `regexp') and arrives as an
+envelope rather than as a raw `wrong-type-argument'."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "nil-rx.txt")))
       (gptel-yatools-test--with-file file "abc\n"
@@ -1098,7 +1103,7 @@ different problems, and the model can act on each of them differently."
                              "fetch_lines_from_file_using_regex")
                             file nil)))
           (should (stringp out))
-          (should (string-match-p "regexp must be a string" out)))))))
+          (should (string-match-p "regex must be a string" out)))))))
 
 
 ;;;; 38. `file_sync' hung forever in a non-interactive Emacs
@@ -1611,7 +1616,11 @@ tool's edge; nil is not a way to spell \"delete\"."
           (should (equal (plist-get (gptel-yatools-vfs-entry file) :content) "alpha \n")))))))
 
 (ert-deftest gptel-yatools-test-write-file-diff-names-a-wrong-typed-argument ()
-  "The model must read which argument was wrong, not a Lisp condition."
+  "The model must read which argument was wrong, not a Lisp condition.
+
+The check comes from the boundary now, generated from the `:args' line
+that declares `new_string' a string.  The test therefore drives the
+tool function gptel calls, which is the seam a model crosses."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "typed-tool.txt")))
       (gptel-yatools-test--write file "alpha\n")
@@ -1624,6 +1633,45 @@ tool's edge; nil is not a way to spell \"delete\"."
             (gptel-yatools-test--should-be-enveloped out))
           (should-not (gptel-yatools-vfs-entry file))
           (should (equal (gptel-yatools-vfs--disk-content file) "alpha\n")))))))
+
+(ert-deftest gptel-yatools-test-argument-checks-are-generated-from-the-declaration ()
+  "Every declared type is checked, not just the ones a body remembers.
+
+Two tools, two declarations, two refusals -- each naming the argument
+the way the definition spells it.  A body that forgot a check would have
+let the value reach `expand-file-name' and signal instead."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "declared.txt")))
+      (gptel-yatools-test--with-file file "alpha\n"
+        (dolist (probe (list (list "read_path" (list 42) "path must be a string")
+                             (list "write_file" (list file 42)
+                                   "content must be a string")))
+          (let ((out (apply (gptel-yatools-test--tool (nth 0 probe))
+                            (nth 1 probe))))
+            (should (string-match-p (nth 2 probe) out))
+            (gptel-yatools-test--should-be-enveloped out)))
+        (should-not (gptel-yatools-vfs-entry file))
+        (should (equal (gptel-yatools-vfs--disk-content file) "alpha\n"))))))
+
+(ert-deftest gptel-yatools-test-json-true-and-false-reach-a-boolean-argument ()
+  "A boolean argument is read as the model meant it, at the boundary.
+
+JSON gives a model `true', 1, and \"true\" for the same thing and
+`:json-false' for the other; a tool body should not have to know that.
+The refusal the body writes still fires, which proves the value reached
+it as a Lisp boolean."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "flag.txt")))
+      (gptel-yatools-test--write file "orig\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (let ((out (funcall (gptel-yatools-test--tool "write_file")
+                              file "vfs\n" :json-false)))
+            (should-not (string-match-p "must be a string" out)))
+          ;; `overwrite' was false, so the pending entry stands and the
+          ;; write happened: what reached the body was a boolean, not
+          ;; the JSON sentinel.
+          (should (gptel-yatools-vfs-entry file)))))))
 
 (ert-deftest gptel-yatools-test-entry-does-not-read-disk ()
   "The cheap question must stay cheap.
@@ -2068,6 +2116,31 @@ either drop it or print it as the directory."
 (ert-deftest gptel-yatools-test-command-confirmation-is-registered ()
   "gptel must be told to use the preview instead of its truncating default."
   (should (assoc "execute_command" gptel--tool-preview-alist)))
+
+(ert-deftest gptel-yatools-test-command-confirmation-omits-what-was-not-sent ()
+  "An argument the model left out is not part of what will happen.
+
+Naming it would suggest it is, and an empty directory reads as a
+directory called nothing rather than as \"the workspace root\".
+"
+  (should (equal (gptel-yatools-test--preview
+                  "execute_command" (list :command "ls" :directory ""))
+                 "(execute_command \"ls\")\n")))
+
+(ert-deftest gptel-yatools-test-preview-must-name-a-real-argument ()
+  "`:preview' is checked against the definition, not trusted.
+
+A name that is not an argument would render as the empty string, which
+is the same failure as reading the wrong position: a confirmation that
+does not say what the call will do.
+"
+  (should-error
+   (macroexpand
+    '(gptel-yatools-define-tool gptel-yatools-preview-probe
+       :name "preview_probe"
+       :preview '("no_such_argument")
+       :args '((:name "path" :type string :description "Path."))
+       (gptel-yatools-ok path)))))
 
 (provide 'gptel-yatools-vfs-tests)
 ;;; gptel-yatools-vfs-tests.el ends here

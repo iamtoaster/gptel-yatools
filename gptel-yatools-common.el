@@ -15,18 +15,23 @@
 ;; tools; only `gptel-yatools.el' comes after, holding the gptel plumbing
 ;; that makes a call run in the buffer that owns the request.
 ;;
-;; A tool is three things, and `gptel-yatools-define-tool' writes all three
+;; A tool is four things, and `gptel-yatools-define-tool' writes all four
 ;; from one definition:
 ;;
 ;; 1. An implementation function, `NAME-tool', which takes the tool's
 ;;    arguments and returns a `gptel-yatools-result'.  It says what it
 ;;    found; it never formats, truncates or escapes anything.
 ;; 2. A boundary function, `NAME', which gptel calls.  It adds the optional
-;;    TIMEOUT argument, enforces the deadline, renders the Result into the
-;;    envelope the model sees, and turns a signalled error into that same
-;;    envelope.
+;;    TIMEOUT argument, checks each argument against the type the
+;;    definition declares for it, enforces the deadline, renders the Result
+;;    into the envelope the model sees, and turns a signalled error into
+;;    that same envelope.
 ;; 3. The `gptel-tool' struct, registered in gptel's registry and in this
 ;;    package's own list.
+;; 4. A confirmation renderer, for a tool that asks for one with
+;;    `:preview'.  gptel's own formatter truncates every string argument at
+;;    256 characters, which is the wrong failure for a call whose arguments
+;;    are what the user is approving.
 ;;
 ;; Both functions are named, so both can be advised, traced and found with
 ;; `C-h f'.  Advice on `NAME-tool' sees the tool's own arguments and can
@@ -282,6 +287,25 @@ name can arrive from a cloned repository and need not be exotic."
        (substring path (length root)))
       (t path)))))
 
+(defun gptel-yatools--integer-value (value)
+  "Return VALUE as an integer, or nil when it does not name one.
+
+Integers pass through, other numbers are truncated toward zero, and a
+string made only of digits is parsed.  Anything else -- nil, a word, a
+number with a tail -- is nil, so the caller can tell \"2\" from
+\"two\" instead of being handed a silent 0.  This is the primitive
+`gptel-yatools--coerce-integer' and `gptel-yatools--checked-arg' are
+both built from, so a tool argument is read the same way whether it is
+being defaulted or merely normalised."
+  (cond
+   ((integerp value) value)
+   ((numberp value)
+    (condition-case nil (truncate value) (error nil)))
+   ((and (stringp value)
+         (string-match-p "\\`[ \t]*[+-]?[0-9]+[ \t]*\\'" value))
+    (string-to-number value))
+   (t nil)))
+
 (defun gptel-yatools--coerce-integer (value default &optional minimum)
   "Return VALUE coerced to an integer, or DEFAULT if that is impossible.
 
@@ -292,16 +316,7 @@ numeric strings are parsed first.  The result is never below MINIMUM
 they reach `forward-line' or `nth' as a non-integer and signal a raw
 Lisp error instead of a readable tool response."
   (let* ((minimum (or minimum 0))
-         (n (cond
-             ((integerp value) value)
-             ((numberp value)
-              (condition-case nil (truncate value) (error nil)))
-             ((stringp value)
-              (condition-case nil
-                  (let ((v (string-to-number value)))
-                    (and (numberp v) (truncate v)))
-                (error nil)))
-             (t nil))))
+         (n (gptel-yatools--integer-value value)))
     (if (and (integerp n) (>= n minimum))
         n
       (max minimum (or default minimum)))))
@@ -329,6 +344,33 @@ Only clearly-false values are false: nil, `:json-false', the number
            (and (stringp value)
                 (member (downcase (string-trim value))
                         '("false" "no" "0" ""))))))
+
+(defun gptel-yatools--checked-arg (value type name optional)
+  "Return VALUE as the TYPE that argument NAME is declared with.
+
+OPTIONAL says the model may leave the argument out, and then nil passes
+through untouched: only an argument that is present is checked, so a
+tool's own defaulting stays in charge of what an omitted one means.
+
+A string is checked rather than converted, because the tool body will
+hand it to `expand-file-name' or `string-trim' and a number there
+signals a raw Lisp error instead of a readable reply.  Integers and
+booleans are converted instead: JSON gives a model three ways to spell
+two and two to spell false, and \"that is not an integer\" is a worse
+answer than doing what it plainly meant.  A value that names no integer
+is left alone for the body to refuse in its own words.
+
+The declarations this reads are the `:args' list of
+`gptel-yatools-define-tool', which already states every argument's type
+-- so the check is written once, in the definition, and not again as a
+`gptel-yatools--require-string' call at the top of thirteen bodies."
+  (if (and (null value) optional)
+      nil
+    (pcase type
+      ('string (gptel-yatools--require-string value name))
+      ('integer (or (gptel-yatools--integer-value value) value))
+      ('boolean (gptel-yatools--flag-p value))
+      (_ value))))
 
 ;;-------------------------------------------------------------------------
 ;; Making a response safe to send
@@ -856,7 +898,26 @@ condition the boundary renders."
             value))
       (cancel-timer timer))))
 
-(defun gptel-yatools--call-tool (name function args &optional timeout)
+(defun gptel-yatools--checked-args (args arg-specs)
+  "Return ARGS with each value brought into line with its ARG-SPECS.
+
+ARGS is the positional list the tool function is called with, in the
+order `:args' declares, and ARG-SPECS is that declaration.  Each value
+is passed through `gptel-yatools--checked-arg', so a string argument
+that arrived as a number is refused here -- with an envelope and a
+sentence -- instead of signalling from inside `string-trim'.
+
+Nothing here is a second opinion about the tool's own defaults: an
+omitted optional argument stays nil, and an integer that names no
+number is left for the body to refuse in its own words."
+  (when arg-specs
+    (cl-mapcar (lambda (value spec)
+                 (gptel-yatools--checked-arg value (plist-get spec :type)
+                                             (plist-get spec :name)
+                                             (plist-get spec :optional)))
+               args arg-specs)))
+
+(defun gptel-yatools--call-tool (name function args &optional timeout arg-specs)
   "Call FUNCTION with positional ARGS and render the outcome for the model.
 
 This is the tool boundary in one function: the deadline is enforced, the
@@ -864,6 +925,12 @@ Result is rendered into the envelope, and a signalled error, an expired
 deadline and a tool that returned the wrong shape all become that same
 envelope -- sized, truncated and escaped -- so the model never receives
 bare text and never receives text that cannot be serialised back to JSON.
+
+ARG-SPECS, when given, is the tool's `:args' declaration.  It is checked
+here rather than at the top of each tool body for two reasons: the check
+is generated from the declaration that already states the types, and a
+refusal raised here is inside the `condition-case' below, so it reaches
+the model as an enveloped sentence rather than as bare text.
 
 NAME labels the tool in a timeout message.  TIMEOUT is the call's own
 deadline, or nil for `gptel-yatools-timeout'.
@@ -878,7 +945,8 @@ debug: `condition-case-unless-debug' leaves the signal alone while
 `debug-on-error' is set."
   (condition-case-unless-debug err
       (gptel-yatools--respond
-       (gptel-yatools--call-with-timeout function args timeout name))
+       (gptel-yatools--call-with-timeout
+        function (gptel-yatools--checked-args args arg-specs) timeout name))
     (gptel-yatools-timeout-error
      (gptel-yatools--envelope
       :disk "Tool call timed out."
@@ -946,6 +1014,115 @@ line) and :partial (the page is not the whole of TEXT)."
 ;;-------------------------------------------------------------------------
 ;; Defining a tool
 ;;-------------------------------------------------------------------------
+;; What the user is asked to approve
+;;
+;; gptel renders a pending tool call with `gptel--format-tool-call', which
+;; truncates every string argument at 256 characters.  For a tool whose
+;; arguments are the thing being approved -- a shell command is the one
+;; that matters -- that is the wrong failure: the call could be approved
+;; on a harmless prefix.  `gptel--tool-preview-alist' is gptel's answer: a
+;; tool-specific renderer in place of the default, asked for by name.
+;;
+;; Two facts about that alist are easy to get wrong, and both were:
+;;
+;; - Its docstring says the setup function is called with \"a plist of the
+;;   corresponding tool call arguments\", but gptel actually passes
+;;   `(gptel--map-tool-args TOOL-SPEC ARGS)' -- a positional list.  A
+;;   renderer that reads it as a plist finds nothing and draws nil.
+;; - The list it is handed is `gptel-tool-args'' order, which is the
+;;   declared order plus the TIMEOUT every tool gets.  So the renderer has
+;;   to be built from the same declaration the tool is.
+;;
+;; Hence `:preview': a tool names the arguments worth showing, and the
+;; definition builds the renderer that reads them -- by name, in the
+;; declared positions, so adding an argument cannot shift the line without
+;; a test noticing.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools--preview-value (value)
+  "Return VALUE as it is written into a confirmation line.
+
+A string is printed with `prin1-to-string' after
+`gptel-yatools--printable-string', so it arrives quoted and with its
+control characters spelled out -- a command spanning lines stays one
+line.  Anything else is printed as it prints itself."
+  (if (stringp value)
+      (prin1-to-string (gptel-yatools--printable-string value))
+    (format "%s" value)))
+
+(defun gptel-yatools--preview-shows-p (value)
+  "Return non-nil when VALUE is worth naming on a confirmation line.
+
+An argument the model left out is not part of what will happen, and
+naming it would suggest it is."
+  (not (or (null value)
+           (eq value :json-false)
+           (and (stringp value) (string-empty-p value)))))
+
+(defun gptel-yatools--preview-line (name display arg-specs values)
+  "Return the one-line confirmation for a call to NAME.
+
+DISPLAY is the tool's `:preview' list: the arguments to show, in the
+order to show them.  ARG-SPECS is the tool's `:args' declaration, which
+gives each shown name its position and says whether it may be omitted.
+VALUES is the positional argument list gptel hands the tool function,
+with the trailing TIMEOUT every tool takes.
+
+A required argument is printed where it belongs -- positionally, the
+way the call reads -- and an optional one as NAME=VALUE, so the two
+kinds stay tellable apart.  `timeout' is named explicitly because it is
+not part of the command but does bound how long the call runs; it is
+also the one value printed as the number it will be used as, rather
+than as the model wrote it, since \"5\" and 5 mean the same seconds."
+  (let* ((names (append (mapcar (lambda (arg) (plist-get arg :name)) arg-specs)
+                        (list "timeout")))
+         (required (mapcar (lambda (arg) (plist-get arg :name))
+                           (cl-remove-if (lambda (arg) (plist-get arg :optional))
+                                         arg-specs)))
+         (parts nil))
+    (dolist (shown display)
+      (let* ((position (cl-position shown names :test #'equal))
+             (value (and position (nth position values))))
+        (when (equal shown "timeout")
+          (setq value (and (gptel-yatools--preview-shows-p value)
+                           (gptel-yatools--resolve-timeout value))))
+        (cond
+         ((null position) nil)
+         ((member shown required)
+          (push (gptel-yatools--preview-value value) parts))
+         ((gptel-yatools--preview-shows-p value)
+          (push (format "%s=%s" shown (gptel-yatools--preview-value value))
+                parts)))))
+    (concat "(" name
+            (if parts (concat " " (mapconcat #'identity (nreverse parts) " ")) "")
+            ")\n")))
+
+(defun gptel-yatools--register-preview (name display arg-specs)
+  "Point gptel's preview alist at a renderer for NAME, showing DISPLAY.
+
+ARG-SPECS is the tool's `:args', which the renderer reads positions
+from.  Nothing is registered for a tool that asks for no preview.
+
+The registration is guarded: the alist is gptel's, so a gptel that stops
+defining it simply falls back to the default rendering, which is
+truncated but not wrong in the way a missing prompt would be."
+  (when (and display (boundp 'gptel--tool-preview-alist))
+    (setf (alist-get name gptel--tool-preview-alist nil nil #'equal)
+          (list (lambda (values _info)
+                  (insert (gptel-yatools--preview-line name display
+                                                       arg-specs values))
+                  nil)))))
+
+(defun gptel-yatools--literal (form)
+  "Return FORM as the literal list it names, quoted or not.
+
+A definition writes `:args \\='(...)' because that is how a list of
+plists survives the byte compiler.  The macro needs the list itself, so
+the quote -- present or absent -- is stripped here rather than in each
+of the places that reads a literal."
+  (if (and (consp form) (eq (car form) 'quote))
+      (cadr form)
+    form))
+
 (defun gptel-yatools--register-tool (&rest slots)
   "Create a tool from SLOTS and register it, returning the tool.
 
@@ -1112,6 +1289,14 @@ SPEC is a sequence of keyword/value pairs followed by the body:
                passes the values positionally.
   :confirm     Non-nil to make gptel ask the user to confirm each call,
                as it does before running a shell command.
+  :preview     A list of the argument names to show when gptel asks the
+               user to approve a call, in the order to show them.  A
+               required argument is printed positionally, the way the
+               call reads, and an optional one as NAME=VALUE.  Leave it
+               out for gptel's own formatter, which truncates every
+               string at 256 characters -- so a tool whose arguments are
+               what the user is approving should name them here, or a
+               long one can be approved on a harmless prefix.
 
 The body is the tool's implementation.  The arguments named in :args are
 bound to the values the model sent, and the body returns a
@@ -1171,9 +1356,8 @@ Here is a whole tool:
            (category (or (plist-get plist :category) "misc"))
            (description (plist-get plist :description))
            (args-form (plist-get plist :args))
-           (arg-specs (if (and (consp args-form) (eq (car args-form) 'quote))
-                          (cadr args-form)
-                        args-form))
+           (arg-specs (gptel-yatools--literal args-form))
+           (display (gptel-yatools--literal (plist-get plist :preview)))
            (body rest)
            (doc (gptel-yatools--tool-docstring
                  name category description arg-specs))
@@ -1210,6 +1394,11 @@ Here is a whole tool:
                symbol expected name))
       (unless body
         (error "gptel-yatools-define-tool: %s has no body" symbol))
+      (dolist (shown display)
+        (unless (member shown (mapcar (lambda (arg) (plist-get arg :name))
+                                      (append arg-specs (list '(:name "timeout")))))
+          (error "gptel-yatools-define-tool: %s asks to preview %S, but it has no such argument"
+                 symbol shown)))
       (unless (equal arg-specs
                      (append (cl-remove-if (lambda (arg) (plist-get arg :optional))
                                            arg-specs)
@@ -1225,7 +1414,8 @@ Here is a whole tool:
            ,doc
            (gptel-yatools--call-tool ,name #',impl
                                      (list ,@param-names)
-                                     timeout))
+                                     timeout
+                                     (copy-tree ',arg-specs)))
          (gptel-yatools--register-tool
           :name ,name
           :category ,category
@@ -1237,6 +1427,7 @@ Here is a whole tool:
           :function #',symbol
           ,@(when (plist-get plist :confirm)
               (list :confirm (plist-get plist :confirm))))
+         (gptel-yatools--register-preview ,name ',display ',arg-specs)
          ',symbol))))
 
 ;;-------------------------------------------------------------------------

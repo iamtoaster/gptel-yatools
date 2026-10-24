@@ -197,6 +197,7 @@ process and polls it instead."
   :name "execute_command"
   :category "shell"
   :confirm t
+  :preview '("command" "directory" "timeout")
   :description
   "Execute a shell command and return its exit status and combined stdout/stderr output. The user is ALWAYS prompted to confirm the exact command before it runs. The command runs against DISK, not the VFS. If any VFS files have uncommitted changes, a warning is prepended to the XML context (listing the pending paths): missing files or stale content in the output may be because changes are pending in the VFS. Use vfs_diff to inspect pending changes and file_sync to apply them. On failure the exit code and output are returned as plain text (not signaled as an Elisp error), so you can read the failure and adapt. If the command outlives the tool timeout it is killed and its partial output is returned instead."
   :args '((:name "command"
@@ -206,9 +207,6 @@ process and polls it instead."
                  :type string
                  :description "Optional working directory, relative to the workspace root or absolute. Defaults to the workspace root."
                  :optional t))
-  (gptel-yatools--require-string command "command")
-  (when directory
-    (gptel-yatools--require-string directory "directory"))
   (gptel-yatools--update-tool-status " Executing command..." 'mode-line-emphasis)
   (gptel-yatools-shell--run-command command directory))
 
@@ -218,57 +216,16 @@ process and polls it instead."
 ;; gptel renders a pending tool call with `gptel--format-tool-call', which
 ;; truncates every string argument at 256 characters.  For `execute_command'
 ;; that is the wrong failure: a command is approved on its text, so a long
-;; one could be approved on a harmless prefix.  gptel offers
-;; `gptel--tool-preview-alist' for exactly this -- a tool-specific renderer
-;; in place of the default -- and it is registered here.
+;; one could be approved on a harmless prefix.
 ;;
-;; The registration is guarded: the variable is gptel's, so a gptel that
-;; stops defining it simply falls back to the default rendering, which is
-;; truncated but not wrong in the way a missing prompt would be.
+;; The fix used to live here, as a renderer written by hand and registered
+;; against `gptel--tool-preview-alist'.  It is now the `:preview' line of
+;; the definition above, which is where the argument order it has to agree
+;; with is declared -- see `gptel-yatools--preview-line' in
+;; `gptel-yatools-common.el'.  Keeping it there means adding an argument
+;; cannot leave the confirmation reading the wrong position, which is
+;; exactly what it did once.
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools-shell--confirmation-text (args)
-  "Return ARGS as the one-line confirmation for an `execute_command' call.
-
-ARGS is the positional argument list gptel passes to the tool, in the
-order the tool declares its arguments: COMMAND, DIRECTORY and the
-optional TIMEOUT that every tool gets.  It is not the plist the model's
-call arrives in, so it must be read positionally.
-
-The command is shown in full -- that is the point of this function --
-with control characters written as <U+XXXX> so that a command spanning
-lines cannot add lines that read like the rest of the prompt.  The
-directory and a per-call timeout are named too, because both are part
-of what will run."
-  (let ((command (nth 0 args))
-        (directory (nth 1 args))
-        (timeout (nth 2 args)))
-    (concat "(execute_command "
-            (prin1-to-string
-             (gptel-yatools--printable-string
-              (if (stringp command) command (format "%s" command))))
-            (if (and (stringp directory) (not (string-empty-p directory)))
-                (format " directory=%s"
-                        (prin1-to-string
-                         (gptel-yatools--printable-string directory)))
-              "")
-            (if (and timeout (not (eq timeout :json-false)))
-                (format " timeout=%s"
-                        (gptel-yatools--resolve-timeout timeout))
-              "")
-            ")\n")))
-
-(defun gptel-yatools-shell--insert-command-preview (args _info)
-  "Insert the full command for ARGS into gptel's confirmation prompt.
-
-Called by gptel as a preview-setup function; returns nil because there
-is nothing to tear down -- the text lives in the prompt the confirmation
-already deletes."
-  (insert (gptel-yatools-shell--confirmation-text args))
-  nil)
-
-(when (boundp 'gptel--tool-preview-alist)
-  (setf (alist-get "execute_command" gptel--tool-preview-alist nil nil #'equal)
-        (list #'gptel-yatools-shell--insert-command-preview)))
 
 (provide 'gptel-yatools-shell)
 ;;; gptel-yatools-shell.el ends here

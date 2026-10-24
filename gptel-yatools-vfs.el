@@ -2061,7 +2061,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
   :args '((:name "path"
                  :type string
                  :description "Path to read, relative to the workspace root or absolute."))
-  (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
          (read (gptel-yatools-vfs-read full))
          (kind (plist-get read :kind)))
@@ -2102,7 +2101,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
           (:name "lines"
                  :type integer
                  :description "Number of lines to read."))
-  (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
          (read (gptel-yatools-vfs-read full))
          (content (plist-get read :text)))
@@ -2153,7 +2151,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
           (:name "regex"
                  :type string
                  :description "Emacs regular expression to match against each line."))
-  (gptel-yatools--require-string path "path")
   (let* ((full (gptel-yatools--resolve-path path))
          (read (gptel-yatools-vfs-read full))
          (content (plist-get read :text))
@@ -2222,7 +2219,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :type string
                  :description "Optional Emacs coding system to write the file with on sync, e.g. \"utf-8\" or \"utf-8-dos\". Use this to convert a file to another encoding when the new content needs characters the current encoding cannot represent."
                  :optional t))
-  (gptel-yatools--require-string path "path")
   (let* ((written (gptel-yatools-vfs-write (gptel-yatools--resolve-path path)
                                            content overwrite coding))
          (full (plist-get written :full)))
@@ -2260,9 +2256,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :type string
                  :description "Optional Emacs coding system to write the file with on sync, e.g. \"utf-8\". Use this to convert the file to another encoding when the edit needs characters the current encoding cannot represent."
                  :optional t))
-  (gptel-yatools--require-string path "path")
-  (gptel-yatools--require-string old_string "old_string")
-  (gptel-yatools--require-string new_string "new_string")
   (let* ((edited (gptel-yatools-vfs-edit (gptel-yatools--resolve-path path)
                                          old_string new_string overwrite coding))
          (full (plist-get edited :full)))
@@ -2287,8 +2280,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :type string
                  :description "Optional path to sync. If omitted, sync all pending non-conflicting VFS changes."
                  :optional t))
-  (when path
-    (gptel-yatools--require-string path "path"))
   (gptel-yatools-vfs--render-sync
    (gptel-yatools-vfs-sync (and path (gptel-yatools--resolve-path path)))))
 
@@ -2309,8 +2300,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :type integer
                  :description "Optional number of diff lines to return, defaulting to the response line limit."
                  :optional t))
-  (when path
-    (gptel-yatools--require-string path "path"))
   (let* ((changed (gptel-yatools-vfs-pending-paths))
          (selected (if path
                        (let ((full (gptel-yatools--resolve-path path)))
@@ -2374,8 +2363,6 @@ review could otherwise run against a fresh, empty table and sync nothing."
                  :type string
                  :description "Optional path to discard. If omitted, discard all pending VFS changes."
                  :optional t))
-  (when path
-    (gptel-yatools--require-string path "path"))
   (let ((discarded (gptel-yatools-vfs-discard-pending
                     (and path (gptel-yatools--resolve-path path)))))
     (cond

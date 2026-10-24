@@ -962,8 +962,6 @@ Use `file' together with `name' to read one of the files the skill lists, such a
                  :type string
                  :description "Optional file inside the named skill, relative to the skill directory, e.g. \"references/REFERENCE.md\". Requires `name'."
                  :optional t))
-  (when name (gptel-yatools--require-string name "name"))
-  (when file (gptel-yatools--require-string file "file"))
   (let* ((present (and (stringp name) (not (string-empty-p (string-trim name)))))
          (found (gptel-yatools-skills--discover))
          (outcome (and present (gptel-yatools-skills-resolve found name))))

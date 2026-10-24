@@ -1812,21 +1812,24 @@ what you are asked."
   "Split TARGETS into what can be synced and what cannot.
 
 TARGETS is a list of paths with pending changes.  Returns a plist of
-:conflicts (changed on disk since the VFS captured them), :blocked
-\(alist of PATH . REASON for files that cannot be written right now) and
-:syncable (the rest, in their original order).
+:conflicts (alist of PATH . REASON, for files that changed on disk since
+the VFS captured them), :blocked (alist of PATH . REASON for files that
+cannot be written right now) and :syncable (the rest, in their original
+order).
 
-Every file is classified by `--refusal', so the set shown to the user,
-the reasons printed beside each file, and the set the write will accept
-all come from one answer.  Splitting conflicts out is only a matter of
-which section of the report they appear in, not a second opinion about
-whether they can be written."
+Every file is classified by `--refusal', and the reason it gives is
+carried out of here rather than asked for again: the set shown to the
+user, the reason printed beside each file, and the set the write will
+accept all come from one answer.  That is why conflicts are an alist and
+not a bare list of paths -- a caller that wants only the paths takes the
+cars, and one that wants to say why does not have to re-read the disk to
+find out."
   (let (conflicts blocked syncable)
     (dolist (file targets)
       (let ((refusal (gptel-yatools-vfs-refusal file)))
         (pcase (plist-get refusal :kind)
           ('nil (push file syncable))
-          (:conflict (push file conflicts))
+          (:conflict (push (cons file (plist-get refusal :reason)) conflicts))
           (_ (push (cons file (plist-get refusal :reason)) blocked)))))
     (list :conflicts (nreverse conflicts)
           :blocked (nreverse blocked)
@@ -1904,14 +1907,15 @@ review could otherwise run against a fresh, empty table and sync nothing."
       (list :status :no-target :requested path))
      (t
       (let* ((partition (gptel-yatools-vfs--sync-partition targets))
-             (conflicts (plist-get partition :conflicts))
+             (conflict-entries (plist-get partition :conflicts))
+             (conflicts (mapcar #'car conflict-entries))
              (blocked (plist-get partition :blocked))
              (syncable (plist-get partition :syncable))
-             (skipped (append blocked
-                              (mapcar (lambda (file)
-                                        (cons file (plist-get (gptel-yatools-vfs-refusal file)
-                                                              :reason)))
-                                      conflicts)))
+             ;; Both halves of what will not be synced, as the alist the
+             ;; review wants: the reasons came out of the partition, so
+             ;; nothing here asks the refusal a second question about a
+             ;; file it has already answered for.
+             (skipped (append blocked conflict-entries))
              (approval (and syncable
                             (gptel-yatools-vfs--sync-approve
                              syncable skipped review))))
@@ -1931,33 +1935,62 @@ review could otherwise run against a fresh, empty table and sync nothing."
                             (gptel-yatools-vfs--sync-write syncable)))
                  (synced (car written))
                  (failed (cdr written))
-                 (left (length conflicts))
-                 (not-written (+ (length blocked) (length failed))))
-            (cond
-             ;; Nothing could even be attempted.
-             ((and (null synced) (null failed) (null conflicts) blocked)
-              (message "gptel: nothing synced — %d file(s) blocked."
-                       (length blocked)))
-             ((and (null synced) (null failed) (null blocked) conflicts)
-              (message "gptel: nothing synced — %d file(s) conflict with disk."
-                       left))
-             ((or conflicts failed blocked)
-              (message "gptel: synced %d file(s); %d NOT synced (conflicts: %d, blocked: %d, failed: %d). See the tool result for details."
-                       (length synced) (+ left not-written)
-                       left (length blocked) (length failed))))
-            (list :status :done :requested path
-                  :synced synced :conflicts conflicts
-                  :blocked blocked :failed failed)))))))))
+                 (outcome (list :status :done :requested path
+                                :synced synced :conflicts conflicts
+                                :blocked blocked :failed failed)))
+            ;; Someone is watching this happen, and the tool reply is the
+            ;; one report they may never read.
+            (when-let* ((line (gptel-yatools-vfs--sync-message outcome)))
+              (message "%s" line))
+            outcome))))))))
 
 
 ;;-------------------------------------------------------------------------
-;; The sync tool's rendering
+;; The sync report: one composition, two adapters
 ;;
-;; `gptel-yatools-vfs-sync' decides what happens; this turns its outcome into
-;; the reply the model reads.  Keeping the two apart is what lets the sync
-;; operation be tested by calling it, instead of by pretending to be a user
-;; looking at a diff.
+;; `gptel-yatools-vfs-sync' decides what happens; what happened is a
+;; four-part answer (synced, conflicts, blocked, failed) with a count in
+;; each part.  Two things read that answer -- the reply the model gets and
+;; the line the user sees in the echo area -- and they need different
+;; amounts of it, not different versions of it.
+;;
+;; So the outcome is composed once into sections, and each reader adapts
+;; the sections: the reply renders every section in full, the echo area
+;; renders the counts.  A section added here reaches both without either
+;; one being taught about it, and the two cannot disagree about what
+;; happened, because there is only one account of what happened.
 ;;-------------------------------------------------------------------------
+(defun gptel-yatools-vfs--sync-report (outcome)
+  "Return OUTCOME's four parts as sections, in the order they are read.
+
+Each section is a plist with a :kind -- `:synced', `:conflicts',
+`:blocked' or `:failed' -- and either :paths (files written) or :entries
+\(an alist of PATH . REASON).  An empty part is left out rather than
+kept with no entries, so a report with one kind of problem reads as one
+section and not as four with three blanks."
+  (let ((synced (plist-get outcome :synced))
+        (conflicts (plist-get outcome :conflicts))
+        (blocked (plist-get outcome :blocked))
+        (failed (plist-get outcome :failed))
+        (sections nil))
+    (when synced (push (list :kind :synced :paths synced) sections))
+    (when conflicts (push (list :kind :conflicts :paths conflicts) sections))
+    (when blocked (push (list :kind :blocked :entries blocked) sections))
+    (when failed (push (list :kind :failed :entries failed) sections))
+    (nreverse sections)))
+
+(defun gptel-yatools-vfs--sync-entries (section)
+  "Return SECTION's files: a list of paths or an alist of PATH . REASON."
+  (or (plist-get section :paths) (plist-get section :entries)))
+
+(defun gptel-yatools-vfs--sync-count (sections kind)
+  "Return how many files SECTIONS reports for KIND."
+  (if-let* ((section (cl-find kind sections
+                              :key (lambda (section) (plist-get section :kind))
+                              :test #'eq)))
+      (length (gptel-yatools-vfs--sync-entries section))
+    0))
+
 (defun gptel-yatools-vfs--sync-file-list (paths)
   "Return PATHS as an indented, one-per-line list of display paths."
   (mapconcat (lambda (file)
@@ -1972,14 +2005,57 @@ review could otherwise run against a fresh, empty table and sync nothing."
                        (cdr pair)))
              pairs "\n"))
 
+(defun gptel-yatools-vfs--sync-section-text (section)
+  "Return SECTION as the block of text the model reads."
+  (let ((entries (gptel-yatools-vfs--sync-entries section)))
+    (pcase (plist-get section :kind)
+      (:synced
+       (format "Synced %d file(s) to disk:\n%s\n"
+               (length entries)
+               (gptel-yatools-vfs--sync-file-list entries)))
+      (:conflicts
+       (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
+               (length entries)
+               (gptel-yatools-vfs--sync-file-list entries)))
+      (:blocked
+       (format "\nBlocked (%d file(s), NOT synced):\n%s\n"
+               (length entries)
+               (gptel-yatools-vfs--sync-reason-list entries)))
+      (:failed
+       (format "\nFailed (%d file(s), NOT synced):\n%s\n"
+               (length entries)
+               (gptel-yatools-vfs--sync-reason-list entries))))))
+
+(defun gptel-yatools-vfs--sync-message (outcome)
+  "Return what OUTCOME means for the user, as one echo-area line.
+
+The tool reply is not the only reader of a sync, and it is the reader
+that may be skipped: in a chat the user sees the line, and the model sees
+the reply.  Both are built from the same report, so this cannot say
+\"2 blocked\" while the reply says \"1 blocked\".  The value is nil when
+there is nothing to say."
+  (let* ((sections (gptel-yatools-vfs--sync-report outcome))
+         (synced (gptel-yatools-vfs--sync-count sections :synced))
+         (conflicts (gptel-yatools-vfs--sync-count sections :conflicts))
+         (blocked (gptel-yatools-vfs--sync-count sections :blocked))
+         (failed (gptel-yatools-vfs--sync-count sections :failed))
+         (not-synced (+ conflicts blocked failed)))
+    (cond
+     ;; Nothing could even be attempted, and it was for one reason: say
+     ;; that reason instead of a four-part total with three zeroes in it.
+     ((and (null failed) (null conflicts) blocked)
+      (format "gptel: nothing synced — %d file(s) blocked." blocked))
+     ((and (null failed) (null blocked) conflicts)
+      (format "gptel: nothing synced — %d file(s) conflict with disk."
+              conflicts))
+     ((or conflicts blocked failed)
+      (format "gptel: synced %d file(s); %d NOT synced (conflicts: %d, blocked: %d, failed: %d). See the tool result for details."
+              synced not-synced conflicts blocked failed)))))
+
 (defun gptel-yatools-vfs--render-sync (outcome)
   "Render OUTCOME, from `gptel-yatools-vfs-sync', as a tool result."
-  (let* ((status (plist-get outcome :status))
-         (path (plist-get outcome :requested))
-         (synced (plist-get outcome :synced))
-         (conflicts (plist-get outcome :conflicts))
-         (blocked (plist-get outcome :blocked))
-         (failed (plist-get outcome :failed)))
+  (let ((status (plist-get outcome :status))
+        (path (plist-get outcome :requested)))
     (pcase status
       (:nothing
        (gptel-yatools-ok "The virtual filesystem has no pending changes."
@@ -2000,46 +2076,34 @@ review could otherwise run against a fresh, empty table and sync nothing."
           :provenance :vfs
           :comment "Sync rejected by user. VFS still holds the changes.")))
       (:done
-       (cond
-        ;; Nothing could even be attempted, for one reason only: say it
-        ;; plainly instead of printing a four-part report with three empty
-        ;; sections.
-        ((and (null synced) (null failed) (null conflicts) blocked)
-         (gptel-yatools-ok
-          (format "These files could not be synced:\n%s\n"
-                  (gptel-yatools-vfs--sync-reason-list blocked))
-          :provenance :vfs
-          :comment "All pending changes are blocked; nothing synced."))
-        ;; One reason only: say it plainly instead of printing a four-part
-        ;; report with three empty sections.  `blocked' must be empty too,
-        ;; or the blocked files would not be named anywhere.
-        ((and (null synced) (null failed) (null blocked) conflicts)
-         (gptel-yatools-ok
-          (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
-                  (gptel-yatools-vfs--sync-file-list conflicts))
-          :provenance :vfs
-          :comment "All pending changes conflict with disk; nothing synced."))
-        (t
-         (let ((has-problems (or conflicts failed blocked)))
+       (let* ((sections (gptel-yatools-vfs--sync-report outcome))
+              (kinds (mapcar (lambda (section) (plist-get section :kind))
+                             sections))
+              (has-problems (or (plist-get outcome :conflicts)
+                                (plist-get outcome :blocked)
+                                (plist-get outcome :failed))))
+         (cond
+          ;; One kind of problem and nothing else: say it plainly, instead
+          ;; of a four-part report with three empty sections.
+          ((equal kinds '(:blocked))
+           (gptel-yatools-ok
+            (format "These files could not be synced:\n%s\n"
+                    (gptel-yatools-vfs--sync-reason-list
+                     (gptel-yatools-vfs--sync-entries (car sections))))
+            :provenance :vfs
+            :comment "All pending changes are blocked; nothing synced."))
+          ((equal kinds '(:conflicts))
+           (gptel-yatools-ok
+            (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
+                    (gptel-yatools-vfs--sync-file-list
+                     (gptel-yatools-vfs--sync-entries (car sections))))
+            :provenance :vfs
+            :comment "All pending changes conflict with disk; nothing synced."))
+          (t
            (gptel-yatools-ok
             (concat
-             (if synced
-                 (format "Synced %d file(s) to disk:\n%s\n"
-                         (length synced)
-                         (gptel-yatools-vfs--sync-file-list synced))
-               "No files were synced.\n")
-             (when conflicts
-               (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
-                       (length conflicts)
-                       (gptel-yatools-vfs--sync-file-list conflicts)))
-             (when blocked
-               (format "\nBlocked (%d file(s), NOT synced):\n%s\n"
-                       (length blocked)
-                       (gptel-yatools-vfs--sync-reason-list blocked)))
-             (when failed
-               (format "\nFailed (%d file(s), NOT synced):\n%s\n"
-                       (length failed)
-                       (gptel-yatools-vfs--sync-reason-list failed))))
+             (unless (memq :synced kinds) "No files were synced.\n")
+             (mapconcat #'gptel-yatools-vfs--sync-section-text sections ""))
             :provenance (if has-problems :vfs :disk)
             :comment (if has-problems
                          "Sync partial: some files were not synced."

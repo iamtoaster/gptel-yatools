@@ -636,13 +636,19 @@ that was not the one applied."
           (let ((partition (gptel-yatools-vfs--sync-partition
                             (gptel-yatools-vfs-pending-paths))))
             (should (equal (plist-get partition :syncable) (list clean)))
-            (should (equal (plist-get partition :conflicts) (list conflicted)))
+            ;; Conflicts carry the reason they were classified with, so a
+            ;; caller that reports on them does not have to ask again.
+            (should (equal (mapcar #'car (plist-get partition :conflicts))
+                           (list conflicted)))
+            (should (string-match-p
+                     "changed on disk"
+                     (cdr (assq conflicted (plist-get partition :conflicts)))))
             (should (equal (sort (mapcar #'car (plist-get partition :blocked))
                                  #'string-lessp)
                            (sort (list fifo blocked-file) #'string-lessp)))
             ;; The diff and the review both say the same thing about the
             ;; files that will not land.
-            (dolist (file (plist-get partition :conflicts))
+            (dolist (file (mapcar #'car (plist-get partition :conflicts)))
               (should (string-match-p "CONFLICT"
                                       (gptel-yatools-vfs--format-one-diff file))))
             (dolist (file (mapcar #'car (plist-get partition :blocked)))
@@ -1383,6 +1389,12 @@ agrees to something they were never shown."
                         t))))
             (should (equal (car seen) (list good)))
             (should (equal (mapcar #'car (cadr seen)) (list conflicted)))
+            ;; The conflict arrives with the reason it was classified
+            ;; with, so the review never has to ask a second question
+            ;; about a file the partition already answered for.
+            (should (string-match-p
+                     "changed on disk"
+                     (cdr (assq conflicted (cadr seen)))))
             (should (eq (plist-get outcome :status) :done))
             (should (equal (plist-get outcome :synced) (list good)))
             (should (equal (plist-get outcome :conflicts) (list conflicted))))
@@ -2141,6 +2153,39 @@ does not say what the call will do.
        :preview '("no_such_argument")
        :args '((:name "path" :type string :description "Path."))
        (gptel-yatools-ok path)))))
+
+(ert-deftest gptel-yatools-test-sync-report-and-message-agree ()
+  "The echo-area line and the tool reply come from one account.
+
+Both render the same sections, so a sync that writes one file and leaves
+one blocked must say so in both places -- and the rule is checked by
+comparing what each says about the same counts, not by trusting two
+copies of the arithmetic to stay in step."
+  (gptel-yatools-test--in-dir
+    (let ((good (gptel-yatools-test--root-file "agree-good.txt"))
+          (blocked (gptel-yatools-test--root-file "afile/child.txt"))
+          (line nil))
+      (gptel-yatools-test--write good "orig\n")
+      (gptel-yatools-test--write (gptel-yatools-test--root-file "afile") "x\n")
+      (gptel-yatools-test--with-file good "orig\n"
+        (gptel-yatools-vfs-put good "vfs\n")
+        (gptel-yatools-vfs-put blocked "vfs\n")
+        (let ((gptel-yatools-sync-without-review t))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq line (apply #'format fmt args)))))
+            (let* ((outcome (gptel-yatools-vfs-sync))
+                   (reply (gptel-yatools-vfs--render-sync outcome)))
+              (should (eq (plist-get outcome :status) :done))
+              (should (string-match-p "synced 1 file(s)" line))
+              (should (string-match-p "1 NOT synced" line))
+              (should (string-match-p "blocked: 1" line))
+              ;; The same counts, in the reply the model reads.
+              (should (string-match-p "Synced 1 file(s)"
+                                      (gptel-yatools-result-body reply)))
+              (should (string-match-p "blocked"
+                                      (gptel-yatools-result-body reply)))))))
+      (should (equal (gptel-yatools-vfs--disk-content good) "vfs\n")))))
 
 (provide 'gptel-yatools-vfs-tests)
 ;;; gptel-yatools-vfs-tests.el ends here

@@ -106,6 +106,26 @@ direct call needs; gptel's dispatcher, by contrast, takes the struct."
     (unless tool (error "No such tool registered: %s" name))
     tool))
 
+(defun gptel-yatools-test--preview (name arg-plist)
+  "Return the confirmation text gptel would show for a call to NAME.
+
+ARG-PLIST is the call's arguments as gptel receives them from the
+model.  The text is produced by walking exactly the path gptel walks
+when it renders a pending call: `gptel--map-tool-args' turns the plist
+into the positional argument list the tool itself receives, and that
+list -- not the plist -- is what the registered preview-setup function
+is called with.  A preview that reads the plist instead of the list
+renders every argument as nil, which is the failure this helper exists
+to catch."
+  (let* ((spec (gptel-yatools-test--tool-spec name))
+         (setup (car (cdr (assoc name gptel--tool-preview-alist))))
+         (arg-values (gptel--map-tool-args spec arg-plist)))
+    (unless (functionp setup)
+      (error "No preview registered for %s" name))
+    (with-temp-buffer
+      (funcall setup arg-values nil)
+      (buffer-string))))
+
 (defun gptel-yatools-test--raw (file)
   "Return FILE's bytes as a unibyte string."
   (with-temp-buffer

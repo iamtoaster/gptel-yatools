@@ -229,13 +229,19 @@ process and polls it instead."
 (defun gptel-yatools-shell--confirmation-text (args)
   "Return ARGS as the one-line confirmation for an `execute_command' call.
 
-ARGS is the tool call's plist.  The command is shown in full -- that is
-the point of this function -- with control characters written as
-<U+XXXX> so that a command spanning lines cannot add lines that read
-like the rest of the prompt.  The directory is named too, because it is
-part of what runs."
-  (let ((command (plist-get args :command))
-        (directory (plist-get args :directory)))
+ARGS is the positional argument list gptel passes to the tool, in the
+order the tool declares its arguments: COMMAND, DIRECTORY and the
+optional TIMEOUT that every tool gets.  It is not the plist the model's
+call arrives in, so it must be read positionally.
+
+The command is shown in full -- that is the point of this function --
+with control characters written as <U+XXXX> so that a command spanning
+lines cannot add lines that read like the rest of the prompt.  The
+directory and a per-call timeout are named too, because both are part
+of what will run."
+  (let ((command (nth 0 args))
+        (directory (nth 1 args))
+        (timeout (nth 2 args)))
     (concat "(execute_command "
             (prin1-to-string
              (gptel-yatools--printable-string
@@ -244,6 +250,10 @@ part of what runs."
                 (format " directory=%s"
                         (prin1-to-string
                          (gptel-yatools--printable-string directory)))
+              "")
+            (if (and timeout (not (eq timeout :json-false)))
+                (format " timeout=%s"
+                        (gptel-yatools--resolve-timeout timeout))
               "")
             ")\n")))
 

@@ -2010,13 +2010,31 @@ escaped; every other `<` is left readable.
 ;; gptel's default formatter truncates each string argument at 256
 ;; characters, so a long command could be approved on a harmless prefix.
 
+;;
+;; The text is rendered the way gptel renders it: through
+;; `gptel--map-tool-args' and the registered preview function, so that the
+;; shape of the arguments -- a positional list -- is the shape under test.
+
 (ert-deftest gptel-yatools-test-command-confirmation-shows-every-character ()
   "The confirmation line must not be a truncation of the command."
   (let* ((long (concat "echo " (make-string 400 ?a)))
-         (text (gptel-yatools-shell--confirmation-text (list :command long))))
+         (text (gptel-yatools-test--preview "execute_command"
+                                            (list :command long))))
     (should (string-match-p (regexp-quote long) text))
     ;; gptel's default renderer would have ended the argument in "…".
     (should-not (string-match-p "…" text))))
+
+(ert-deftest gptel-yatools-test-command-confirmation-shows-the-command ()
+  "The command the user approves must be the command, not nil.
+
+gptel calls a preview-setup function with the positional argument
+list it would pass to the tool.  Reading that list as a plist -- the
+shape the model's call arrives in -- finds no `:command' key and
+renders `(execute_command nil)', which approves nothing and describes
+nothing."
+  (should (equal (gptel-yatools-test--preview "execute_command"
+                                              (list :command "echo hi"))
+                 "(execute_command \"echo hi\")\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-escapes-a-newline ()
   "A command may span lines; the confirmation must still be one heading.
@@ -2024,16 +2042,28 @@ escaped; every other `<` is left readable.
 A newline in the approved text would let a command add lines that read
 like the rest of gptel's prompt.
 "
-  (should (equal (gptel-yatools-shell--confirmation-text
-                  (list :command "echo one\necho two"))
+  (should (equal (gptel-yatools-test--preview
+                  "execute_command" (list :command "echo one\necho two"))
                  "(execute_command \"echo one<U+000A>echo two\")\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-names-the-directory ()
   "The working directory is part of what is being approved."
   (should (string-match-p
            "directory=\"/tmp/x\""
-           (gptel-yatools-shell--confirmation-text
-            (list :command "ls" :directory "/tmp/x")))))
+           (gptel-yatools-test--preview
+            "execute_command" (list :command "ls" :directory "/tmp/x")))))
+
+(ert-deftest gptel-yatools-test-command-confirmation-names-the-timeout ()
+  "A per-call timeout is part of what will happen, and is shown too.
+
+The timeout is the one optional argument that is not part of the
+command itself: it bounds how long the call may run.  It is declared
+after `directory', so a renderer that reads fixed positions would
+either drop it or print it as the directory."
+  (should (string-match-p
+           "timeout=5"
+           (gptel-yatools-test--preview
+            "execute_command" (list :command "ls" :timeout 5)))))
 
 (ert-deftest gptel-yatools-test-command-confirmation-is-registered ()
   "gptel must be told to use the preview instead of its truncating default."

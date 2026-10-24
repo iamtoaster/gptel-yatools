@@ -2187,5 +2187,64 @@ copies of the arithmetic to stay in step."
                                       (gptel-yatools-result-body reply)))))))
       (should (equal (gptel-yatools-vfs--disk-content good) "vfs\n")))))
 
+(ert-deftest gptel-yatools-test-refusals-carry-their-provenance ()
+  "A refusal must say where the bytes came from, like any other reply.
+
+A binary file that exists only in the VFS is a VFS answer: the model is
+being told about pending content, not about disk.  When refusals were
+signalled, the boundary rendered them with `vfs=\"false\"' -- a false
+statement, and one the model could act on by assuming a `file_sync'
+would change nothing.
+"
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "pending.bin")))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file (unibyte-string 80 78 71 0 1 2))
+          (let ((out (funcall (gptel-yatools-test--tool "read_path") file)))
+            (should (string-match-p "binary file" out))
+            (should (string-match-p "vfs=\"true\"" out)))
+          ;; A path that exists nowhere is a statement about disk.
+          (let ((out (funcall (gptel-yatools-test--tool "read_path")
+                              (gptel-yatools-test--root-file "absent.bin"))))
+            (should (string-match-p "no such file" out))
+            (should (string-match-p "vfs=\"false\"" out))))))))
+
+(ert-deftest gptel-yatools-test-read-path-lists-a-vfs-only-directory ()
+  "The one reader that answers a directory itself must keep doing so.
+
+`read_path' branches on `:directory' and `:missing' before the shared
+dispatch, because a listing is its own answer rather than a refusal --
+and a directory can exist in the VFS alone.
+"
+  (gptel-yatools-test--in-dir
+    (let ((child (gptel-yatools-test--root-file "vfs-only/deep.txt")))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put child "pending\n")
+          (let ((out (funcall (gptel-yatools-test--tool "read_path")
+                              (gptel-yatools-test--root-file "vfs-only"))))
+            (should (string-match-p "deep" out))
+            (should-not (string-match-p "no such file" out))))))))
+
+(ert-deftest gptel-yatools-test-the-file-is-read-before-the-regexp-is-checked ()
+  "A call that is wrong twice is told about the file.
+
+The regexp used to be validated first, so a broken pattern against a
+missing file reported the pattern.  \"There is no such file\" is the
+more useful of the two, and it is the one that matches every other read
+tool's order -- which is now structural: the read happens at the seam
+and the pattern is the body.
+"
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((out (funcall (gptel-yatools-test--tool
+                             "fetch_lines_from_file_using_regex")
+                            (gptel-yatools-test--root-file "absent.txt")
+                            "[")))
+          (should (string-match-p "no such file" out))
+          (should-not (string-match-p "invalid regexp" out)))))))
+
 (provide 'gptel-yatools-vfs-tests)
 ;;; gptel-yatools-vfs-tests.el ends here

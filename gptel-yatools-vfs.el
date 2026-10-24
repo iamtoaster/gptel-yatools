@@ -835,6 +835,44 @@ caller to wrap the call in `ignore-errors' and lose the reason."
                 :size (gptel-yatools-vfs--text-size content)))
          (t (list :kind :text :path full :text content :provenance :disk))))))))
 
+(defun gptel-yatools-vfs--read-refusal (read)
+  "Return READ's reason as the Result a tool can hand to the model.
+
+READ is what `gptel-yatools-vfs-read' returned for a kind that is not
+text.  The provenance is READ's where it has one, because the answer is
+about where the bytes came from; a path that does not exist has none,
+and the refusal is then about disk by default."
+  (gptel-yatools-ok
+   (gptel-yatools-vfs--read-problem read)
+   :provenance (or (plist-get read :provenance) :disk)
+   :comment "Nothing was read."))
+
+(defun gptel-yatools-vfs-with-text (read function)
+  "Call FUNCTION with READ's text and provenance, or return its refusal.
+
+READ is what `gptel-yatools-vfs-read' returned.  FUNCTION is the tool's
+own framing: it is called with the text and where it came from, and
+returns the Result the tool wants to send.  When READ holds no text --
+binary content, a missing path, a directory, a special file, undecodable
+bytes -- FUNCTION is not called at all, and the ready refusal is
+returned instead.
+
+This is the seam the four reading tools cross, and it exists because
+they were each writing the same three-way dispatch: `:text' builds a
+reply, `:binary' calls the binary notice, everything else re-signals the
+read problem.  The dispatch is one answer here; what each tool says
+about the text it got stays its own, which is what makes `read_path'
+able to list a directory instead of refusing it.
+
+Refusals travel as Results rather than as signals so that provenance
+survives them: a binary file that exists only in the VFS is a VFS reply,
+and the error channel the boundary renders hardcodes `vfs=\"false\"'."
+  (pcase (plist-get read :kind)
+    (:text (funcall function (plist-get read :text)
+                    (plist-get read :provenance)))
+    (:binary (gptel-yatools-vfs--binary-notice read))
+    (_ (gptel-yatools-vfs--read-refusal read))))
+
 (defun gptel-yatools-vfs--coding (path coding)
   "Return the coding system a write to PATH should use, given CODING.
 
@@ -2126,14 +2164,11 @@ there is nothing to say."
                  :type string
                  :description "Path to read, relative to the workspace root or absolute."))
   (let* ((full (gptel-yatools--resolve-path path))
-         (read (gptel-yatools-vfs-read full))
-         (kind (plist-get read :kind)))
-    (pcase kind
-      (:text
-       (gptel-yatools-ok (plist-get read :text)
-                         :provenance (plist-get read :provenance)))
-      (:binary
-       (gptel-yatools-vfs--binary-notice read))
+         (read (gptel-yatools-vfs-read full)))
+    (pcase (plist-get read :kind)
+      ;; A directory is the one kind this tool answers differently from
+      ;; every other reader, which is why the branch stays here and the
+      ;; rest goes through `gptel-yatools-vfs-with-text'.
       (:directory
        (let* ((listing (gptel-yatools-vfs--directory-listing full))
               (text (plist-get listing :text)))
@@ -2147,9 +2182,12 @@ there is nothing to say."
            (gptel-yatools-ok
             (plist-get (gptel-yatools-vfs--directory-listing full) :text)
             :provenance :vfs)
-         (error "Path does not exist: %s"
-                (gptel-yatools--display-path full))))
-      (_ (error "%s" (gptel-yatools-vfs--read-problem read))))))
+         (gptel-yatools-vfs--read-refusal read)))
+      (_
+       (gptel-yatools-vfs-with-text
+        read
+        (lambda (text provenance)
+          (gptel-yatools-ok text :provenance provenance)))))))
 
 (gptel-yatools-define-tool gptel-yatools-read-file-from-offset
   :name "read_file_from_offset"
@@ -2166,43 +2204,40 @@ there is nothing to say."
                  :type integer
                  :description "Number of lines to read."))
   (let* ((full (gptel-yatools--resolve-path path))
-         (read (gptel-yatools-vfs-read full))
-         (content (plist-get read :text)))
-    (pcase (plist-get read :kind)
-      (:binary
-       (gptel-yatools-vfs--binary-notice read))
-      (:text
+         (read (gptel-yatools-vfs-read full)))
+    (gptel-yatools-vfs-with-text
+     read
+     (lambda (content provenance)
        (let ((offset (gptel-yatools--coerce-integer offset 1 1))
-            (lines  (gptel-yatools--coerce-integer lines 0 0)))
-        (with-temp-buffer
-          (insert content)
-          ;; `count-lines' counts the lines that exist, not the
-          ;; empty field after a trailing newline.
-          (let ((total (count-lines (point-min) (point-max))))
-            (goto-char (point-min))
-            (forward-line (1- offset))
-            (let* ((beg (point))
-                   (text (progn
-                           (forward-line lines)
-                           (buffer-substring-no-properties
-                            beg (point)))))
-              (gptel-yatools-ok
-               (cond
-                ;; An empty body would read like an empty file,
-                ;; so say what the empty result means.
-                ((not (string-empty-p text)) text)
-                ((zerop lines)
-                 (format "(no lines requested: LINES was 0. %s has %d line(s).)"
-                         (gptel-yatools--display-path full) total))
-                ((> offset total)
-                 (format "(no lines: %s has %d line(s), so offset %d is past the end. Use offset %d or less.)"
-                         (gptel-yatools--display-path full) total offset
-                         (max 1 total)))
-                (t
+             (lines  (gptel-yatools--coerce-integer lines 0 0)))
+         (with-temp-buffer
+           (insert content)
+           ;; `count-lines' counts the lines that exist, not the
+           ;; empty field after a trailing newline.
+           (let ((total (count-lines (point-min) (point-max))))
+             (goto-char (point-min))
+             (forward-line (1- offset))
+             (let* ((beg (point))
+                    (text (progn
+                            (forward-line lines)
+                            (buffer-substring-no-properties
+                             beg (point)))))
+               (gptel-yatools-ok
+                (cond
+                 ;; An empty body would read like an empty file,
+                 ;; so say what the empty result means.
+                 ((not (string-empty-p text)) text)
+                 ((zerop lines)
+                  (format "(no lines requested: LINES was 0. %s has %d line(s).)"
+                          (gptel-yatools--display-path full) total))
+                 ((> offset total)
+                  (format "(no lines: %s has %d line(s), so offset %d is past the end. Use offset %d or less.)"
+                          (gptel-yatools--display-path full) total offset
+                          (max 1 total)))
+                 (t
                  (format "(no text in %s after line %d.)"
                          (gptel-yatools--display-path full) offset)))
-               :provenance (plist-get read :provenance)))))))
-      (_ (error "%s" (gptel-yatools-vfs--read-problem read))))))
+               :provenance provenance)))))))))
 
 (gptel-yatools-define-tool gptel-yatools-fetch-lines-from-file-using-regex
   :name "fetch_lines_from_file_using_regex"
@@ -2216,53 +2251,52 @@ there is nothing to say."
                  :type string
                  :description "Emacs regular expression to match against each line."))
   (let* ((full (gptel-yatools--resolve-path path))
-         (read (gptel-yatools-vfs-read full))
-         (content (plist-get read :text))
-         (regex-error
-          (cond
-           ((not (stringp regex)) "regexp must be a string")
-           (t (condition-case err
+         (read (gptel-yatools-vfs-read full)))
+    ;; The file is read first and the regexp validated second, so a call
+    ;; that is wrong twice -- no such file, and a broken pattern -- is
+    ;; told about the file.  It used to be the other way round, and the
+    ;; ordering was a `cond' clause here rather than a decision about
+    ;; which answer is more useful.
+    (gptel-yatools-vfs-with-text
+     read
+     (lambda (content provenance)
+       (let ((regex-error
+              (condition-case err
                   (progn (string-match-p regex "") nil)
-                (invalid-regexp (error-message-string err)))))))
-    (cond
-     (regex-error
-      (error "Error: invalid regexp %S: %s" regex regex-error))
-     ((eq (plist-get read :kind) :binary)
-      (gptel-yatools-vfs--binary-notice read))
-     ((not (eq (plist-get read :kind) :text))
-      (error "%s" (gptel-yatools-vfs--read-problem read)))
-     (t
-      (with-temp-buffer
-        (insert content)
-        (goto-char (point-min))
-        (let ((line-num 0)
-              (matches '()))
-          ;; Known and deliberate: `string-match-p' honours the ambient
-          ;; `case-fold-search' (t by default), so a regexp with no case
-          ;; construct matches case-insensitively.  A model that wants an
-          ;; exact case writes one into the regexp ([A-Z], \\`...\\'); the
-          ;; alternative -- binding `case-fold-search' here -- would make
-          ;; the tool's matching disagree with Emacs, which is the model's
-          ;; mental model of an "Emacs regexp".  Deferred, not overlooked;
-          ;; see `gptel-yatools-vfs--replace-once', which must be exact and
-          ;; binds it.
-          (while (not (eobp))
-            (setq line-num (1+ line-num))
-            (let ((line (buffer-substring-no-properties
-                         (line-beginning-position)
-                         (line-end-position))))
-              (when (string-match-p regex line)
-                (push (format "%d:%s" line-num line) matches)))
-            (forward-line 1))
-          (gptel-yatools-ok
-           ;; An empty body would be indistinguishable from an
-           ;; empty file, so say that nothing matched.
-           (if matches
-               (mapconcat #'identity (nreverse matches) "\n")
-             (format "(no lines in %s match the regexp %S.)"
-                     (gptel-yatools--display-path full)
-                     regex))
-           :provenance (plist-get read :provenance))))))))
+                (invalid-regexp (error-message-string err)))))
+         (when regex-error
+           (error "Error: invalid regexp %S: %s" regex regex-error))
+         (with-temp-buffer
+           (insert content)
+           (goto-char (point-min))
+           (let ((line-num 0)
+                 (matches '()))
+             ;; Known and deliberate: `string-match-p' honours the ambient
+             ;; `case-fold-search' (t by default), so a regexp with no case
+             ;; construct matches case-insensitively.  A model that wants an
+             ;; exact case writes one into the regexp ([A-Z], \\`...\\'); the
+             ;; alternative -- binding `case-fold-search' here -- would make
+             ;; the tool's matching disagree with Emacs, which is the model's
+             ;; mental model of an "Emacs regexp".  Deferred, not overlooked;
+             ;; see `gptel-yatools-vfs--replace-once', which must be exact and
+             ;; binds it.
+             (while (not (eobp))
+               (setq line-num (1+ line-num))
+               (let ((line (buffer-substring-no-properties
+                            (line-beginning-position)
+                            (line-end-position))))
+                 (when (string-match-p regex line)
+                   (push (format "%d:%s" line-num line) matches)))
+               (forward-line 1))
+             (gptel-yatools-ok
+              ;; An empty body would be indistinguishable from an
+              ;; empty file, so say that nothing matched.
+              (if matches
+                  (mapconcat #'identity (nreverse matches) "\n")
+                (format "(no lines in %s match the regexp %S.)"
+                        (gptel-yatools--display-path full)
+                        regex))
+              :provenance provenance))))))))
 
 (gptel-yatools-define-tool gptel-yatools-write-file
   :name "write_file"

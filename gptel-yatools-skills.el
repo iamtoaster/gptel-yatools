@@ -921,20 +921,17 @@ has been reviewed."
          (format "Error: %S is not a readable file inside the skill directory. Pass a path relative to the skill root, like \"references/REFERENCE.md\" or \"scripts/extract.py\"."
                  file)
          :comment "File is not inside the skill.")
-      (let ((read (gptel-yatools-vfs-read full)))
-        (pcase (plist-get read :kind)
-          (:text
-           (gptel-yatools-ok
-            (format "File: %s\nSkill: %s\n\n%s"
-                    file (plist-get skill :name) (plist-get read :text))
-            :provenance (plist-get read :provenance)
-            :comment "Skill file read."))
-          (:binary
-           (gptel-yatools-vfs--binary-notice read))
-          (_
-           (gptel-yatools-ok
-            (gptel-yatools-vfs--read-problem read)
-            :comment "Unreadable skill file.")))))))
+      ;; Disk only: a file presented as part of a skill is one that exists
+      ;; on disk, for the same reason `SKILL.md' is -- a pending copy has
+      ;; not been reviewed, so it is not in force yet.
+      (gptel-yatools-vfs-with-text
+       (gptel-yatools-vfs-read full t)
+       (lambda (text provenance)
+         (gptel-yatools-ok
+          (format "File: %s\nSkill: %s\n\n%s"
+                  file (plist-get skill :name) text)
+          :provenance provenance
+          :comment "Skill file read."))))))
 
 ;;-------------------------------------------------------------------------
 ;; The tool

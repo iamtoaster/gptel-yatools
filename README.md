@@ -238,7 +238,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-222 ERT tests, no network, no prompts, every one of them in a throwaway temp
+225 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

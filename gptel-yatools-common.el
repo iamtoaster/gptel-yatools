@@ -56,12 +56,16 @@
 ;;             `--with-deadline-suspended' for the one field that moves.
 ;;             Everything a call settles once -- root, deadline, the pause
 ;;             for a user who is reading a diff -- is asked for here.
+;;             The argument checks run just inside it, generated from the
+;;             tool's `:args', so a wrong-typed value is refused with an
+;;             envelope and a sentence rather than a raw condition.
 ;;
-;;   define    `gptel-yatools-define-tool', which writes the implementation
-;;             and the boundary from one definition and registers the tool,
-;;             and `gptel-yatools-enable' / `-enable-all', which decide what
-;;             is sent.  The definition is the only place a tool's name,
-;;             arguments and model-facing description are written down.
+;;   define    `gptel-yatools-define-tool', which writes the implementation,
+;;             the boundary and the preview from one definition and
+;;             registers the tool, and `gptel-yatools-enable' /
+;;             `-enable-all', which decide what is sent.  The definition is
+;;             the only place a tool's name, arguments, model-facing
+;;             description and confirmation are written down.
 ;;
 ;; See the README for the tool list and for installation instructions.
 

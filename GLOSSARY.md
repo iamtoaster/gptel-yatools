@@ -146,7 +146,9 @@ _Avoid_: Response builder, wrapper, formatter
 The single form that writes both halves and registers the tool, so that
 the tool's model-facing description, its argument list and its Lisp
 functions cannot drift apart.  `C-h f` on a tool shows the description the
-model reads, generated from it.
+model reads, generated from it.  The same argument list is what the
+boundary checks values against, and what the preview reads positions
+from, so a tool's arguments are stated once and every half follows.
 
 ### Pending changes
 
@@ -207,6 +209,13 @@ string, so a tool can turn each case into its own message while the
 wording of a refusal is written once.  It owns the binary policy: a tool
 never decides for itself whether content is text, and never builds its
 own notice.
+
+A tool does not ask it the three-way question itself: it crosses
+`gptel-yatools-vfs-with-text', which calls the tool's own framing when
+there is text and returns the ready refusal when there is not.  So the
+dispatch is written once, and a refusal travels as a Result -- with the
+provenance it was read with -- rather than as a signal that would be
+rendered as a statement about disk.
 _Avoid_: Read helper, file loader
 
 **Refusal**:
@@ -216,5 +225,26 @@ other reason) and a reason in words.  Every consumer asks it -- the
 partition that decides what the review shows, the diff header that says
 so per file, and the write itself, which asks again because a review can
 sit open for minutes.  One answer is what makes the set the user
-approves the set that is applied.
+approves the set that is applied.  The partition carries the reason out
+with the path, so nobody asks a second time for what it was just told.
 _Avoid_: Sync blocker, check, validation
+
+**Sync report**:
+What a sync did, composed once: sections in the order they are read --
+synced, conflicts, blocked, failed -- each holding paths or (path .
+reason) entries.  The tool reply renders every section and the echo-area
+line renders the counts, so the two adapters cannot disagree about the
+same sync; an empty section is left out rather than printed as a blank.
+_Avoid_: Sync summary, sync result (that is the outcome, not its
+composition)
+
+**Preview**:
+The one-line confirmation gptel shows for a pending tool call, built
+from the tool's own `:preview' declaration and its `:args', so the
+arguments are read by name in the positions the definition states.  It
+exists because gptel's default formatter truncates every string argument
+at 256 characters: a command could otherwise be approved on a harmless
+prefix.  Every value is printed through the printable-text rule, so a
+command spanning lines cannot add lines that read like the rest of the
+prompt.
+_Avoid_: Confirmation prompt, tool-call renderer

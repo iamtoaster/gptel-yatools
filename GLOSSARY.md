@@ -20,11 +20,12 @@ _Avoid_: Skill path, skill location
 
 **Skill handle**:
 The name a skill is shown and called by.  It is the bare name unless that
-name occurs under more than one root, in which case it is the skill's path
-relative to its root -- and if that path occurs under more than one root
-too, the path followed by the root in parentheses.  Discovery decides it
-once and stores it on the skill, so nothing else has to work out which
-names are ambiguous, and every handle names exactly one skill.
+name occurs more than once, in which case it is the skill's path relative
+to its root -- and if that path occurs under more than one root too, or
+is the bare name itself (the skill sits directly in its root), the path
+followed by the root in parentheses.  Discovery decides it once and
+stores it on the skill, so nothing else has to work out which names are
+ambiguous, and every handle names exactly one skill.
 _Avoid_: Skill id, qualified name
 
 **Skill catalog**:

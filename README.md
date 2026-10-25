@@ -192,8 +192,10 @@ loads the intended one; the bare name then reports the candidates instead of
 picking one.  Two roots holding the same path would still collide, so a handle
 that is itself ambiguous gains its root in parentheses —
 `engineering/code-review (/path/to/root)` — and that whole line is the name to
-call it by.  A skill's absolute directory works as a name too, which is what
-the loaded skill's `Directory:` line hands the model.
+call it by.  A skill that sits directly in its root has no path of its own to
+show, so it gains the root in parentheses too: `review (/path/to/root)`.  A
+skill's absolute directory works as a name too, which is what the loaded
+skill's `Directory:` line hands the model.
 
 The scan is cheap after the first call: the directories are walked every
 time, so a skill added or removed is noticed immediately, but the YAML
@@ -238,7 +240,7 @@ the indicator reflects `gptel-context`, not a copy.
 
 ## Tests
 
-231 ERT tests, no network, no prompts, every one of them in a throwaway temp
+237 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

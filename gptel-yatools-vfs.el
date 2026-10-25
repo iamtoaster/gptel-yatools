@@ -398,12 +398,19 @@ indistinguishable from one of a directory that is entirely on disk,
 which is how a merged reply came to be described as a description of
 disk.
 
+An entry that disk has caught up with is neither: it shadows nothing, so
+it contributes no note and is dropped on the way out, exactly as
+`gptel-yatools-vfs-pending' drops it when it is asked about one file.
+A listing that kept such an entry would tell the model a change was
+pending while `vfs_diff' said there was none.
+
 Returns a plist of :text and :pending (non-nil when any line carries a
 note), so the caller can say which provenance the reply has instead of
 guessing."
   (let* ((full-dir (file-name-as-directory (expand-file-name full)))
          (entries (make-hash-table :test #'equal))
-         (pending nil))
+         (pending nil)
+         (stale nil))
     ;; Disk entries.  `directory-files' signals a raw `file-error'
     ;; for an unreadable directory or one deleted between the checks
     ;; above; turn that into a readable tool error instead.
@@ -420,27 +427,32 @@ guessing."
                 (error-message-string err)))))
     ;; VFS entries (including nested ones).  One VFS key may be a file
     ;; whose disk twin is already listed, which is what `(pending
-    ;; change)' marks.
+    ;; change)' marks.  The comparison reads disk, so it must not change
+    ;; the table under `maphash': a caught-up entry is collected here and
+    ;; reaped after the walk.
     (maphash
      (lambda (path _entry)
        (when (and (string-prefix-p full-dir path)
                   (> (length path) (length full-dir)))
-         (let* ((rel   (substring path (length full-dir)))
-                (slash (cl-position ?/ rel :test #'char-equal))
-                (name  (if slash (substring rel 0 slash) rel))
-                (type  (if slash "dir" "file"))
-                (on-disk (gethash name entries)))
-           (setq pending t)
-           (puthash name
-                    (cond
-                     ((null on-disk) (cons type "(pending)"))
-                     ;; An existing disk name whose content a pending
-                     ;; write shadows: the entry is real, its content is
-                     ;; not what disk holds.
-                     ((equal on-disk type) (cons type "(pending change)"))
-                     (t (cons type "(pending)")))
-                    entries))))
+         (if (not (gptel-yatools-vfs--changed-p path))
+             (push path stale)
+           (let* ((rel   (substring path (length full-dir)))
+                  (slash (cl-position ?/ rel :test #'char-equal))
+                  (name  (if slash (substring rel 0 slash) rel))
+                  (type  (if slash "dir" "file"))
+                  (on-disk (gethash name entries)))
+             (setq pending t)
+             (puthash name
+                      (cond
+                       ((null on-disk) (cons type "(pending)"))
+                       ;; An existing disk name whose content a pending
+                       ;; write shadows: the entry is real, its content is
+                       ;; not what disk holds.
+                       ((equal on-disk type) (cons type "(pending change)"))
+                       (t (cons type "(pending)")))
+                      entries)))))
      (gptel-yatools-vfs--table))
+    (gptel-yatools-vfs--reap stale)
     (let (lines)
       (maphash (lambda (name value)
                  (let ((type (if (consp value) (car value) value))
@@ -1649,11 +1661,19 @@ test, and a target that is no longer a regular file is caught before
 `write-region' blocks on it forever."
   (let ((entry-coding (gptel-yatools-vfs--entry-coding full))
         (content (or (plist-get (gptel-yatools-vfs-entry full) :content) ""))
-        (existing (get-file-buffer full)))
+        (existing (get-file-buffer full))
+        (policy (gptel-yatools-vfs--write-policy-refusal full)))
     (cond
      ((gptel-yatools-vfs--conflict-p full)
       (list :kind :conflict
             :reason "changed on disk since the VFS captured it"))
+     ;; Asked again here, and not only when the write was buffered: the
+     ;; review can sit open for minutes, and it is this function's answer
+     ;; the write itself acts on.  Without it a pending entry created
+     ;; before its target was protected would be written to disk by a
+     ;; sync the policy had already lost the chance to refuse.
+     (policy
+      (list :kind :blocked :reason policy))
      ((let ((ancestor (gptel-yatools-vfs--file-ancestor full)))
         (and ancestor
              (list :kind :blocked
@@ -2388,6 +2408,15 @@ The counts are numbers, so every question here is asked with `zerop' or
   (gptel-yatools-vfs--render-sync
    (gptel-yatools-vfs-sync (and path (gptel-yatools--resolve-path path)))))
 
+(defconst gptel-yatools-vfs--diff-banner-reserve 400
+  "Characters reserved for `vfs_diff''s banner when it pages a diff.
+
+The banner is prepended to the page, and the boundary's size limit counts
+both.  Reserving room for it keeps the promise `gptel-yatools-page' makes
+-- that the envelope cannot cut a page after the tool has said what it
+showed -- so the number is the length of the longest banner plus slack,
+not the length of a typical one.")
+
 (gptel-yatools-define-tool gptel-yatools-vfs-diff
   :name "vfs_diff"
   :category "filesystem"
@@ -2426,7 +2455,14 @@ The counts are numbers, so every question here is asked with `zerop' or
                       diff-text
                       (gptel-yatools--coerce-integer offset 1 1)
                       (gptel-yatools--coerce-integer
-                       lines (- gptel-yatools--output-line-limit 10) 1)))
+                       lines (- gptel-yatools--output-line-limit 10) 1)
+                      ;; Room for the banner below.  It is added to the
+                      ;; page, so the envelope's size limit counts it: a
+                      ;; page that used the whole budget left the banner
+                      ;; to push the reply over the limit, and the
+                      ;; truncation cut the last line the page had just
+                      ;; claimed to show.
+                      gptel-yatools-vfs--diff-banner-reserve))
              (start (plist-get paging :start))
              (end (plist-get paging :end))
              (total (plist-get paging :total))

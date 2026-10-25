@@ -341,6 +341,23 @@ the just-compiled modules rather than the source ones."
     (should (cl-find "execute_command" gptel-tools
                      :key #'gptel-tool-name :test #'equal))))
 
+(ert-deftest gptel-yatools-test-enable-changes-the-default-not-a-buffer-local-value ()
+  "Enabling sets the default `gptel-tools', keeping a buffer's own value.
+
+This is what lets a chat buffer that picked its tools in `gptel-menu'
+keep them when the user runs the enable command from elsewhere, and it
+is what the docstring says: `customize-set-variable' changes the
+default, so a buffer with a buffer-local value keeps it."
+  (let ((gptel-tools nil))
+    (with-temp-buffer
+      (setq-local gptel-tools (list (gptel-get-tool "read_path")))
+      (gptel-yatools-enable "shell")
+      ;; The buffer's own choice is untouched...
+      (should (equal (mapcar #'gptel-tool-name gptel-tools) '("read_path")))
+      ;; ...while the default, which a fresh buffer inherits, has it.
+      (should (cl-find "execute_command" (default-value 'gptel-tools)
+                       :key #'gptel-tool-name :test #'equal)))))
+
 
 ;;;; 45. A trailing newline was counted as an extra line
 
@@ -1145,6 +1162,30 @@ model believe a VFS-only file already existed."
         (let ((out (funcall (gptel-yatools-test--tool "read_path") ".")))
           (should (string-match-p "file\tf\\.txt\t(pending change)" out))
           (should (string-match-p "vfs=\"true\"" out)))))))
+
+(ert-deftest gptel-yatools-test-directory-listing-does-not-mark-a-stale-entry ()
+  "A directory listing must not call an entry pending once disk caught up.
+
+The listing merges the VFS table, which keeps an entry until something
+asks whether it still differs from disk.  Marking such an entry
+\"(pending change)\" told the model there was a change to sync while
+`vfs_diff' reported none -- and the entry then stayed in the table
+shadowing nothing, which is exactly what the pending-change module
+promises will not happen."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "f.txt")))
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          ;; The disk catches up behind the VFS's back.
+          (gptel-yatools-test--write file "new\n")
+          (let ((out (funcall (gptel-yatools-test--tool "read_path") ".")))
+            (should-not (string-match-p "(pending" out))
+            (should (string-match-p "vfs=\"false\"" out))
+            (should (string-match-p "file\tf\\.txt$" out)))
+          ;; The stale entry is dropped, not left in the table.
+          (should-not (gptel-yatools-vfs-entry file)))))))
 
 (ert-deftest gptel-yatools-test-a-wrong-shaped-result-is-reported-not-signalled ()
   "A tool returning something that is not a result must not kill the call.

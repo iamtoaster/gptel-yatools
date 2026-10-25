@@ -760,6 +760,67 @@ again -- so neither skill could be loaded by name at all."
                             (directory-file-name (plist-get skill :directory)))
                            out)))))))))))
 
+(ert-deftest gptel-yatools-skills-test-bare-name-is-ambiguous-even-at-the-top-level ()
+  "A duplicated name must never be resolved to the skill that sits at the root.
+
+The top-level skill's relative path is its bare name, so its handle was
+the bare name too -- and a lookup that tried handles first answered the
+ambiguous name with that one skill.  The index said the name matched two
+skills; the call silently loaded one, and the other candidate was never
+shown."
+  (gptel-yatools-test--in-dir
+    (let ((root (gptel-yatools-test--root-file "skills")))
+      (gptel-yatools-skills-test--skill root "rev")
+      (gptel-yatools-skills-test--skill root "grp/rev")
+      (gptel-yatools-skills-test--indexed root
+        (let* ((skills (plist-get (gptel-yatools-skills--discover) :skills))
+               (handles (mapcar #'gptel-yatools-skills-handle skills)))
+          ;; Two skills, two handles, and neither is the bare name.
+          (should (= 2 (length skills)))
+          (should (= 2 (length (delete-dups (copy-sequence handles)))))
+          (should-not (member "rev" handles))
+          ;; The bare name reports the candidates instead of picking one.
+          (let ((out (gptel-yatools-skills-test--call "rev")))
+            (should (string-match-p "matches 2 skills" out))
+            (dolist (handle handles)
+              (should (string-match-p (regexp-quote handle) out))))
+          ;; Every handle -- the root-qualified one included -- loads its
+          ;; own skill.
+          (dolist (skill skills)
+            (let ((out (gptel-yatools-skills-test--call
+                        (gptel-yatools-skills-handle skill))))
+              (should (string-match-p
+                       (regexp-quote
+                        (directory-file-name (plist-get skill :directory)))
+                       out)))))))))
+
+(ert-deftest gptel-yatools-skills-test-listing-command-shows-broken-roots ()
+  "A root that failed must be visible in the browser, not only in the tool.
+
+`tabulated-list-init-header' replaces `header-line-format' with its own
+column headings, so the notes set before it were dropped and a broken
+root looked exactly like a healthy one holding fewer skills."
+  (gptel-yatools-test--in-dir
+    (let ((root (gptel-yatools-test--root-file "skills")))
+      (gptel-yatools-skills-test--skill root "found")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-skills-test--with-roots
+              (list root (lambda () (error "root is broken")))
+            (gptel-yatools-skills)
+            (unwind-protect
+                (with-current-buffer "*gptel skills*"
+                  (should (string-match-p "found" (buffer-string)))
+                  ;; `format-mode-line' cannot render a header line in
+                  ;; batch (it returns ""), so the format is searched
+                  ;; through its printed form instead: the note has to be
+                  ;; *in* the format for the user to see it at all.
+                  (should (string-match-p
+                           "root is broken"
+                           (prin1-to-string header-line-format))))
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer "*gptel skills*")))))))))
+
 (ert-deftest gptel-yatools-skills-test-payload-matches-what-the-tool-returns ()
   "The manual payload must be what the tool would have returned."
   (gptel-yatools-test--in-dir

@@ -204,6 +204,36 @@ binds it buffer-locally on purpose."
                 (should (string-match-p "^-two" (buffer-string))))
             (kill-buffer buf)))))))
 
+(ert-deftest gptel-yatools-test-vfs-diff-page-is-not-truncated-by-the-envelope ()
+  "A paged diff must reach the model whole, banner included.
+
+The page filled the size budget exactly and the banner was prepended
+afterwards, so the reply went over the limit and the boundary cut it
+-- dropping the tail of the last line the page had just claimed to
+show, and appending a truncation note that contradicted the banner's
+own \"lines 1-N of M\"."
+  (skip-unless (executable-find "diff"))
+  (gptel-yatools-test--in-dir
+    (let* ((file (gptel-yatools-test--root-file "wide.txt"))
+           (lines (mapconcat (lambda (n) (format "%04d %s" n (make-string 95 ?a)))
+                             (number-sequence 1 900) "\n")))
+      (gptel-yatools-test--write file (concat lines "\n"))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put
+           file (concat (replace-regexp-in-string "^[0-9]+ " "XXXX " lines) "\n"))
+          (let* ((out (funcall (gptel-yatools-test--tool "vfs_diff")))
+                 (body (let ((start (string-match "\n<tool_response>\n" out))
+                             (end (string-match "\n</tool_response>\\'" out)))
+                         (substring out (+ start (length "\n<tool_response>\n"))
+                                    end)))
+                 (last-line (car (last (split-string body "\n" t)))))
+            (should (string-match-p "PARTIAL DIFF" out))
+            ;; Nothing was cut: no truncation note, and the reply ends
+            ;; with a whole diff line rather than the middle of one.
+            (should-not (string-match-p "truncated" out))
+            (should (string-suffix-p (make-string 95 ?a) last-line))))))))
+
 (ert-deftest gptel-yatools-test-sync-preview-new-file-has-hunk ()
   "A brand-new file must render a real hunk, not a bare header."
   (gptel-yatools-test--in-dir
@@ -2056,6 +2086,34 @@ escaped; every other `<` is left readable.
                      "Wrote"
                      (funcall (gptel-yatools-test--tool "write_file")
                               file "nil\n")))))))))
+
+(ert-deftest gptel-yatools-test-sync-asks-the-write-policy-again ()
+  "A sync must re-ask the write policy, not trust the write that filled the VFS.
+
+The policy is what keeps a write away from the Emacs startup files, the
+package's own source and `.dir-locals.el'.  It was asked when the
+pending entry was created, but the review can sit open for minutes and
+the policy -- or the directories on the way to the target -- can change
+meanwhile.  `--refusal' is the one answer to \"can this file be written
+right now?\", so it is where the question belongs."
+  (gptel-yatools-test--in-dir
+    (let* ((dir (gptel-yatools-test--root-file "protected"))
+           (file (expand-file-name "f.txt" dir)))
+      (make-directory dir t)
+      (gptel-yatools-test--write file "old\n")
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "new\n")
+          (let ((gptel-yatools-write-denied-directories (list dir)))
+            (should (eq (plist-get (gptel-yatools-vfs-refusal file) :kind)
+                        :blocked))
+            (should (eq (car (gptel-yatools-vfs--sync-one file)) :failed))
+            (let ((outcome (gptel-yatools-vfs-sync nil (lambda (&rest _) t))))
+              (should-not (plist-get outcome :synced))
+              (should (equal (mapcar #'car (plist-get outcome :blocked))
+                             (list file)))))
+          ;; The disk still holds what it held.
+          (should (equal (gptel-yatools-vfs--disk-content file) "old\n")))))))
 
 (ert-deftest gptel-yatools-test-overwrite-on-a-conflict-asks-the-user ()
   "`overwrite' discards the user's work, so the user decides it, not the model."

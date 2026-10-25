@@ -571,17 +571,24 @@ more than once too -- two roots each holding `grp/review' -- it is
 loadable by itself, which is what the third tier buys when two roots
 present the same shape.
 
+A skill sitting directly inside its root is the one case where the
+relative path *is* the bare name, so a root-qualified handle is also
+needed when the relative path holds no separator: without it the handle
+would spell the ambiguous name it was meant to disambiguate, and the
+lookup that refuses that name could never load this skill at all.
+
 The ambiguity tests are done against the whole list before any skill is
 rewritten, so assigning handles cannot change which names or paths are
 ambiguous."
   (let ((ambiguous (gptel-yatools-skills--duplicate-names skills))
         (ambiguous-paths (gptel-yatools-skills--duplicates skills :relative)))
     (mapcar (lambda (skill)
-              (plist-put (copy-sequence skill) :handle
-                         (if (not (member (plist-get skill :name) ambiguous))
-                             (plist-get skill :name)
-                           (let ((relative (plist-get skill :relative)))
-                             (if (member relative ambiguous-paths)
+              (let ((relative (plist-get skill :relative)))
+                (plist-put (copy-sequence skill) :handle
+                           (if (not (member (plist-get skill :name) ambiguous))
+                               (plist-get skill :name)
+                             (if (or (member relative ambiguous-paths)
+                                     (not (string-search "/" relative)))
                                  (format "%s (%s)" relative
                                          (directory-file-name
                                           (plist-get skill :root)))
@@ -597,6 +604,12 @@ plist built by hand in a test, say -- falls back on its `name'."
   (or (plist-get skill :handle)
       (plist-get skill :name)))
 
+(defun gptel-yatools-skills--one (matches)
+  "Return MATCHES as a single resolution: one skill, or the ambiguity."
+  (pcase (length matches)
+    (1 (list :skill (car matches)))
+    (_ (list :ambiguous matches))))
+
 (defun gptel-yatools-skills--lookup (skills name)
   "Resolve NAME against SKILLS.
 
@@ -608,6 +621,13 @@ listing hand the model.
 
 Returns (:skill SKILL) for a single match, (:ambiguous MATCHES) when the
 text identifies more than one skill, or nil when nothing matches.
+
+A bare name that occurs more than once is ambiguous *before* anything
+else is tried.  Handles are unique, so the earlier order -- handle,
+then path, then name -- let the one skill whose handle happened to spell
+an ambiguous name (the skill sitting directly in its root, whose path is
+that name) answer for all of them, while the index said the name matched
+several and never showed the others.
 
 An ambiguous name is never resolved to \"the first one\": with skills
 grouped into directories, one name in two groups is a reasonable
@@ -629,12 +649,14 @@ arrangement, and picking silently would hide a whole skill."
               (cl-remove-if-not
                (lambda (skill)
                  (equal (directory-file-name (plist-get skill :directory)) dir))
-               skills))))
-         (matches (or by-handle by-path by-name by-directory)))
-    (pcase (length matches)
-      (0 nil)
-      (1 (list :skill (car matches)))
-      (_ (list :ambiguous matches)))))
+               skills)))))
+    (cond
+     ((cdr by-name) (list :ambiguous by-name))
+     (by-handle (gptel-yatools-skills--one by-handle))
+     (by-path (gptel-yatools-skills--one by-path))
+     (by-name (gptel-yatools-skills--one by-name))
+     (by-directory (gptel-yatools-skills--one by-directory))
+     (t nil))))
 
 (defun gptel-yatools-skills--duplicates (skills key)
   "Return KEY's values that occur more than once in SKILLS."
@@ -743,7 +765,7 @@ identifies one skill on its own."
             (and skills
                  (mapconcat #'gptel-yatools-skills--index-line skills "\n"))
             (and ambiguous
-                 (format "Some names occur more than once; those skills are shown with a longer name that identifies one of them (their path relative to the skill directory, and, when even that repeats, the skill root in parentheses). Load one by the name shown on its line: %s."
+                 (format "Some names occur more than once; those skills are shown with a longer name that identifies one of them (their path relative to the skill directory, and -- when that path is the bare name itself, or repeats under another root -- the skill root in parentheses). Load one by the name shown on its line: %s."
                          (mapconcat #'identity ambiguous ", ")))
             (and missing (not skills)
                  (format "These configured directories do not exist: %s"
@@ -815,7 +837,11 @@ sentence about an ambiguous or invalid skill."
            :detail (gptel-yatools-skills--unknown-message found name)))))
 
 (defun gptel-yatools-skills--unknown-message (found name)
-  "Return why FOUND holds no skill called NAME, and what it does hold."
+  "Return why FOUND holds no skill called NAME, and what it does hold.
+
+The skills are listed by handle, not by relative path: a handle is the
+one name that always loads exactly one skill, and it is what the model
+should try next."
   (let ((skills (plist-get found :skills)))
     (mapconcat
      #'identity
@@ -824,7 +850,8 @@ sentence about an ambiguous or invalid skill."
             (format "Error: no skill named %S." name)
             (if skills
                 (format "Available skills: %s. Call this tool without arguments for the full index."
-                        (mapconcat (lambda (skill) (plist-get skill :relative))
+                        (mapconcat (lambda (skill)
+                                     (gptel-yatools-skills-handle skill))
                                    skills ", "))
               "No skills are available at all; call this tool without arguments to see where it looked.")
             (gptel-yatools-skills--notes-section (plist-get found :notes))))
@@ -1231,7 +1258,8 @@ Each skill is listed with its validation status; RET visits its
                                ("Directory" 40 t)])
   (setq tabulated-list-padding 2)
   (let* ((found (gptel-yatools-skills--discover))
-         (skills (plist-get found :skills)))
+         (skills (plist-get found :skills))
+         (notes (plist-get found :notes)))
     (setq tabulated-list-entries
           (mapcar (lambda (skill)
                     (list skill
@@ -1243,10 +1271,19 @@ Each skill is listed with its validation status; RET visits its
                                   (directory-file-name
                                    (plist-get skill :directory)))))
                   skills))
-    (setq header-line-format
-          (when-let* ((notes (plist-get found :notes)))
-            (concat " " (mapconcat #'identity notes "; ")))))
-  (tabulated-list-init-header))
+    (tabulated-list-init-header)
+    ;; `tabulated-list-init-header' owns `header-line-format' -- its column
+    ;; headings are what a tabulated list shows there -- so anything set
+    ;; before it is dropped.  The notes are appended to what it built, and
+    ;; the full text is in a `help-echo' because the line is clipped at the
+    ;; window edge.
+    (when notes
+      (setq header-line-format
+            (append header-line-format
+                    (list (propertize
+                           (concat "  " (mapconcat #'identity notes "; "))
+                           'face 'warning
+                           'help-echo (mapconcat #'identity notes "\n"))))))))
 
 ;;;###autoload
 (defun gptel-yatools-skills ()

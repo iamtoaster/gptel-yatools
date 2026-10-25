@@ -976,7 +976,7 @@ debug: `condition-case-unless-debug' leaves the signal alone while
       :disk "The tool reported an error."
       (format "Error: %s" (gptel-yatools--error-text err))))))
 
-(defun gptel-yatools-page (text offset lines)
+(defun gptel-yatools-page (text offset lines &optional reserve)
   "Return a page of TEXT, described by a plist.
 
 This is the response budget, offered as a helper rather than a constant
@@ -985,10 +985,15 @@ each tool reads directly: a tool that pages its own output -- `vfs_diff'
 boundary's truncation would make its report a lie.
 
 OFFSET is the 1-based number of the first line wanted, LINES how many.
-The page never exceeds `gptel-yatools--output-char-limit', so the
-boundary's truncation cannot cut it in half after the caller has said
-what it showed.  A single line longer than the limit is still returned
-whole; the boundary handles that case.
+The page never exceeds `gptel-yatools--output-char-limit' minus RESERVE,
+so the boundary's truncation cannot cut it in half after the caller has
+said what it showed.  RESERVE is for text the caller adds around the
+page -- a banner, say -- and which the size limit counts too; without it
+a page that filled the budget exactly left no room for its own heading,
+and the truncation this function exists to prevent happened anyway, to
+the last line the page had claimed to show.  A single line longer than
+the remaining budget is still returned whole; the boundary handles that
+case.
 
 Lines are counted by `gptel-yatools--line-count', so a text that ends in
 a newline has no phantom last line to page onto, and the page text is
@@ -1001,6 +1006,7 @@ line) and :partial (the page is not the whole of TEXT)."
          (total (gptel-yatools--line-count text))
          (start (max 1 offset))
          (want (max 1 lines))
+         (budget (max 1 (- gptel-yatools--output-char-limit (or reserve 0))))
          (past-end (> start total))
          (end (if past-end
                   start
@@ -1008,8 +1014,7 @@ line) and :partial (the page is not the whole of TEXT)."
                   (while (and (not stop) (< i total) (< shown want))
                     (let ((size (1+ (length (nth i all)))))
                       (if (and (> shown 0)
-                               (> (+ used size)
-                                  gptel-yatools--output-char-limit))
+                               (> (+ used size) budget))
                           (setq stop t)   ; the next line would overflow
                         (setq used (+ used size)
                               shown (1+ shown)

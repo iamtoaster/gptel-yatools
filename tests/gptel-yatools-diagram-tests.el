@@ -50,6 +50,17 @@
   "Return non-nil when PlantUML is installed."
   (and (executable-find gptel-yatools-plantuml-command) t))
 
+(defun gptel-yatools-diagram-test--fake-run (files)
+  "Stand in for PlantUML: a plausible SVG beside every file given.
+
+The cache entry of a `.puml' is its own name with another extension, so
+a stand-in can produce one without a JVM.  Tests that care about what
+PlantUML says stub `--run' with this or with a failure of their own."
+  (dolist (file files)
+    (write-region "<svg width=\"10\" height=\"10\"/>" nil
+                  (concat (file-name-sans-extension file) ".svg") nil 'silent))
+  (list :status 'exited :exit 0 :output ""))
+
 ;;;; Content addressing
 
 (ert-deftest gptel-yatools-diagram-test-token-is-a-prefix-of-the-cache-name ()
@@ -190,9 +201,9 @@
              gptel-yatools-diagram-test--source nil)
     (let ((calls 0))
       (cl-letf (((symbol-function 'gptel-yatools-diagram--run)
-                 (lambda (&rest _)
+                 (lambda (files)
                    (setq calls (1+ calls))
-                   (cons 0 ""))))
+                   (gptel-yatools-diagram-test--fake-run files))))
         (let ((reply (funcall (gptel-yatools-test--tool "render_diagram")
                               gptel-yatools-diagram-test--source nil)))
           (should (zerop calls))
@@ -285,10 +296,79 @@
                   ((symbol-function 'gptel-yatools-diagram--run)
                    (lambda (files)
                      (setq rendered files)
-                     (cons 0 ""))))
+                     (gptel-yatools-diagram-test--fake-run files))))
           (gptel-yatools-diagram--rebuild-missing)))
       (should (= 1 (length rendered)))
       (should (equal rendered (list (gptel-yatools-diagram--source-file absent)))))))
+
+(ert-deftest gptel-yatools-diagram-test-rebuild-says-when-it-could-not ()
+  "A rebuild that fails is one sentence, not silence.
+
+The old batch path dropped the process status on the floor, so a failed
+rebuild looked exactly like a successful one: everything in the buffer
+stayed a six-character token and nothing said why."
+  (gptel-yatools-diagram-test--cache
+    (let* ((source "@startuml\nC -> D\n@enduml")
+           (messages nil))
+      (gptel-yatools-diagram--write-source source)
+      (with-temp-buffer
+        (insert (prin1-to-string
+                 (list :name "render_diagram" :args (list :source source))))
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                  ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+                  ((symbol-function 'gptel-yatools-diagram--run)
+                   (lambda (_files)
+                     (list :status 'exited :exit 1
+                           :output "Error line 2: nope")))
+                  ((symbol-function 'message)
+                   (lambda (format &rest args)
+                     (push (apply #'format format args) messages))))
+          (gptel-yatools-diagram--rebuild-missing)))
+      (let ((said (car (seq-filter (lambda (m) (string-match-p "rebuilt" m))
+                                   messages))))
+        (should said)
+        (should (string-match-p "1 of 1" said))
+        (should (string-match-p "nope" said))))))
+
+(ert-deftest gptel-yatools-diagram-test-ensure-returns-one-entry ()
+  "The cache-hit rule, the render and the description answer together."
+  (gptel-yatools-diagram-test--cache
+    (let* ((source gptel-yatools-diagram-test--source)
+           (calls 0)
+           (entry nil))
+      (cl-letf (((symbol-function 'gptel-yatools-diagram--run)
+                 (lambda (files)
+                   (setq calls (1+ calls))
+                   (gptel-yatools-diagram-test--fake-run files))))
+        (setq entry (gptel-yatools-diagram--ensure source))
+        (should (= 1 calls))
+        (should (equal (plist-get entry :token)
+                       (gptel-yatools-diagram--token source)))
+        (should (equal (plist-get entry :svg)
+                       (gptel-yatools-diagram--svg-file source)))
+        (should (string-match-p "10x10 px" (plist-get entry :description)))
+        ;; The second ask is answered by the file that exists.
+        (gptel-yatools-diagram--ensure source)
+        (should (= 1 calls))))))
+
+(ert-deftest gptel-yatools-diagram-test-insert-renders-before-it-inserts ()
+  "A source that will not render leaves no dead token behind."
+  (gptel-yatools-diagram-test--cache
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'gptel-yatools-diagram--run)
+                 (lambda (_files)
+                   (list :status 'exited :exit 1 :output "boom"))))
+        (should-error (gptel-yatools-diagram-insert
+                       gptel-yatools-diagram-test--source))
+        (should (string-empty-p (buffer-string)))
+        ;; And a source that renders inserts exactly one token.
+        (cl-letf (((symbol-function 'gptel-yatools-diagram--run)
+                   #'gptel-yatools-diagram-test--fake-run))
+          (gptel-yatools-diagram-insert gptel-yatools-diagram-test--source)
+          (should (equal (buffer-string)
+                         (format "[diagram:%s]"
+                                 (gptel-yatools-diagram--token
+                                  gptel-yatools-diagram-test--source)))))))))
 
 (ert-deftest gptel-yatools-diagram-test-rebuild-does-nothing-without-images ()
   "On a terminal the rebuild is skipped, so no JVM starts for nothing."

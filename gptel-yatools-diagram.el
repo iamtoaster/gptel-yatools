@@ -406,13 +406,48 @@ PlantUML's own environment and arguments."
                    (number-to-string (gptel-yatools-diagram--graphviz-timeout)))
              files))))
 
+(defun gptel-yatools-diagram--cached (source)
+  "Return SOURCE's cached SVG path, or nil when it has not been rendered.
+
+This is the whole caching policy, and it is one line because the name is
+the digest of the source: a file that exists already holds the picture
+this source makes.  No metadata, no modification time, no invalidation --
+`file-exists-p' is the question.
+
+Everything that wants to know whether a render is needed asks here, so
+the answer is the same wherever it is asked."
+  (let ((svg (gptel-yatools-diagram--svg-file source)))
+    (and (file-exists-p svg) svg)))
+
+(defun gptel-yatools-diagram--failure (output source &optional exit)
+  "Return the model-facing sentence for a failed render of SOURCE.
+
+OUTPUT is what PlantUML said, EXIT its exit code when there was one.  The
+sentence is written once, here, because both the single render and the
+batch report it: one of them signals it and the other repeats it in the
+echo area, and they must not learn to describe the same failure twice."
+  (concat
+   (format "PlantUML could not render the diagram%s.\n%s"
+           (if (integerp exit) (format " (exit code %d)" exit) "")
+           (if (string-empty-p output)
+               "(no message)"
+             ;; PlantUML names the file it failed on, and that name is
+             ;; ours, not the model's: the cache path helps nobody and
+             ;; repeats a directory the model cannot use.
+             (replace-regexp-in-string
+              (regexp-quote (gptel-yatools-diagram--ensure-cache-directory))
+              "" output)))
+   (if-let* ((hint (gptel-yatools-diagram--hint output source)))
+       (concat "\n" hint)
+     "")))
+
 (defun gptel-yatools-diagram--render (source)
   "Render SOURCE into the cache and return its SVG path.
 
 Signals with the model-facing wording when PlantUML refuses the source."
   (let* ((svg (gptel-yatools-diagram--svg-file source))
          (file (gptel-yatools-diagram--write-source source)))
-    (unless (file-exists-p svg)
+    (unless (gptel-yatools-diagram--cached source)
       (let* ((outcome (gptel-yatools-diagram--run (list file)))
              (status (plist-get outcome :status))
              (exit (plist-get outcome :exit))
@@ -422,28 +457,66 @@ Signals with the model-facing wording when PlantUML refuses the source."
           (error "PlantUML did not finish within %s seconds and was killed. The diagram may be too large or GraphViz may be stuck; simplify the source or raise the timeout argument."
                  (gptel-yatools--call-deadline)))
          ((and (eq status 'exited) (integerp exit) (zerop exit)
-               (file-exists-p svg))
+               (gptel-yatools-diagram--cached source))
           nil)
          (t
           ;; `--no-error-image' is honoured in file mode, but an image
           ;; written by an older failure is still a picture of an error.
           (ignore-errors (delete-file svg))
-          (error "PlantUML could not render the diagram%s.\n%s%s"
-                 (if (and (eq status 'exited) (integerp exit))
-                     (format " (exit code %d)" exit)
-                   "")
-                 (if (string-empty-p output)
-                     "(no message)"
-                   ;; PlantUML names the file it failed on, and that name
-                   ;; is ours, not the model's: the cache path helps nobody
-                   ;; and repeats a directory the model cannot use.
-                   (replace-regexp-in-string
-                    (regexp-quote (gptel-yatools-diagram--ensure-cache-directory))
-                    "" output))
-                 (if-let* ((hint (gptel-yatools-diagram--hint output source)))
-                     (concat "\n" hint)
-                   ""))))))
+          (error "%s" (gptel-yatools-diagram--failure output source exit))))))
     svg))
+
+(defun gptel-yatools-diagram--ensure (source)
+  "Return SOURCE's cache entry, rendering it first if it is not cached.
+
+The entry is a plist: `:token' is the line the model repeats, `:svg' the
+file to draw, and `:description' the one-line summary the tool replies
+with.  Callers adapt an entry; none of them decides for itself whether a
+render is needed.
+
+A render that cannot be finished signals, with the wording the model
+reads.  `gptel-yatools-diagram--ensure-many' is the batch version, which
+reports rather than signals -- see the note there."
+  (let ((svg (or (gptel-yatools-diagram--cached source)
+                 (gptel-yatools-diagram--render source))))
+    (list :token (gptel-yatools-diagram--token source)
+          :svg svg
+          :description (gptel-yatools-diagram--describe svg))))
+
+(defun gptel-yatools-diagram--ensure-many (sources)
+  "Put every one of SOURCES in the cache, in a single process.
+
+Return `(:rendered N :failed M :reason STRING)'.  The cache hits cost one
+`file-exists-p' each; what is missing is written and rendered together,
+because a JVM start dominates a render, so re-opening a chat with twelve
+diagrams should cost one start rather than twelve.
+
+A failure is reported, never signalled.  The caller is a hook or a
+command, not a tool call: there is no envelope waiting for a condition,
+and a wrapped token is a survivable outcome -- so one sentence is the
+right size for it, and `:reason' carries it."
+  (let* ((sources (delete-dups sources))
+         (missing (cl-remove-if #'gptel-yatools-diagram--cached sources))
+         (failed nil)
+         (reason nil))
+    (when missing
+      (let* ((files (mapcar #'gptel-yatools-diagram--write-source missing))
+             (outcome (gptel-yatools-diagram--run files))
+             (status (plist-get outcome :status))
+             (output (string-trim (plist-get outcome :output))))
+        (dolist (source missing)
+          (unless (gptel-yatools-diagram--cached source)
+            (push source failed)))
+        (setq reason
+              (cond
+               ((eq status 'timed-out)
+                (format "PlantUML did not finish within %s seconds and was killed."
+                        (gptel-yatools--call-deadline)))
+               (failed
+                (gptel-yatools-diagram--failure output (car (last failed))))))))
+    (list :rendered (- (length sources) (length failed))
+          :failed (length failed)
+          :reason reason)))
 
 (defun gptel-yatools-diagram--hint (stderr source)
   "Return a sentence that helps with STDERR for SOURCE, or nil.
@@ -598,18 +671,13 @@ tells the model what to ask for next."
     (error "The source contains %d diagrams. One diagram per call; render them separately."
            (gptel-yatools-diagram--start-count source)))
    (t
-    (let* ((hash (gptel-yatools-diagram--hash source))
-           (svg (gptel-yatools-diagram--cache-file hash "svg"))
-           (token (gptel-yatools-diagram--token source)))
-      ;; A content-addressed name means this is the whole caching policy:
-      ;; the file exists, so it already holds the picture this source
-      ;; makes.  No metadata, no mtime, no invalidation.
-      (unless (file-exists-p svg)
-        (gptel-yatools--update-tool-status " Rendering diagram..." 'mode-line-emphasis)
-        (gptel-yatools-diagram--render source))
+    (unless (gptel-yatools-diagram--cached source)
+      (gptel-yatools--update-tool-status " Rendering diagram..." 'mode-line-emphasis))
+    (let ((entry (gptel-yatools-diagram--ensure source)))
       (gptel-yatools-ok
        (format "Rendered %s.\nTo show it, write this on its own line in your answer:\n[diagram:%s]"
-               (gptel-yatools-diagram--describe svg) token)
+               (plist-get entry :description)
+               (plist-get entry :token))
        :comment "The diagram was rendered outside the workspace into a content-addressed cache. Nothing in the workspace changed and nothing was persisted.")))))
 
 ;;;; Drawing
@@ -732,18 +800,21 @@ One PlantUML process for all of them: re-opening a chat with twelve
 diagrams should cost one JVM start, not twelve.  A source whose digest
 matches no link is still rendered -- it is in the transcript, so it is
 wanted -- and a token that matches no source is left alone: a mention is
-not an error."
+not an error.
+
+Nothing here decides what needs rendering: that is
+`gptel-yatools-diagram--ensure-many's answer, and its `:reason' is what
+gets said when some of them could not be rebuilt."
   (when (and gptel-yatools-diagram-inline
              (display-images-p)
              (image-type-available-p 'svg))
-    (let* ((sources (delete-dups (gptel-yatools-diagram--sources-in-buffer)))
-           (missing (cl-remove-if
-                     (lambda (source)
-                       (file-exists-p (gptel-yatools-diagram--svg-file source)))
-                     sources)))
-      (when missing
-        (let ((files (mapcar #'gptel-yatools-diagram--write-source missing)))
-          (gptel-yatools-diagram--run files))))))
+    (let ((result (gptel-yatools-diagram--ensure-many
+                   (gptel-yatools-diagram--sources-in-buffer))))
+      (when (> (plist-get result :failed) 0)
+        (message "gptel-yatools-diagram: %d of %d diagrams could not be rebuilt. %s"
+                 (plist-get result :failed)
+                 (+ (plist-get result :rendered) (plist-get result :failed))
+                 (or (plist-get result :reason) ""))))))
 
 ;;;; Hooks
 
@@ -841,15 +912,19 @@ image when the inline one is scaled to the window."
 
 The manual repair for the one thing that can go wrong quietly: the model
 forgets to repeat the token.  SOURCE is read from the minibuffer when
-called interactively, and rendered first, so the token it inserts is not
-a dead one."
+called interactively.
+
+The render comes first, so the token is never a dead one: `--ensure'
+signals when PlantUML refuses, and nothing has been inserted at that
+point, so a source that cannot be drawn leaves the buffer as it was."
   (interactive "sPlantUML source: ")
-  (insert (format "[diagram:%s]"
-                  (gptel-yatools-diagram--token source)))
-  (when (and (display-images-p) (image-type-available-p 'svg))
-    (gptel-yatools-diagram--render source)
+  (let* ((entry (gptel-yatools-diagram--ensure source))
+         (token (plist-get entry :token)))
+    (insert (format "[diagram:%s]" token))
     (gptel-yatools-diagram--refresh (line-beginning-position)
-                                    (line-end-position))))
+                                    (line-end-position))
+    (message "Inserted [diagram:%s] (%s)"
+             token (plist-get entry :description))))
 
 (defun gptel-yatools-diagram-clear-cache ()
   "Delete every rendered diagram and its source.

@@ -47,7 +47,7 @@ dependency declaration, and ERT is the test harness.
 | `gptel-yatools-vfs.el` | The buffer-local VFS: entries and baselines, conflict/refusal logic, pending changes, encoding, diffing, sync review UI, and the filesystem tools. | `gptel-yatools-vfs-entry`, `-pending`, `-read`, `-write`, `-edit`, `-refusal`, `-sync`; `gptel-yatools-write-diff-mode` |
 | `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: the command's own wording and its VFS-pending warning, over the shared process runner. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
 | `gptel-yatools-skills.el` | Skill discovery, frontmatter validation, content-keyed parse cache, skill handles/resolution, the `skill` tool, attaching skills by hand, the skill browser. | `gptel-yatools-skills-resolve`, `-handle`, `-add`, `gptel-yatools-skills` |
-| `gptel-yatools-diagram.el` | The `render_diagram` tool, the content-addressed diagram cache, the render token, the inline overlay, and the transcript rebuild. | `gptel-yatools-render-diagram`, `gptel-yatools-diagram--token`, `--refresh`, `--rebuild-missing` |
+| `gptel-yatools-diagram.el` | The `render_diagram` tool, the content-addressed diagram cache, the render token, the inline overlay, and the transcript rebuild. | `gptel-yatools-render-diagram`, `gptel-yatools-diagram--token`, `--ensure`, `--refresh`, `--rebuild-missing` |
 | `gptel-yatools.el` | gptel glue only: run a tool call in the buffer that owns the request, draw the header-line extras, load the tool modules. | `gptel-yatools--accept-tool-calls-in-owner`, `gptel-yatools--extend-header-line` |
 
 Load order: `gptel-yatools-common.el` first; the tool modules require it

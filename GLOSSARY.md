@@ -1,7 +1,8 @@
 # gptel-yatools
 
-Tools that give gptel's model a buffer-local virtual filesystem, a shell, and
-Agent Skills it can discover and load.
+Tools that give gptel's model a buffer-local virtual filesystem, a shell,
+Agent Skills it can discover and load, and diagrams it can draw in the chat
+buffer.
 
 ## Language
 
@@ -249,3 +250,33 @@ prefix.  Every value is printed through the printable-text rule, so a
 command spanning lines cannot add lines that read like the rest of the
 prompt.
 _Avoid_: Confirmation prompt, tool-call renderer
+
+### Diagrams
+
+**Render token**:
+The handle a diagram is addressed by -- `[diagram:fae844]` -- which the
+model re-emits on a line of its own and this package draws over.  It is
+not a link: it has no link type, no mouse binding of its own, and neither
+Org nor Markdown knows it exists.  It is *computed*, never stored: the
+digits are a prefix of the digest of the exact source, so the token for
+any tool call can be recomputed from the transcript and nothing has to map
+one to the other.
+_Avoid_: Diagram link, render id, handle (that is a skill's)
+
+**Diagram cache**:
+The one directory `render_diagram` writes: `<hash>.svg` and `<hash>.puml`
+named by the digest of the source that produced them, so a name never
+describes content it does not hold and nothing has to be invalidated.
+Nothing in it is reachable by a path the model chooses, which is what lets
+it be written without a review -- see
+docs/adr/0003-a-tool-may-own-an-opaque-directory.md.  Every entry is
+rebuildable from the chat, so the whole directory is disposable.
+_Avoid_: Image store, diagram folder
+
+**Rebuild**:
+What happens when a token's file is missing: the tool blocks in the buffer
+are read back for their `:args`, each source is hashed to recompute its
+cache name, and only the missing ones are rendered -- in a single PlantUML
+process, since a JVM start dominates a render.  It is why deleting the
+cache, or copying a chat to another machine, costs time and not data.
+_Avoid_: Re-render, cache refresh

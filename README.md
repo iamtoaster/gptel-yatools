@@ -121,6 +121,7 @@ the model still has to call `file_sync`.
 | `read_workspace_root` | workspace | Absolute path of the workspace root. |
 | `execute_command` | shell | Run a shell command from the workspace root and return its output. |
 | `skill` | skills | List the installed [Agent Skills](https://agentskills.io), load one, or read a file it references. |
+| `render_diagram` | diagram | Render PlantUML source to an image the chat buffer draws inline, and return the token to show it. |
 
 The virtual filesystem is buffer-local, so two chats never see each other's
 pending writes, and a request's tools run in the buffer that owns it rather
@@ -238,20 +239,73 @@ VFS pending count, where `N` is how many are attached; clicking it lists
 their names.  Removing the context through gptel's own commands works too —
 the indicator reflects `gptel-context`, not a copy.
 
+### Diagrams
+
+`render_diagram` turns PlantUML source into a picture in the chat buffer.
+The model supplies the source; the tool renders it and hands back a token
+such as `[diagram:fae844]`, which the model repeats on a line of its own and
+the package draws over.  Nothing has to be saved for a diagram to survive:
+the token is a prefix of the digest of the source, the source is in the tool
+call in the transcript, and a missing image is rebuilt from it — one
+PlantUML process for however many are missing.
+
+Rendering needs [PlantUML](https://plantuml.com); some diagram types also
+need GraphViz.  Without PlantUML the tool says so and names the variable to
+set, rather than failing obscurely.
+
+```elisp
+(setq gptel-yatools-plantuml-command "plantuml"        ; or an absolute path
+      gptel-yatools-plantuml-security-profile "SANDBOX")
+```
+
+Images go to `gptel-yatools-diagram-cache-directory`
+(`~/.emacs.d/var/gptel-yatools/cache/`), as `<hash>.svg` beside the
+`<hash>.puml` source.  That directory is the one place this package writes
+without a review, because the model cannot name a path in it and nothing
+there is data: see [ADR 0003](docs/adr/0003-a-tool-may-own-an-opaque-directory.md).
+`M-x gptel-yatools-diagram-clear-cache` empties it.
+
+The security profile is a **default, not a boundary**.  Under `SANDBOX` the
+renderer cannot read a file or fetch a URL — `!include ./theme.puml` and
+`!theme mytheme` are refused — while `!theme cerulean` and
+`!include <C4/C4_Container>` keep working, because those come out of the
+PlantUML jar.  Set the variable to `"LEGACY"` (or `nil`) to allow local
+includes; the tool's refusal messages say so too.  This is not containment:
+the model can render through `execute_command` if the shell tool is enabled,
+and with tool confirmations off the shell is unrestricted anyway.  It is a
+sensible default for a path nobody is watching.
+
+In the buffer:
+
+- `M-x gptel-yatools-diagram-toggle-inline` draws or undraws the pictures in
+  this buffer; it is buffer-local and reversible, and the token text is never
+  removed.
+- `M-x gptel-yatools-diagram-open-at-point` opens the image outside Emacs —
+  what the token is worth on a terminal frame, where nothing can be drawn.
+- `M-x gptel-yatools-diagram-insert` renders the source you type and inserts
+  its token, the manual repair for a model that forgot to repeat the token
+  the tool handed it.
+
+Drawing needs a graphic frame; on a terminal the token stays as text and the
+open command is the way to see the diagram.
+
 ## Tests
 
-237 ERT tests, no network, no prompts, every one of them in a throwaway temp
+262 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh
 emacs -Q --batch -L . -l gptel-yatools.el \
   -l tests/gptel-yatools-tests.el -l tests/gptel-yatools-vfs-tests.el \
   -l tests/gptel-yatools-skills-tests.el \
+  -l tests/gptel-yatools-diagram-tests.el \
   -f ert-run-tests-batch-and-exit
 ```
 
-`gptel` and `yaml` must be on `load-path` (any straight.el/MELPA install is
-enough).
+The diagram tests that need PlantUML are skipped when it is not installed;
+the rest — content addressing, the transcript reader, the overlay, the
+refusals — run either way.  `gptel` and `yaml` must be on `load-path` (any
+straight.el/MELPA install is enough).
 
 Interactively: `M-x load-file RET tests/gptel-yatools-tests.el RET`, then
 `M-x ert RET gptel-yatools-test- RET`.

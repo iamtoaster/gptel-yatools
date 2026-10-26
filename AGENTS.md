@@ -26,6 +26,10 @@ dependency declaration, and ERT is the test harness.
     questions.
   - `0002-the-tool-kit-stays-one-file.md` — why
     `gptel-yatools-common.el` is one file with three declared seams.
+  - `0003-a-tool-may-own-an-opaque-directory.md` — when a tool may write
+    outside the VFS (conditions on the model's inability to name a path and
+    the artifact being disposable), and why `execute_command` is not an
+    instance of it.
 - **`docs/performance.md`** — how performance claims were measured
   (offline gptel loop, fixed `gptel--escape-raw-bytes` hot spot).  Measure
   before optimising.
@@ -42,6 +46,7 @@ dependency declaration, and ERT is the test harness.
 | `gptel-yatools-vfs.el` | The buffer-local VFS: entries and baselines, conflict/refusal logic, pending changes, encoding, diffing, sync review UI, and the filesystem tools. | `gptel-yatools-vfs-entry`, `-pending`, `-read`, `-write`, `-edit`, `-refusal`, `-sync`; `gptel-yatools-write-diff-mode` |
 | `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: process polling, timeout killing, command confirmation, VFS-pending warning. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
 | `gptel-yatools-skills.el` | Skill discovery, frontmatter validation, content-keyed parse cache, skill handles/resolution, the `skill` tool, attaching skills by hand, the skill browser. | `gptel-yatools-skills-resolve`, `-handle`, `-add`, `gptel-yatools-skills` |
+| `gptel-yatools-diagram.el` | The `render_diagram` tool, the content-addressed diagram cache, the render token, the inline overlay, and the transcript rebuild. | `gptel-yatools-render-diagram`, `gptel-yatools-diagram--token`, `--refresh`, `--rebuild-missing` |
 | `gptel-yatools.el` | gptel glue only: run a tool call in the buffer that owns the request, draw the header-line extras, load the tool modules. | `gptel-yatools--accept-tool-calls-in-owner`, `gptel-yatools--extend-header-line` |
 
 Load order: `gptel-yatools-common.el` first; the tool modules require it
@@ -61,7 +66,7 @@ model receives; `M-x gptel-yatools-skills` opens the skill browser.
 
 ## Test harness
 
-The suite is 237 ERT tests.  It uses no network and no user prompts, and
+The suite is 262 ERT tests.  It uses no network and no user prompts, and
 every test runs in a throwaway temp directory.  Run it from the repository
 root:
 
@@ -71,8 +76,13 @@ emacs -Q --batch -L . -L <dir-with-gptel> -L <dir-with-yaml> \
   -l tests/gptel-yatools-tests.el \
   -l tests/gptel-yatools-vfs-tests.el \
   -l tests/gptel-yatools-skills-tests.el \
+  -l tests/gptel-yatools-diagram-tests.el \
   -f ert-run-tests-batch-and-exit
 ```
+
+The diagram suite skips the tests that need PlantUML when it is not
+installed — that is deliberate, and the rest of it (content addressing, the
+transcript reader, the overlay, every refusal) runs without it.
 
 `-Q` ignores the user's init files, so `gptel` and `yaml` must be on
 `load-path`; `-L .` alone is not enough unless they are installed in the
@@ -99,7 +109,8 @@ are gitignored):
 ```sh
 emacs -Q --batch -L . -L <dir-with-gptel> -L <dir-with-yaml> \
   -f batch-byte-compile gptel-yatools.el gptel-yatools-common.el \
-  gptel-yatools-vfs.el gptel-yatools-shell.el gptel-yatools-skills.el
+  gptel-yatools-vfs.el gptel-yatools-shell.el gptel-yatools-skills.el \
+  gptel-yatools-diagram.el
 rm -f *.elc
 ```
 
@@ -148,6 +159,10 @@ rm -f *.elc
 - **Writes go through the VFS.**  `write_file` buffers content; only
   `file_sync` writes disk, after review.  The VFS write interface owns
   validation, encoding, baseline/conflict detection and the write policy.
+  The one exception is `gptel-yatools-diagram.el`, which owns a disposable
+  cache directory the model cannot name a path in — ADR 0003 states the
+  three conditions a tool must meet to qualify.  `execute_command` is not
+  covered by that exception; it is gated on approval instead.
 - **`entry` and `pending` answer different questions.**  `entry` is the
   cheap structural lookup; `pending` compares with disk and reaps entries
   that no longer differ.  Keep both, so each caller asks the question it
@@ -166,7 +181,7 @@ rm -f *.elc
 
 - The full ERT suite passes and any new behaviour has a test that goes
   through the tool boundary.
-- The five source files byte-compile without warnings.
+- The six source files byte-compile without warnings.
 - User-visible changes are reflected in `README.md`; new or changed domain
   terms in `GLOSSARY.md`; architectural decisions in a new ADR.
 - The README's test count (237) is updated if tests were added or removed.

@@ -1319,7 +1319,8 @@ the budget is offered because `vfs_diff' has to page its own output."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
          (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
-                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"))
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
+                  "gptel-yatools-diagram.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))

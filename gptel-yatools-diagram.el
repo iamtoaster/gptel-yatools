@@ -338,21 +338,32 @@ mapping one to the other."
   "Return the `.puml' cache path for SOURCE."
   (gptel-yatools-diagram--cache-file (gptel-yatools-diagram--hash source) "puml"))
 
-(defun gptel-yatools-diagram--token-files (token)
-  "Return the cache SVGs whose name begins with TOKEN.
+(defun gptel-yatools-diagram--resolve-token (token)
+  "Return what TOKEN names in the cache.
 
-More than one is astronomically unlikely, and is treated as an
-ambiguity rather than resolved by guesswork: the file names are the whole
-mapping, so a collision has to be reported, not picked between."
-  (file-expand-wildcards
-   (expand-file-name (concat token "*.svg")
-                     gptel-yatools-diagram-cache-directory)
-   t))
+The answer is a plist whose `:kind' is one of:
 
-(defun gptel-yatools-diagram--token-file (token)
-  "Return the one cache SVG TOKEN names, or nil."
-  (let ((files (gptel-yatools-diagram--token-files token)))
-    (and (null (cdr files)) (car files))))
+  found      `:file' is the one cache SVG the digits name.
+  missing    nothing in the cache matches.  Not an error: a token whose
+             diagram was never rendered, or whose cache was emptied, is
+             an ordinary thing to find in a buffer.
+  ambiguous  `:files' are the several entries the digits match.  More
+             than one is astronomically unlikely and is reported rather
+             than resolved by guesswork -- the file names are the whole
+             mapping, so a collision has to be surfaced, not picked
+             between.
+
+The glob happens once, here.  Drawing and opening both ask this, so they
+cannot disagree about whether a token names a file; the only difference
+between them is what each does with the answer."
+  (let ((files (file-expand-wildcards
+                (expand-file-name (concat token "*.svg")
+                                  gptel-yatools-diagram-cache-directory)
+                t)))
+    (cond
+     ((null files) (list :kind 'missing))
+     ((cdr files) (list :kind 'ambiguous :files files))
+     (t (list :kind 'found :file (car files))))))
 
 (defun gptel-yatools-diagram--ensure-cache-directory ()
   "Create the cache directory if it does not exist."
@@ -721,7 +732,13 @@ evaporated, no later diagram in that buffer was ever drawn."
                       gptel-yatools-diagram--overlays)))
 
 (defun gptel-yatools-diagram--show-region (beg end)
-  "Draw every resolvable token between BEG and END.  Return how many."
+  "Draw every resolvable token between BEG and END.  Return how many.
+
+A token that resolves to nothing, or to more than one file, is left as
+text and said nothing about: this runs from
+`gptel-post-response-functions', once per response, which is exactly how
+a repeated complaint becomes noise.  `gptel-yatools-diagram-open-at-point'
+is where the user asks, and there the answer is a sentence."
   (let ((drawn 0))
     (when (< beg end)
       (save-excursion
@@ -729,10 +746,11 @@ evaporated, no later diagram in that buffer was ever drawn."
           (narrow-to-region beg end)
           (goto-char (point-min))
           (while (re-search-forward gptel-yatools-diagram--token-regexp nil t)
-            (let ((token (match-string 1)))
-              (when-let* ((file (gptel-yatools-diagram--token-file token))
-                          ((file-exists-p file))
-                          (image (gptel-yatools-diagram--image file)))
+            (let* ((token (match-string 1))
+                   (file (plist-get (gptel-yatools-diagram--resolve-token token)
+                                    :file)))
+              (when-let* ((image (and file
+                                      (gptel-yatools-diagram--image file))))
                 (let ((overlay (make-overlay (match-beginning 0)
                                              (match-end 0))))
                   (overlay-put overlay 'gptel-yatools-diagram token)
@@ -893,19 +911,23 @@ no rendering."
 
 This is what the token is worth when nothing can be drawn -- a terminal
 frame, or drawing turned off.  It is also the way to get at the full-size
-image when the inline one is scaled to the window."
+image when the inline one is scaled to the window.
+
+The three answers `gptel-yatools-diagram--resolve-token' can give are
+each said out loud here: this is where the user asked, so this is where
+silence would be a fault rather than a mercy."
   (interactive)
   (let* ((token (gptel-yatools-diagram--token-at-point))
-         (files (and token (gptel-yatools-diagram--token-files token))))
+         (found (and token (gptel-yatools-diagram--resolve-token token))))
     (cond
      ((null token)
       (user-error "Point is not on a diagram token"))
-     ((null files)
+     ((eq (plist-get found :kind) 'missing)
       (user-error "No rendered diagram for [diagram:%s]; render it again or reopen the chat" token))
-     ((cdr files)
+     ((eq (plist-get found :kind) 'ambiguous)
       (user-error "[diagram:%s] is ambiguous: %d cache entries match"
-                  token (length files)))
-     (t (browse-url (browse-url-file-url (car files)))))))
+                  token (length (plist-get found :files))))
+     (t (browse-url (browse-url-file-url (plist-get found :file)))))))
 
 (defun gptel-yatools-diagram-insert (source)
   "Render SOURCE and insert its token at point.

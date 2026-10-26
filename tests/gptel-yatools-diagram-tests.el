@@ -267,12 +267,58 @@ PlantUML says stub `--run' with this or with a failure of their own."
 (ert-deftest gptel-yatools-diagram-test-a-token-points-at-a-cache-file ()
   "A token resolves to the file the digest names, and no other."
   (gptel-yatools-diagram-test--cache
-    (let ((source gptel-yatools-diagram-test--source))
-      (gptel-yatools-diagram--write-source source)
-      (write-region "<svg/>" nil (gptel-yatools-diagram--svg-file source) nil 'silent)
-      (should (equal (gptel-yatools-diagram--token-file
-                      (gptel-yatools-diagram--token source))
+    (let* ((source gptel-yatools-diagram-test--source)
+           (found (progn
+                    (gptel-yatools-diagram--write-source source)
+                    (write-region "<svg/>" nil
+                                  (gptel-yatools-diagram--svg-file source)
+                                  nil 'silent)
+                    (gptel-yatools-diagram--resolve-token
+                     (gptel-yatools-diagram--token source)))))
+      (should (eq (plist-get found :kind) 'found))
+      (should (equal (plist-get found :file)
                      (gptel-yatools-diagram--svg-file source))))))
+
+(ert-deftest gptel-yatools-diagram-test-a-token-that-names-nothing-is-missing ()
+  "No file is an answer, not a signal."
+  (gptel-yatools-diagram-test--cache
+    (let ((found (gptel-yatools-diagram--resolve-token "abcdef")))
+      (should (eq (plist-get found :kind) 'missing))
+      (should-not (plist-get found :file)))))
+
+(ert-deftest gptel-yatools-diagram-test-two-files-under-one-token-are-ambiguous ()
+  "A collision is surfaced and never resolved by picking one.
+
+Two files are forged rather than found, because a six-digit collision is
+not something a test can render on demand -- and the point is what the
+resolver does with two matches, not how they came to exist."
+  (gptel-yatools-diagram-test--cache
+    (write-region "<svg/>" nil
+                  (expand-file-name "abcdef01.svg"
+                                    gptel-yatools-diagram-cache-directory)
+                  nil 'silent)
+    (write-region "<svg/>" nil
+                  (expand-file-name "abcdef02.svg"
+                                    gptel-yatools-diagram-cache-directory)
+                  nil 'silent)
+    (let ((found (gptel-yatools-diagram--resolve-token "abcdef")))
+      (should (eq (plist-get found :kind) 'ambiguous))
+      (should (= 2 (length (plist-get found :files))))
+      (should-not (plist-get found :file)))
+    ;; Drawing stays quiet about it: a mention is not an error, and this
+    ;; runs once per response.  The open command is where the user asks.
+    (with-temp-buffer
+      (insert "[diagram:abcdef]\n")
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _) '(image :type svg))))
+        (should (zerop (gptel-yatools-diagram--refresh)))
+        (should-not gptel-yatools-diagram--overlays))
+      (goto-char (point-min))
+      (let ((err (should-error (gptel-yatools-diagram-open-at-point)
+                               :type 'user-error)))
+        (should (string-match-p "ambiguous" (error-message-string err)))))))
 
 (ert-deftest gptel-yatools-diagram-test-rebuild-renders-only-what-is-missing ()
   "One batch call for the missing entries, and nothing for the present ones."

@@ -119,13 +119,13 @@ The frame is redrawn here, and that is the point of this function rather
 than a nicety.  `gptel--update-status' ends with
 `force-mode-line-update', which only *flags* the mode line: Emacs
 redraws when it next becomes idle.  A tool call does not become idle --
-the shell runner polls `accept-process-output' until the command exits --
+a subprocess is polled until it exits, in `gptel-yatools--run-process' --
 so without an explicit redisplay the new status is set, is correct, and
 is never seen.  The screen keeps whatever was drawn before the call
 began, which is why a long command appeared to leave \"Typing...\" up.
 
-Measured on a terminal frame, in the polling loop the shell runner uses:
-`gptel--update-status' alone gives 0 redisplays over a two-second
+Measured on a terminal frame, in the polling loop `gptel-yatools--run-process'
+uses: `gptel--update-status' alone gives 0 redisplays over a two-second
 command; adding the `redisplay' below gives one, immediately.
 
 Nothing happens outside a live `gptel-mode' buffer, so calling a tool

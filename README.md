@@ -291,8 +291,7 @@ open command is the way to see the diagram.
 
 ## Tests
 
-264 ERT tests, no network, no prompts, every one of them in a throwaway temp
-directory:
+ERT, no network, no prompts, every test in a throwaway temp directory:
 
 ```sh
 emacs -Q --batch -L . -l gptel-yatools.el \

@@ -62,6 +62,36 @@ tool module mentions `--truncate`, `--truncate-slow`, `--envelope`,
 genuinely needs the budget to page its own output. Naming it is the point:
 an omission became a stated interface.
 
+## Amendment — a fourth interface, `run`
+
+Two tool modules run subprocesses: `execute_command` and `render_diagram`.
+By the time the diagram module arrived, the shell runner's process loop had
+been copied into it, and the copy had already lost two of the four rules
+the original encodes — closing stdin, and keeping the output of a process
+that timed out — while both copies still carried the same poll margin, the
+same process-group kill and the same reap.
+
+The runner therefore moved into this file as `gptel-yatools--run-process`,
+the fourth declared interface:
+
+- run: `gptel-yatools--run-process` (an argv and a deadline in, a
+  `:status`/`:exit`/`:output` plist out).
+
+This does not reopen the decision above. The rule the original decision
+rests on — *a module earns its own file by owning state* — still holds:
+the runner keeps nothing between calls. What it owns is a mechanism, and a
+mechanism two callers must not implement twice.
+
+The prompt to revisit would be the one the ADR already names: if the runner
+ever grows state (a process registry, a per-buffer queue, a cache of
+executables), it can earn a file then. Until it does, a file boundary would
+again be a boundary between two halves of one idea — `common.el` loads
+before either tool module, and the `require` edge would run the wrong way.
+
+One consequence for the seam test: `--run-process` is a stated interface, so
+it is exempt from the "no tool module reaches past respond" list, exactly as
+`gptel-yatools-page` is.
+
 ## Consequences
 
 - The seam is enforced by a test, which is the only thing that keeps an

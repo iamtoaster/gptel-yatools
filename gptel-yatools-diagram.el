@@ -383,82 +383,67 @@ short `timeout' argument cannot be outlived by the layout engine."
                 (if (numberp budget) (truncate budget) 1)))))
 
 (defun gptel-yatools-diagram--run (files)
-  "Render FILES, writing SVGs beside them.  Return (EXIT . STDERR).
+  "Render FILES, writing SVGs beside them.  Return the process outcome.
 
 One process serves every file, which is the whole point of the batch
 path: a JVM start dominates a render, so ten diagrams cost one start
-rather than ten.  A real process is polled rather than `call-process',
-because only that can be interrupted when the call's deadline expires --
-timers do not run while `call-process' waits."
+rather than ten.  The polling, the kill and the reap belong to
+`gptel-yatools--run-process'; this function is the adapter that supplies
+PlantUML's own environment and arguments."
   (let* ((executable (gptel-yatools-diagram--executable))
          (cache (gptel-yatools-diagram--ensure-cache-directory))
-         (timeout (gptel-yatools--call-deadline))
          (profile gptel-yatools-plantuml-security-profile)
          (process-environment
           (if profile
               (cons (format "PLANTUML_SECURITY_PROFILE=%s" profile)
                     process-environment)
-            process-environment))
-         (outbuf (generate-new-buffer " *gptel-diagram-out*"))
-         (process nil)
-         (exit-code nil)
-         (timed-out nil))
-    (unwind-protect
-        (progn
-          (setq process
-                (make-process
-                 :name "gptel-diagram"
-                 :buffer outbuf
-                 :command (list shell-file-name shell-command-switch
-                                (concat "exec 2>&1; exec "
-                                        (mapconcat
-                                         #'shell-quote-argument
-                                         (append
-                                          (list executable
-                                                "-tsvg" "--no-error-image"
-                                                "-o" cache
-                                                "--graphviz-timeout"
-                                                (number-to-string
-                                                 (gptel-yatools-diagram--graphviz-timeout)))
-                                          files)
-                                         " ")))
-                 :connection-type 'pipe
-                 :noquery t
-                 ;; The default sentinel appends "Process ... finished"
-                 ;; to the buffer, where it would read as part of
-                 ;; PlantUML's own message.  stderr is merged into stdout
-                 ;; in the shell above for the same reason: with `:stderr'
-                 ;; Emacs creates a pipe process whose sentinel writes
-                 ;; into this very buffer.
-                 :sentinel #'ignore))
-          (let ((deadline (+ (float-time)
-                             (- timeout
-                                (min 0.5 (max 0.05 (* 0.1 timeout)))))))
-            (while (and (process-live-p process)
-                        (< (float-time) deadline))
-              (accept-process-output process
-                                     (min 0.2 (max 0.01
-                                                   (- deadline (float-time))))))
-            (if (process-live-p process)
-                (setq timed-out t)
-              (setq exit-code (process-exit-status process))))
-          (when (and process (process-live-p process))
-            ;; Emacs puts each subprocess in its own process group, so
-            ;; signalling the negative pid stops the JVM and its children.
-            (unless (ignore-errors
-                      (signal-process (- (process-id process)) 'SIGKILL))
-              (ignore-errors (signal-process process 'SIGKILL)))
-            (accept-process-output process 0.5)
-            (when (process-live-p process)
-              (ignore-errors (delete-process process))))
-          (when timed-out
-            (error "PlantUML did not finish within %s seconds and was killed. The diagram may be too large or GraphViz may be stuck; simplify the source or raise the timeout argument."
-                   timeout))
-          (cons exit-code
-                (with-current-buffer outbuf
-                  (string-trim (buffer-substring-no-properties
-                                (point-min) (point-max))))))
-      (when (buffer-live-p outbuf) (kill-buffer outbuf)))))
+            process-environment)))
+    (gptel-yatools--run-process
+     (append (list executable
+                   "-tsvg" "--no-error-image"
+                   "-o" cache
+                   "--graphviz-timeout"
+                   (number-to-string (gptel-yatools-diagram--graphviz-timeout)))
+             files))))
+
+(defun gptel-yatools-diagram--render (source)
+  "Render SOURCE into the cache and return its SVG path.
+
+Signals with the model-facing wording when PlantUML refuses the source."
+  (let* ((svg (gptel-yatools-diagram--svg-file source))
+         (file (gptel-yatools-diagram--write-source source)))
+    (unless (file-exists-p svg)
+      (let* ((outcome (gptel-yatools-diagram--run (list file)))
+             (status (plist-get outcome :status))
+             (exit (plist-get outcome :exit))
+             (output (string-trim (plist-get outcome :output))))
+        (cond
+         ((eq status 'timed-out)
+          (error "PlantUML did not finish within %s seconds and was killed. The diagram may be too large or GraphViz may be stuck; simplify the source or raise the timeout argument."
+                 (gptel-yatools--call-deadline)))
+         ((and (eq status 'exited) (integerp exit) (zerop exit)
+               (file-exists-p svg))
+          nil)
+         (t
+          ;; `--no-error-image' is honoured in file mode, but an image
+          ;; written by an older failure is still a picture of an error.
+          (ignore-errors (delete-file svg))
+          (error "PlantUML could not render the diagram%s.\n%s%s"
+                 (if (and (eq status 'exited) (integerp exit))
+                     (format " (exit code %d)" exit)
+                   "")
+                 (if (string-empty-p output)
+                     "(no message)"
+                   ;; PlantUML names the file it failed on, and that name
+                   ;; is ours, not the model's: the cache path helps nobody
+                   ;; and repeats a directory the model cannot use.
+                   (replace-regexp-in-string
+                    (regexp-quote (gptel-yatools-diagram--ensure-cache-directory))
+                    "" output))
+                 (if-let* ((hint (gptel-yatools-diagram--hint output source)))
+                     (concat "\n" hint)
+                   ""))))))
+    svg))
 
 (defun gptel-yatools-diagram--hint (stderr source)
   "Return a sentence that helps with STDERR for SOURCE, or nil.
@@ -502,37 +487,6 @@ syscall."
       (let ((coding-system-for-write 'utf-8-unix))
         (write-region source nil file nil 'silent)))
     file))
-
-(defun gptel-yatools-diagram--render (source)
-  "Render SOURCE into the cache and return its SVG path.
-
-Signals with the model-facing wording when PlantUML refuses the source."
-  (let* ((svg (gptel-yatools-diagram--svg-file source))
-         (file (gptel-yatools-diagram--write-source source)))
-    (unless (file-exists-p svg)
-      (let* ((result (gptel-yatools-diagram--run (list file)))
-             (exit (car result))
-             (stderr (cdr result)))
-        (if (and (integerp exit) (zerop exit) (file-exists-p svg))
-            nil
-          ;; `--no-error-image' is honoured in file mode, but an image
-          ;; written by an older failure is still a picture of an error.
-          (ignore-errors (delete-file svg))
-          (error "PlantUML could not render the diagram%s.\n%s%s"
-                 (if (integerp exit) (format " (exit code %d)" exit) "")
-                 (if (string-empty-p stderr)
-                     "(no message)"
-                   ;; PlantUML names the file it failed on, and that name
-                   ;; is ours, not the model's: the cache path helps nobody
-                   ;; and repeats a directory the model cannot use.
-                   (string-trim
-                    (replace-regexp-in-string
-                     (regexp-quote (gptel-yatools-diagram--ensure-cache-directory))
-                     "" stderr)))
-                 (if-let* ((hint (gptel-yatools-diagram--hint stderr source)))
-                     (concat "\n" hint)
-                   "")))))
-    svg))
 
 (defun gptel-yatools-diagram--describe (svg)
   "Return a one-line description of SVG, with its dimensions if known."

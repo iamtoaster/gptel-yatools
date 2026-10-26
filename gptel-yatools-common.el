@@ -38,7 +38,7 @@
 ;; rewrite its Result; advice on `NAME' sees everything, including the
 ;; deadline, and can stand in for the whole call.
 ;;
-;; This file is one module with three interfaces, and each is meant to be
+;; This file is one module with four interfaces, and each is meant to be
 ;; crossed at one seam rather than reached into.  They are declared here so
 ;; that a caller knows which one it is using, and so that a later edit can
 ;; tell a seam from an accident:
@@ -66,6 +66,15 @@
 ;;             `-enable-all', which decide what is sent.  The definition is
 ;;             the only place a tool's name, arguments, model-facing
 ;;             description and confirmation are written down.
+;;
+;;   run       `gptel-yatools--run-process' (run an argv under a deadline
+;;             and say what happened).  Two tool modules run subprocesses --
+;;             the shell runner and the diagram renderer -- and both need
+;;             the same four rules: merge stderr, close stdin, keep the
+;;             output even when the process is killed, and kill the whole
+;;             process group.  The rules live here so that a caller cannot
+;;             get one of them wrong, and so that a fix to a hung process
+;;             is a fix in one place.  See "Running a process" below.
 ;;
 ;; See the README for the tool list and for installation instructions.
 
@@ -141,6 +150,117 @@ helper called directly used to read anyway."
   "Return non-nil while the call in progress is waiting for the user."
   (and gptel-yatools--call
        (gptel-yatools-call-suspended gptel-yatools--call)))
+
+;;-------------------------------------------------------------------------
+;; Running a process
+;;
+;; Two tool modules run subprocesses, and neither of them wants to know how
+;; one is polled, killed and reaped.  The four rules below are the same for
+;; both, and each one was learned the hard way:
+;;
+;;   - stderr is merged into stdout in the shell, because with `:stderr'
+;;     Emacs creates a pipe process whose default sentinel appends
+;;     "Process ... finished" to the very buffer being read as output;
+;;   - stdin is closed at once, because a process that reads it (a pager,
+;;     `cat', an interactive program) waits forever for input that never
+;;     comes;
+;;   - output is returned even when the process is killed, because partial
+;;     output is how the model learns what the command got as far as;
+;;   - the kill is the whole process group, because Emacs puts each
+;;     subprocess in one and the shell may ignore SIGINT while its children
+;;     carry on.
+;;
+;; A real process is polled rather than `call-process' because only that
+;; can be interrupted when the call's deadline expires: timers do not run
+;; while `call-process' waits.
+;;-------------------------------------------------------------------------
+
+(cl-defun gptel-yatools--run-process (argv &key directory timeout)
+  "Run ARGV under a deadline and return a plist describing what happened.
+
+ARGV is a list of strings: the program and its arguments, not a shell
+command.  The keyword arguments are:
+
+  :directory  where to run, or nil for `default-directory'.
+  :timeout    seconds to allow, or nil for the call's own deadline.
+
+The answer is always a plist, never a signal, so a caller writes one
+`pcase' instead of a `condition-case' around each failure:
+
+  (:status exited     :exit CODE :output STRING)
+  (:status timed-out  :exit nil  :output STRING)
+  (:status start-error :exit nil  :output STRING)
+
+STDERR IS MERGED into STDOUT, STDIN IS CLOSED, and the output of a
+process that timed out is kept: a caller that reports why a command
+failed needs the bytes it managed to write.  The kill signals the whole
+process group, so a shell's children go with it."
+  (let* ((timeout (or timeout (gptel-yatools--call-deadline)))
+         (default-directory (or directory default-directory))
+         (outbuf (generate-new-buffer " *gptel-process*"))
+         (process nil)
+         (start-error nil)
+         (exit-code nil)
+         (timed-out nil))
+    (unwind-protect
+        (progn
+          (unwind-protect
+              (condition-case err
+                  (progn
+                    (setq process
+                          (make-process
+                           :name "gptel-process"
+                           :buffer outbuf
+                           :command (list shell-file-name shell-command-switch
+                                          (concat "exec 2>&1; exec "
+                                                  (mapconcat
+                                                   #'shell-quote-argument
+                                                   argv " ")))
+                           :connection-type 'pipe
+                           :noquery t
+                           ;; The default sentinel would append its own
+                           ;; line to the buffer this function reads.
+                           :sentinel #'ignore))
+                    (ignore-errors (process-send-eof process))
+                    ;; Stop a little early, so the kill and reap below
+                    ;; still fit inside the deadline and the partial
+                    ;; output gets reported rather than being cut short by
+                    ;; the tool-level timer.  The margin scales down with
+                    ;; the timeout, so a caller asking for one second
+                    ;; still gets most of it.
+                    (let ((deadline (+ (float-time)
+                                       (- timeout
+                                          (min 0.5 (max 0.05 (* 0.1 timeout)))))))
+                      (while (and (process-live-p process)
+                                  (< (float-time) deadline))
+                        (accept-process-output
+                         process
+                         (min 0.2 (max 0.01 (- deadline (float-time))))))
+                      (if (process-live-p process)
+                          (setq timed-out t)
+                        (setq exit-code (process-exit-status process)))))
+                (error (setq start-error (error-message-string err))))
+            ;; This also runs when the tool-level timer unwound us out of
+            ;; the polling loop above.
+            (when (and process (process-live-p process))
+              (unless (ignore-errors
+                        (signal-process (- (process-id process)) 'SIGKILL))
+                (ignore-errors (signal-process process 'SIGKILL)))
+              (accept-process-output process 0.5)
+              (when (process-live-p process)
+                (ignore-errors (delete-process process)))))
+          (list :status (cond (start-error 'start-error)
+                              (timed-out 'timed-out)
+                              (t 'exited))
+                :exit (and (not timed-out) (not start-error) exit-code)
+                ;; A process that never started has no output of its own;
+                ;; the reason it did not is the only thing there is to
+                ;; report, so it travels the same way output does.
+                :output (or start-error
+                            (with-current-buffer outbuf
+                              (buffer-substring-no-properties
+                               (point-min) (point-max))))))
+      (when (buffer-live-p outbuf) (kill-buffer outbuf)))))
 
 (defmacro gptel-yatools--with-deadline-suspended (&rest body)
   "Run BODY without counting its time against the call's deadline.

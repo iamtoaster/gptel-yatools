@@ -57,9 +57,10 @@ output, or a description of why it could not be started.
 
 The command is killed once it outlives the current tool timeout
 \(the call's deadline, or `gptel-yatools-timeout'), so a hung command
-cannot block Emacs forever.  `call-process' cannot be interrupted --
-timers do not run while it waits -- which is why this uses a real
-process and polls it instead."
+cannot block Emacs forever.  The polling, the kill and the reap are
+`gptel-yatools--run-process's, in `gptel-yatools-common.el': this
+function is the adapter that turns its outcome into the sentence the
+model reads."
   (let* ((root (gptel-yatools--workspace-root))
          ;; Ask for the root once, before `default-directory' is rebound
          ;; below: a relative path and a message must both mean the
@@ -70,116 +71,49 @@ process and polls it instead."
          (target-directory (if (and directory (not (string-empty-p directory)))
                                (expand-file-name directory root)
                              root))
-         (shown-directory (gptel-yatools--display-path target-directory))
-         (default-directory target-directory))
+         (shown-directory (gptel-yatools--display-path target-directory)))
     (cond
-     ((not (file-directory-p default-directory))
+     ((not (file-directory-p target-directory))
       (gptel-yatools-shell--command-result
        (format "Error: working directory does not exist: %s"
                shown-directory)))
      ((string-empty-p (string-trim command))
       (gptel-yatools-shell--command-result "Error: command is empty."))
      (t
-      (let ((outbuf (generate-new-buffer " *gptel-exec-output*")))
-        (unwind-protect
-            (let ((exit-code nil) (start-error nil) (timed-out nil)
-                  (process nil))
-              (unwind-protect
-                  (condition-case err
-                      (progn
-                        (setq process
-                              (make-process
-                               :name "gptel-exec"
-                               :buffer outbuf
-                               :command (list shell-file-name
-                                              shell-command-switch
-                                              ;; Merge stderr into stdout
-                                              ;; in the shell itself: with
-                                              ;; `:stderr' Emacs creates a
-                                              ;; pipe process whose default
-                                              ;; sentinel appends "Process
-                                              ;; ... finished" to this very
-                                              ;; buffer.
-                                              (concat "exec 2>&1; " command))
-                               :connection-type 'pipe
-                               :noquery t
-                               :sentinel #'ignore))
-                        ;; A command that reads stdin (`cat', a pager, an
-                        ;; interactive program) would otherwise wait
-                        ;; forever for input that never arrives.
-                        (ignore-errors (process-send-eof process))
-                        ;; Stop a little early so that the kill and reap
-                        ;; below still fit inside the tool deadline and
-                        ;; report the partial output, rather than being
-                        ;; cut short by the tool-level timer.  The margin
-                        ;; scales down for short timeouts so that a
-                        ;; caller asking for one second still gets most
-                        ;; of it.
-                        (let ((deadline (+ (float-time)
-                                           (- timeout
-                                              (min 0.5
-                                                   (max 0.05
-                                                        (* 0.1 timeout)))))))
-                          (while (and (process-live-p process)
-                                      (< (float-time) deadline))
-                            (accept-process-output
-                             process
-                             (min 0.2 (max 0.01
-                                           (- deadline
-                                              (float-time))))))
-                          (if (process-live-p process)
-                              (setq timed-out t)
-                            (setq exit-code
-                                  (process-exit-status process)))))
-                    (error (setq start-error (error-message-string err))))
-                ;; Killing the shell is not enough: it may ignore SIGINT,
-                ;; and it may have started children.  Emacs puts each
-                ;; subprocess in its own process group, so signalling the
-                ;; negative pid stops the whole tree.  This also runs when
-                ;; the tool-level timer unwound us out of the polling loop.
-                (when (and process (process-live-p process))
-                  (unless (ignore-errors
-                            (signal-process (- (process-id process))
-                                            'SIGKILL))
-                    (ignore-errors (signal-process process 'SIGKILL)))
-                  (accept-process-output process 0.5)
-                  (when (process-live-p process)
-                    (ignore-errors (delete-process process)))))
-              (let ((output
-                     (with-current-buffer outbuf
-                       (buffer-substring-no-properties
-                        (point-min) (point-max)))))
-                ;; The command may have changed files on disk, which can
-                ;; change which pending entries still differ, so the cached
-                ;; header-line count must not outlive it.
-                (gptel-yatools-vfs-disk-moved-externally)
-                (gptel-yatools-shell--command-result
-                 (cond
-                  (start-error
-                   (format "Failed to start command in %s.\nError: %s"
-                           shown-directory start-error))
-                  (timed-out
-                   (format "Command killed in %s: it exceeded its %s second timeout and was terminated. It did not finish, so do not assume it completed. Partial output:\n%s"
-                           shown-directory timeout
-                           (if (string-empty-p output)
-                               "(no output)" output)))
-                  ((and (integerp exit-code) (zerop exit-code))
-                   (format "Command succeeded in %s (exit code 0).\nOutput:\n%s"
-                           shown-directory
-                           (if (string-empty-p output)
-                               "(no output)" output)))
-                  ((integerp exit-code)
-                   (format "Command failed in %s (exit code %d).\nOutput:\n%s"
-                           shown-directory exit-code
-                           (if (string-empty-p output)
-                               "(no output)" output)))
-                  (t
-                   (format "Command terminated by signal in %s: %s\nOutput:\n%s"
-                           shown-directory exit-code
-                           (if (string-empty-p output)
-                               "(no output)" output)))))))
-          (when (buffer-live-p outbuf)
-            (kill-buffer outbuf))))))))
+      (let ((outcome (gptel-yatools--run-process
+                      ;; The runner merges stderr and closes stdin for
+                      ;; every caller, so this adapter supplies nothing
+                      ;; but the command itself and the directory.
+                      (list shell-file-name shell-command-switch command)
+                      :directory target-directory
+                      :timeout timeout)))
+        ;; The command may have changed files on disk, which can change
+        ;; which pending entries still differ, so the cached header-line
+        ;; count must not outlive it.
+        (gptel-yatools-vfs-disk-moved-externally)
+        (gptel-yatools-shell--command-result
+         (let ((output (plist-get outcome :output))
+               (exit (plist-get outcome :exit)))
+           (pcase (plist-get outcome :status)
+             ('start-error
+              (format "Failed to start command in %s.\nError: %s"
+                      shown-directory (string-trim output)))
+             ('timed-out
+              (format "Command killed in %s: it exceeded its %s second timeout and was terminated. It did not finish, so do not assume it completed. Partial output:\n%s"
+                      shown-directory timeout
+                      (if (string-empty-p output) "(no output)" output)))
+             ((and 'exited (guard (and (integerp exit) (zerop exit))))
+              (format "Command succeeded in %s (exit code 0).\nOutput:\n%s"
+                      shown-directory
+                      (if (string-empty-p output) "(no output)" output)))
+             ((and 'exited (guard (integerp exit)))
+              (format "Command failed in %s (exit code %d).\nOutput:\n%s"
+                      shown-directory exit
+                      (if (string-empty-p output) "(no output)" output)))
+             (_
+              (format "Command terminated by signal in %s: %s\nOutput:\n%s"
+                      shown-directory exit
+                      (if (string-empty-p output) "(no output)" output)))))))))))
 
 
 ;;-------------------------------------------------------------------------

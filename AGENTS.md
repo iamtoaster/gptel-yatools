@@ -25,7 +25,8 @@ dependency declaration, and ERT is the test harness.
     `gptel-yatools-vfs-entry` and `-pending` are deliberately two
     questions.
   - `0002-the-tool-kit-stays-one-file.md` — why
-    `gptel-yatools-common.el` is one file with three declared seams.
+    `gptel-yatools-common.el` is one file with declared seams (respond,
+    call, define, and — by amendment — run).
   - `0003-a-tool-may-own-an-opaque-directory.md` — when a tool may write
     outside the VFS (conditions on the model's inability to name a path and
     the artifact being disposable), and why `execute_command` is not an
@@ -42,9 +43,9 @@ dependency declaration, and ERT is the test harness.
 
 | File | Owns | Start at |
 | --- | --- | --- |
-| `gptel-yatools-common.el` | The tool kit: `Result`, size limits, envelope, provenance rendering, deadline/call context, `gptel-yatools-define-tool`, previews, enabling tools. | `gptel-yatools-define-tool`, `gptel-yatools-ok`, `gptel-yatools--respond`, `gptel-yatools-page` |
+| `gptel-yatools-common.el` | The tool kit: `Result`, size limits, envelope, provenance rendering, deadline/call context, `gptel-yatools-define-tool`, previews, enabling tools, and the process runner both subprocess tools share. | `gptel-yatools-define-tool`, `gptel-yatools-ok`, `gptel-yatools--respond`, `gptel-yatools-page`, `gptel-yatools--run-process` |
 | `gptel-yatools-vfs.el` | The buffer-local VFS: entries and baselines, conflict/refusal logic, pending changes, encoding, diffing, sync review UI, and the filesystem tools. | `gptel-yatools-vfs-entry`, `-pending`, `-read`, `-write`, `-edit`, `-refusal`, `-sync`; `gptel-yatools-write-diff-mode` |
-| `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: process polling, timeout killing, command confirmation, VFS-pending warning. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
+| `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: the command's own wording and its VFS-pending warning, over the shared process runner. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
 | `gptel-yatools-skills.el` | Skill discovery, frontmatter validation, content-keyed parse cache, skill handles/resolution, the `skill` tool, attaching skills by hand, the skill browser. | `gptel-yatools-skills-resolve`, `-handle`, `-add`, `gptel-yatools-skills` |
 | `gptel-yatools-diagram.el` | The `render_diagram` tool, the content-addressed diagram cache, the render token, the inline overlay, and the transcript rebuild. | `gptel-yatools-render-diagram`, `gptel-yatools-diagram--token`, `--refresh`, `--rebuild-missing` |
 | `gptel-yatools.el` | gptel glue only: run a tool call in the buffer that owns the request, draw the header-line extras, load the tool modules. | `gptel-yatools--accept-tool-calls-in-owner`, `gptel-yatools--extend-header-line` |
@@ -66,7 +67,7 @@ model receives; `M-x gptel-yatools-skills` opens the skill browser.
 
 ## Test harness
 
-The suite is 264 ERT tests.  It uses no network and no user prompts, and
+The suite is ERT.  It uses no network and no user prompts, and
 every test runs in a throwaway temp directory.  Run it from the repository
 root:
 
@@ -184,6 +185,5 @@ rm -f *.elc
 - The six source files byte-compile without warnings.
 - User-visible changes are reflected in `README.md`; new or changed domain
   terms in `GLOSSARY.md`; architectural decisions in a new ADR.
-- The README's test count (237) is updated if tests were added or removed.
 - No VFS changes are left pending: `vfs_diff`, then `file_sync` (or
   `vfs_discard`) before ending the session.

@@ -620,6 +620,124 @@ a path means half way through the call."
         (funcall (gptel-yatools-test--tool "read_workspace_root")))
       (should (= (length timer-list) before)))))
 
+;;;; 48b. One seam runs every subprocess
+
+;; `execute_command' and `render_diagram' both run a process, and both need
+;; the same four rules: stderr merged, stdin closed, output kept when the
+;; process is killed, and the kill aimed at the whole process group.  They
+;; were two copies of one loop until `gptel-yatools--run-process' became the
+;; seam, and the copies had already drifted apart.
+
+(ert-deftest gptel-yatools-test-run-process-reports-exit-and-output ()
+  "A finished process answers with its status, its exit code and its output."
+  (gptel-yatools-test--in-dir
+    (let ((outcome (gptel-yatools--run-process
+                    (list shell-file-name shell-command-switch "echo hello"))))
+      (should (eq (plist-get outcome :status) 'exited))
+      (should (= (plist-get outcome :exit) 0))
+      (should (string-match-p "hello" (plist-get outcome :output))))))
+
+(ert-deftest gptel-yatools-test-run-process-keeps-a-failing-exit-code ()
+  "A non-zero exit is an outcome, not a signal, and the output survives."
+  (gptel-yatools-test--in-dir
+    (let ((outcome (gptel-yatools--run-process
+                    (list shell-file-name shell-command-switch
+                          "echo out; exit 3"))))
+      (should (eq (plist-get outcome :status) 'exited))
+      (should (= (plist-get outcome :exit) 3))
+      (should (string-match-p "out" (plist-get outcome :output))))))
+
+(ert-deftest gptel-yatools-test-run-process-merges-stderr ()
+  "Stderr arrives in the same string as stdout, without a sentinel's line."
+  (gptel-yatools-test--in-dir
+    (let ((outcome (gptel-yatools--run-process
+                    (list shell-file-name shell-command-switch
+                          "echo to-out; echo to-err >&2"))))
+      (should (string-match-p "to-out" (plist-get outcome :output)))
+      (should (string-match-p "to-err" (plist-get outcome :output)))
+      (should-not (string-match-p "Process .* finished"
+                                  (plist-get outcome :output))))))
+
+(ert-deftest gptel-yatools-test-run-process-closes-stdin ()
+  "A process that reads stdin must not wait for input that never comes.
+
+`cat' is the smallest such process: without EOF on its stdin it would sit
+there until the deadline, which is the hang this pins."
+  (gptel-yatools-test--in-dir
+    (let ((outcome (gptel-yatools--run-process (list "cat") :timeout 10)))
+      (should (eq (plist-get outcome :status) 'exited))
+      (should (= (plist-get outcome :exit) 0)))))
+
+(ert-deftest gptel-yatools-test-run-process-keeps-the-output-of-a-killed-process ()
+  "A process that outlives its deadline is killed and its output kept."
+  (gptel-yatools-test--in-dir
+    (let* ((start (float-time))
+           (outcome (gptel-yatools--run-process
+                     (list shell-file-name shell-command-switch
+                           "echo started; sleep 20; echo finished")
+                     :timeout 1)))
+      (should (eq (plist-get outcome :status) 'timed-out))
+      (should-not (plist-get outcome :exit))
+      (should (string-match-p "started" (plist-get outcome :output)))
+      (should-not (string-match-p "finished" (plist-get outcome :output)))
+      (should (< (- (float-time) start) 10)))))
+
+(ert-deftest gptel-yatools-test-run-process-names-a-failed-start ()
+  "A program that cannot be started is an outcome with a message in it.
+
+The shell wrapper makes a missing *command* an ordinary exit code 127, so
+the only way to fail the start itself is for the shell to be missing."
+  (gptel-yatools-test--in-dir
+    (let ((shell-file-name "/nonexistent/sh")
+          (outcome nil))
+      (setq outcome (gptel-yatools--run-process (list "true")))
+      (should (eq (plist-get outcome :status) 'start-error))
+      (should-not (plist-get outcome :exit))
+      ;; Whatever the platform says, it says something: the caller has a
+      ;; sentence to print rather than an empty buffer.
+      (should-not (string-empty-p (plist-get outcome :output))))))
+
+(ert-deftest gptel-yatools-test-run-process-honours-the-directory ()
+  "The directory the caller names is where the process runs."
+  (gptel-yatools-test--in-dir
+    (let* ((sub (expand-file-name "sub/" gptel-yatools-test--root))
+           (outcome nil))
+      (make-directory sub t)
+      (setq outcome (gptel-yatools--run-process
+                     (list shell-file-name shell-command-switch "pwd")
+                     :directory sub))
+      ;; `pwd' may report the resolved name; compare the tail.
+      (should (string-match-p (regexp-quote "sub")
+                              (plist-get outcome :output))))))
+
+(ert-deftest gptel-yatools-test-subprocesses-are-run-at-one-seam ()
+  "No tool module may build its own process loop.
+
+`gptel-yatools-common.el' declares the run interface so that the four
+rules a subprocess needs -- merged stderr, closed stdin, output kept on a
+kill, and a whole-group kill -- cannot be got wrong one module at a time.
+A module that calls `make-process' itself has reached past that seam."
+  (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
+                                        "")))
+         (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
+                  "gptel-yatools-diagram.el"))
+         (offenders nil))
+    (dolist (file files)
+      (let ((path (expand-file-name file root)))
+        (when (file-readable-p path)
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (while (re-search-forward
+                    "\\(make-process\\|accept-process-output\\|process-live-p\\|signal-process\\)"
+                    nil t)
+              (push (format "%s:%d"
+                            file
+                            (line-number-at-pos (match-beginning 0)))
+                    offenders))))))
+    (should (null offenders))))
+
 (ert-deftest gptel-yatools-test-timeout-arg-is-added-once ()
   "A registered tool must carry exactly one TIMEOUT argument.
 

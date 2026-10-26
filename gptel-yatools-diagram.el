@@ -694,7 +694,7 @@ exists."
   :description
   "Render PlantUML source to an image and return the exact line to put in your answer so the user sees it. Give the whole source in `source`; `@startuml`/`@enduml` are added if you omit them. One diagram per call. Local file includes are unavailable by default: use `!theme <name>` or a `<stdlib/…>` include instead.
 
-Call it with neither argument and it lists the diagram types it has a syntax sheet for; pass `help` with one of those names to get that sheet, which is a compact reference for the syntax that most often goes wrong. Ask for the sheet before writing a diagram type you are not sure of rather than guessing and correcting afterwards. On a syntax error the tool returns PlantUML's line and message; fix the source and call again rather than describing the failure."
+Call it with neither argument and it lists the diagram types it has a cheat sheet for; pass `help` with one of those names to get that sheet, which is a compact reference for the syntax that most often goes wrong. Ask for the sheet before writing a diagram type you are not sure of rather than guessing and correcting afterwards. On a syntax error the tool returns PlantUML's line and message; fix the source and call again rather than describing the failure."
   :args '((:name "source"
                 :type string
                 :description "The complete PlantUML source of one diagram. `@startuml`/`@enduml` may be omitted."

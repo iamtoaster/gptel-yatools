@@ -282,4 +282,25 @@ are read back for their `:args`, each source is hashed to recompute its
 cache name, and only the missing ones are rendered -- in a single PlantUML
 process, since a JVM start dominates a render.  It is why deleting the
 cache, or copying a chat to another machine, costs time and not data.
-_Avoid_: Re-render, cache refresh
+A rebuild that fails says so in one sentence; it is a hook and a command,
+not a tool call, so there is no envelope to carry a condition.
+
+**Token resolution**:
+What a render token means in the cache, answered once per token: `found`
+with the one file, `missing` with nothing, or `ambiguous` with the files
+that match.  Drawing and opening both ask it, so they cannot disagree
+about whether a token names a file; what they do with the answer differs
+on purpose.  Drawing leaves an unresolved token as text and says nothing,
+because it runs once per response and a repeated complaint is noise;
+`gptel-yatools-diagram-open-at-point` says all three answers out loud,
+because that is where the user asked.
+_Avoid_: Token lookup, diagram handle
+
+**Cheat sheet**:
+The PlantUML reference `render_diagram` answers from: a defcustom divided
+into `## <topic>' sections, one per diagram type plus `style' and
+`gotchas'.  A call with no arguments lists the sections and a call with
+`help' returns one, the two-step the `skill' tool uses.  The list is read
+from the sheet's own headings rather than kept beside them, so a section a
+user adds is offered without any other edit.
+_Avoid_: Syntax reference, prompt fragment

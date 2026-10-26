@@ -253,6 +253,14 @@ Rendering needs [PlantUML](https://plantuml.com); some diagram types also
 need GraphViz.  Without PlantUML the tool says so and names the variable to
 set, rather than failing obscurely.
 
+The tool also carries a cheat sheet, one section per diagram type.  Called
+with no arguments it lists the sections it has; called with `help` set to
+one of them it returns that section — a compact reference for the syntax
+that most often goes wrong.  The sheet is the defcustom
+`gptel-yatools-diagram-cheatsheet`, and the list of sections is read from
+its own `## ` headings, so a section you add is offered without any other
+edit.
+
 ```elisp
 (setq gptel-yatools-plantuml-command "plantuml"        ; or an absolute path
       gptel-yatools-plantuml-security-profile "SANDBOX")

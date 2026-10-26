@@ -135,8 +135,9 @@ rm -f *.elc
   helper that expects the refusal.
 - `gptel-yatools-sync-without-review` is the batch escape hatch for the
   review step; the conflict and encoding checks still apply.
-- Adding a new tool module means adding its filename to the hard-coded list
-  in `gptel-yatools-test-response-machinery-is-crossed-at-one-seam`
+- Adding a new tool module means adding its filename to the hard-coded lists
+  in `gptel-yatools-test-response-machinery-is-crossed-at-one-seam` and
+  `gptel-yatools-test-subprocesses-are-run-at-one-seam`
   (`tests/gptel-yatools-tests.el`).
 
 ## Rules that the code depends on
@@ -171,6 +172,12 @@ rm -f *.elc
 - **One refusal answer.**  `gptel-yatools-vfs-refusal` decides conflicts and
   blocks for the review partition, the diff header and the actual write, so
   the files the user approved are the files that get written.
+- **One seam runs every subprocess.**  `gptel-yatools--run-process`
+  (`common.el`) takes an argv and a deadline and returns a
+  `:status`/`:exit`/`:output` plist; it merges stderr, closes stdin, keeps
+  the output of a process it kills, and kills the whole process group.  A
+  tool module that calls `make-process` has reached past it — a test
+  enforces that, the same way the respond seam is enforced.
 - **Skills are read from disk only.**  A pending `SKILL.md` write is
   invisible to discovery; the model must not author instructions that are
   then treated as authoritative before review.  `allowed-tools` is advisory

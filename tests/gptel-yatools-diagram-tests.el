@@ -154,11 +154,52 @@ PlantUML says stub `--run' with this or with a failure of their own."
         (should (string-match-p "Ask again with one of" reply))))))
 
 (ert-deftest gptel-yatools-diagram-test-every-topic-resolves ()
-  "Each advertised topic has a section, and none of them is empty."
-  (dolist (topic gptel-yatools-diagram--topics)
-    (let ((text (gptel-yatools-diagram-cheatsheet-text topic)))
-      (should (string-match-p (format "PlantUML %s" (regexp-quote topic)) text))
-      (should (> (length text) 80)))))
+  "Each section of the sheet is one the sheet itself lists, and none is empty.
+
+The list is derived from the headings, so this asks the question the
+model will ask: every name the tool offers resolves to a section."
+  (let ((topics (gptel-yatools-diagram-cheatsheet-topics)))
+    (should topics)
+    (dolist (topic topics)
+      (let ((text (gptel-yatools-diagram-cheatsheet-text topic)))
+        (should (string-match-p (format "PlantUML %s" (regexp-quote topic)) text))
+        (should (> (length text) 80))))))
+
+(ert-deftest gptel-yatools-diagram-test-a-new-section-lists-itself ()
+  "Extending the sheet is one edit, and the tool offers what it now holds.
+
+`--topics' used to be a second, hand-maintained list, so a section added
+to the variable was silently unreachable: the sheet matched it and the
+tool never named it."
+  (gptel-yatools-diagram-test--cache
+    (let ((gptel-yatools-diagram-cheatsheet
+           (concat gptel-yatools-diagram-cheatsheet
+                   "\n\n## gantt\n\n    @startgantt\n    [Task] lasts 5 days\n    @endgantt\n")))
+      (should (equal (gptel-yatools-diagram-cheatsheet-topics)
+                     '("sequence" "class" "activity" "state" "component" "er"
+                       "mindmap" "c4" "style" "gotchas" "gantt")))
+      ;; The listing the model gets names it...
+      (let ((reply (funcall (gptel-yatools-test--tool "render_diagram")
+                            nil nil)))
+        (should (string-match-p "gantt" reply)))
+      ;; ...and asking for it works.
+      (let ((reply (funcall (gptel-yatools-test--tool "render_diagram")
+                            nil "gantt")))
+        (should (string-match-p "PlantUML gantt" reply))
+        (should (string-match-p "lasts 5 days" reply))))))
+
+(ert-deftest gptel-yatools-diagram-test-no-arguments-is-the-index ()
+  "A call with neither argument lists the sheets instead of failing.
+
+The model has to be able to learn what `help' answers to without editing
+the description, which is why the list is not spelled out there -- the
+same shape the `skill' tool uses, for the same reason."
+  (gptel-yatools-diagram-test--cache
+    (let ((reply (funcall (gptel-yatools-test--tool "render_diagram")
+                          nil nil)))
+      (gptel-yatools-test--should-be-enveloped reply)
+      (should (string-match-p "Ask again with one of" reply))
+      (should (string-match-p "Nothing was rendered" reply)))))
 
 (ert-deftest gptel-yatools-diagram-test-cheatsheet-is-a-variable-users-can-edit ()
   "The sheet is a defcustom string, so a user can correct it without a build."

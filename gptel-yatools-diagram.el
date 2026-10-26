@@ -290,11 +290,6 @@ correct or extend it without touching the package."
   :type 'string
   :group 'gptel-yatools-diagram)
 
-(defconst gptel-yatools-diagram--topics
-  '("sequence" "class" "activity" "state" "component" "er" "mindmap"
-    "c4" "style" "gotchas")
-  "Topic names `render_diagram' answers to in its `help' argument.")
-
 ;;;; Content addressing
 
 (defconst gptel-yatools-diagram--hash-length 16
@@ -606,6 +601,21 @@ matched nothing, which is how a rendered diagram came back as a bare
 
 ;;;; The cheat sheet
 
+(defun gptel-yatools-diagram-cheatsheet-topics ()
+  "Return the sections `gptel-yatools-diagram-cheatsheet' holds.
+
+The names are read from the sheet's own `## <topic>' headings, so a user
+who adds a section gets it listed, matched and offered without editing
+anything else.  That is the reason the sheet is a variable, and the
+reason there is no separate list to fall out of step with it."
+  (let ((sheet gptel-yatools-diagram-cheatsheet)
+        (topics nil)
+        (start 0))
+    (while (string-match "^##[ \t]+\\([^ \t\n]+\\)" sheet start)
+      (push (match-string 1 sheet) topics)
+      (setq start (match-end 0)))
+    (nreverse topics)))
+
 (defun gptel-yatools-diagram--dedent (text)
   "Return TEXT with its common leading indentation removed."
   (let* ((lines (split-string text "\n"))
@@ -630,12 +640,15 @@ matched nothing, which is how a rendered diagram came back as a bare
 TOPIC is matched case-insensitively against the `## <topic>' headings of
 `gptel-yatools-diagram-cheatsheet'.  An empty or unknown TOPIC returns the
 topic list rather than the whole sheet, which keeps the reply small and
-tells the model what to ask for next."
+tells the model what to ask for next -- the same two-step the `skill'
+tool uses, for the same reason: the list a model can see is the list that
+exists."
   (let* ((topic (downcase (string-trim (or topic ""))))
-         (sheet gptel-yatools-diagram-cheatsheet))
+         (sheet gptel-yatools-diagram-cheatsheet)
+         (topics (gptel-yatools-diagram-cheatsheet-topics)))
     (if (string-empty-p topic)
         (format "Ask again with one of: %s."
-                (mapconcat #'identity gptel-yatools-diagram--topics ", "))
+                (mapconcat #'identity topics ", "))
       (let ((start (save-match-data
                      (when (string-match
                             (concat "^##[ \t]+"
@@ -646,7 +659,7 @@ tells the model what to ask for next."
         (if (null start)
             (format "No cheat sheet for %s. Ask again with one of: %s."
                     topic
-                    (mapconcat #'identity gptel-yatools-diagram--topics ", "))
+                    (mapconcat #'identity topics ", "))
           (let* ((end (or (save-match-data
                             (when (string-match "^##[ \t]+" sheet start)
                               (match-beginning 0)))
@@ -662,22 +675,34 @@ tells the model what to ask for next."
   :name "render_diagram"
   :category "diagram"
   :description
-  "Render PlantUML source to an image and return the exact line to put in your answer so the user sees it. Give the whole source in `source`; `@startuml`/`@enduml` are added if you omit them. One diagram per call. Local file includes are unavailable by default: use `!theme <name>` or a `<stdlib/…>` include instead. Pass `help` instead of `source` to get a compact syntax sheet for a diagram type. On a syntax error the tool returns PlantUML's line and message; fix the source and call again rather than describing the failure."
+  "Render PlantUML source to an image and return the exact line to put in your answer so the user sees it. Give the whole source in `source`; `@startuml`/`@enduml` are added if you omit them. One diagram per call. Local file includes are unavailable by default: use `!theme <name>` or a `<stdlib/…>` include instead.
+
+Call it with neither argument and it lists the diagram types it has a syntax sheet for; pass `help` with one of those names to get that sheet, which is a compact reference for the syntax that most often goes wrong. Ask for the sheet before writing a diagram type you are not sure of rather than guessing and correcting afterwards. On a syntax error the tool returns PlantUML's line and message; fix the source and call again rather than describing the failure."
   :args '((:name "source"
                 :type string
                 :description "The complete PlantUML source of one diagram. `@startuml`/`@enduml` may be omitted."
                 :optional t)
           (:name "help"
                  :type string
-                 :description "A diagram type to get syntax for instead of rendering: \"sequence\", \"class\", \"activity\", \"state\", \"component\", \"er\", \"mindmap\", \"c4\", \"style\" or \"gotchas\". Omit `source`."
+                 :description "A diagram type to get syntax for instead of rendering, named exactly as the list shows it (e.g. \"sequence\", \"class\", \"er\"). Omit it, and omit `source` too, to list the types available."
                  :optional t))
   (cond
+   ;; No arguments at all is the index request: the list of sheets is
+   ;; small, cheap, and the only way the model can learn what `help'
+   ;; answers to.  Asking with an empty `help' is the same request, which
+   ;; is what the `skill' tool does with an empty name.
+   ((and (null help) (null source))
+    (gptel-yatools-ok
+     (gptel-yatools-diagram-cheatsheet-text "")
+     :comment "Syntax topics. Nothing was rendered and nothing was written."))
    ((not (null help))
     (gptel-yatools-ok
      (gptel-yatools-diagram-cheatsheet-text help)
      :comment "Syntax reference. Nothing was rendered and nothing was written."))
-   ((or (null source) (string-empty-p (string-trim source)))
-    (error "The source is empty. Give the PlantUML source of one diagram, or pass help to get syntax for a diagram type."))
+   ;; A source that is present but empty is a mistake, not an index
+   ;; request: the model meant to draw something and said nothing.
+   ((string-empty-p (string-trim source))
+    (error "The source is empty. Give the PlantUML source of one diagram, or call with no arguments to list the diagram types that have a syntax sheet."))
    ((> (gptel-yatools-diagram--start-count source) 1)
     (error "The source contains %d diagrams. One diagram per call; render them separately."
            (gptel-yatools-diagram--start-count source)))

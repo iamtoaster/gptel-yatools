@@ -265,12 +265,15 @@ _Avoid_: Diagram link, render id, handle (that is a skill's)
 
 **Diagram cache**:
 The one directory `render_diagram` writes: `<hash>.svg` and `<hash>.puml`
-named by the digest of the source that produced them, so a name never
-describes content it does not hold and nothing has to be invalidated.
-Nothing in it is reachable by a path the model chooses, which is what lets
-it be written without a review -- see
-docs/adr/0003-a-tool-may-own-an-opaque-directory.md.  Every entry is
-rebuildable from the chat, so the whole directory is disposable.
+named by the digest of the source alone -- the *request*, not the picture
+that comes back, since the executable, its version and the security
+profile are outside the digest.  So a source always finds its render
+without any bookkeeping, and a changed source is a different name; but a
+changed PlantUML is not, which is why the directory is disposable and
+`gptel-yatools-diagram-clear-cache` is its only maintenance.  Nothing in
+it is reachable by a path the model chooses, which is what lets it be
+written without a review -- see
+docs/adr/0003-a-tool-may-own-an-opaque-directory.md.
 _Avoid_: Image store, diagram folder
 
 **Rebuild**:

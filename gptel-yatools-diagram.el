@@ -307,7 +307,24 @@ correct or extend it without touching the package."
   (secure-hash 'sha256 source))
 
 (defun gptel-yatools-diagram--hash (source)
-  "Return the cache name of SOURCE, without a directory or extension."
+  "Return the cache name of SOURCE, without a directory or extension.
+
+The digest covers the SOURCE and nothing else -- not the PlantUML
+executable, its version, the GraphViz layout engine or
+`gptel-yatools-plantuml-security-profile'.  So the name addresses the
+*request*, not the picture: it answers \"is this source's render here?\"
+and not \"is this picture the one this PlantUML would draw today?\".
+
+That is deliberate.  Those other inputs are configuration the user sets,
+not something the model can vary per call, so folding them in would
+change the token every time a setting moved and would break the one
+property the design rests on: a token recomputed from the transcript
+addresses the same file it always did.  The cost is that upgrading
+PlantUML, or changing the security profile, can leave an older picture
+in place for a source already rendered.  `gptel-yatools-diagram-clear-cache'
+is the cure, and the whole cache is disposable by construction (ADR 0003).
+See docs/plantuml-diagram-tool.md, section 5.2, for why the name is
+content-addressed at all."
   (substring (gptel-yatools-diagram--digest source)
              0 gptel-yatools-diagram--hash-length))
 

@@ -536,13 +536,15 @@ Signals with the model-facing wording when PlantUML refuses the source."
 
 (defun gptel-yatools-diagram--describe (svg)
   "Return a one-line description of SVG, with its dimensions if known."
-  (let ((size (file-attribute-size (file-attributes svg)))
-        (dimensions (gptel-yatools-diagram--dimensions svg)))
+  (let* ((attributes (file-attributes svg))
+         (size (and attributes (file-attribute-size attributes)))
+         (dimensions (gptel-yatools-diagram--dimensions svg)))
     (format "%s, %s"
             (or dimensions "SVG")
-            (if (and size (> size 1024))
-                (format "%.1f KB" (/ size 1024.0))
-              (format "%d bytes" (or size 0))))))
+            (cond
+             ((null size) "size unknown")
+             ((> size 1024) (format "%.1f KB" (/ size 1024.0)))
+             (t (format "%d bytes" size))))))
 
 (defun gptel-yatools-diagram--dimensions (svg)
   "Return SVG's width and height as a string, or nil.
@@ -676,47 +678,63 @@ tells the model what to ask for next."
       (create-image file 'svg nil :max-width (gptel-yatools-diagram--max-width)))))
 
 (defun gptel-yatools-diagram--clear-overlays (&optional beg end)
-  "Remove the overlays this module drew between BEG and END."
+  "Remove the overlays this module drew between BEG and END.
+
+A dead overlay is dropped from the list without being asked for its
+bounds.  `evaporate' deletes an overlay when the text under it is
+deleted, and `overlay-start' answers nil for a deleted overlay: comparing
+that with BEG signalled `wrong-type-argument number-or-marker-p nil',
+which took the whole redraw with it -- so once any token had been
+evaporated, no later diagram in that buffer was ever drawn."
   (setq gptel-yatools-diagram--overlays
         (cl-delete-if (lambda (overlay)
-                        (if (and beg end
-                                 (or (< (overlay-end overlay) beg)
-                                     (> (overlay-start overlay) end)))
-                            nil
-                          (delete-overlay overlay)
-                          t))
+                        (cond
+                         ((not (overlayp overlay)) t)
+                         ((null (overlay-start overlay)) t)
+                         ((and beg end
+                               (or (< (overlay-end overlay) beg)
+                                   (> (overlay-start overlay) end)))
+                          nil)
+                         (t (delete-overlay overlay) t)))
                       gptel-yatools-diagram--overlays)))
 
 (defun gptel-yatools-diagram--show-region (beg end)
-  "Draw every resolvable token between BEG and END."
-  (save-excursion
-    (save-restriction
-      (narrow-to-region beg end)
-      (goto-char (point-min))
-      (while (re-search-forward gptel-yatools-diagram--token-regexp nil t)
-        (let ((token (match-string 1)))
-          (when-let* ((file (gptel-yatools-diagram--token-file token))
-                      ((file-exists-p file))
-                      (image (gptel-yatools-diagram--image file)))
-            (let ((overlay (make-overlay (match-beginning 0) (match-end 0))))
-              (overlay-put overlay 'gptel-yatools-diagram token)
-              (overlay-put overlay 'display image)
-              ;; The picture goes when the text does, so deleting the line
-              ;; cannot leave an orphan on screen.
-              (overlay-put overlay 'evaporate t)
-              (overlay-put overlay 'isearch-open-invisible t)
-              (overlay-put overlay 'help-echo file)
-              ;; The text stays: with images off, or on a terminal, the
-              ;; token is what the user has, and `-open-at-point' resolves
-              ;; it.
-              (push overlay gptel-yatools-diagram--overlays))))))))
+  "Draw every resolvable token between BEG and END.  Return how many."
+  (let ((drawn 0))
+    (when (< beg end)
+      (save-excursion
+        (save-restriction
+          (narrow-to-region beg end)
+          (goto-char (point-min))
+          (while (re-search-forward gptel-yatools-diagram--token-regexp nil t)
+            (let ((token (match-string 1)))
+              (when-let* ((file (gptel-yatools-diagram--token-file token))
+                          ((file-exists-p file))
+                          (image (gptel-yatools-diagram--image file)))
+                (let ((overlay (make-overlay (match-beginning 0)
+                                             (match-end 0))))
+                  (overlay-put overlay 'gptel-yatools-diagram token)
+                  (overlay-put overlay 'display image)
+                  ;; The picture goes when the text does, so deleting the
+                  ;; line cannot leave an orphan on screen.
+                  (overlay-put overlay 'evaporate t)
+                  (overlay-put overlay 'isearch-open-invisible t)
+                  (overlay-put overlay 'help-echo file)
+                  ;; The text stays: with images off, or on a terminal, the
+                  ;; token is what the user has, and `-open-at-point'
+                  ;; resolves it.
+                  (push overlay gptel-yatools-diagram--overlays)
+                  (setq drawn (1+ drawn)))))))))
+    drawn))
 
 (defun gptel-yatools-diagram--refresh (&optional beg end)
   "Redraw the tokens in BEG..END, or in the whole buffer.
+Return how many pictures were drawn.
 
 Idempotent by construction: the overlays this module drew are removed
 before the scan, so a second pass draws the same picture once."
-  (when gptel-yatools-diagram-inline
+  (if (not gptel-yatools-diagram-inline)
+      0
     (gptel-yatools-diagram--clear-overlays beg end)
     (if (and beg end)
         (gptel-yatools-diagram--show-region beg end)
@@ -776,9 +794,19 @@ not an error."
 ;;;; Hooks
 
 (defun gptel-yatools-diagram--post-response (beg end)
-  "Draw whatever the response between BEG and END introduced."
+  "Draw whatever the response between BEG and END introduced.
+
+gptel calls this with two marker positions, but a response that has no
+markers of its own -- a tool result round -- leaves them nil, and a
+narrowing to nil signals.  Nil means \"the whole buffer\" here, and an
+out-of-range position is clamped: drawing less is survivable, refusing to
+draw at all is not."
   (condition-case err
-      (gptel-yatools-diagram--refresh beg end)
+      (gptel-yatools-diagram--refresh
+       (and (integer-or-marker-p beg)
+            (max (point-min) (min (point-max) beg)))
+       (and (integer-or-marker-p end)
+            (max (point-min) (min (point-max) end))))
     (error (message "gptel-yatools-diagram: %s" (error-message-string err)))))
 
 (defun gptel-yatools-diagram--mode-hook ()

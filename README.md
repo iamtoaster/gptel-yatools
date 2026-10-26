@@ -291,7 +291,7 @@ open command is the way to see the diagram.
 
 ## Tests
 
-262 ERT tests, no network, no prompts, every one of them in a throwaway temp
+264 ERT tests, no network, no prompts, every one of them in a throwaway temp
 directory:
 
 ```sh

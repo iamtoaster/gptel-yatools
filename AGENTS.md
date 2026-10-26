@@ -66,7 +66,7 @@ model receives; `M-x gptel-yatools-skills` opens the skill browser.
 
 ## Test harness
 
-The suite is 262 ERT tests.  It uses no network and no user prompts, and
+The suite is 264 ERT tests.  It uses no network and no user prompts, and
 every test runs in a throwaway temp directory.  Run it from the repository
 root:
 

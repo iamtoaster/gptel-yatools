@@ -387,6 +387,59 @@
       (goto-char (point-min))
       (should-error (gptel-yatools-diagram-open-at-point) :type 'user-error))))
 
+(ert-deftest gptel-yatools-diagram-test-an-evaporated-overlay-does-not-stop-the-next-draw ()
+  "A token whose text was deleted must not break every later redraw.
+
+The overlay evaporates with its text, and a deleted overlay reports nil
+bounds.  Comparing those with the region signalled
+`wrong-type-argument number-or-marker-p nil' from inside the response
+hook, so after the first edited turn no diagram in that buffer was drawn
+again -- the failure this pins."
+  (gptel-yatools-diagram-test--cache
+    (let* ((source gptel-yatools-diagram-test--source)
+           (token (gptel-yatools-diagram--token source)))
+      (write-region "<svg/>" nil (gptel-yatools-diagram--svg-file source)
+                    nil 'silent)
+      (with-temp-buffer
+        (insert (format "[diagram:%s]\n" token))
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                  ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+                  ((symbol-function 'create-image)
+                   (lambda (&rest _) '(image :type svg))))
+          (gptel-yatools-diagram--refresh)
+          (should (= 1 (length gptel-yatools-diagram--overlays)))
+          ;; The user edits the turn away: the overlay evaporates, and the
+          ;; list keeps a dead one.
+          (erase-buffer)
+          (insert (format "rewritten [diagram:%s]\n" token))
+          (should-not (overlay-start (car gptel-yatools-diagram--overlays)))
+          ;; A later response draws again, and without signalling.
+          (should (= 1 (gptel-yatools-diagram--refresh (point-min)
+                                                       (point-max))))
+          (should (= 1 (length gptel-yatools-diagram--overlays)))
+          (should (overlay-start (car gptel-yatools-diagram--overlays))))))))
+
+(ert-deftest gptel-yatools-diagram-test-post-response-survives-a-missing-region ()
+  "A response with no markers of its own draws the whole buffer."
+  (gptel-yatools-diagram-test--cache
+    (let* ((source gptel-yatools-diagram-test--source)
+           (token (gptel-yatools-diagram--token source)))
+      (write-region "<svg/>" nil (gptel-yatools-diagram--svg-file source)
+                    nil 'silent)
+      (with-temp-buffer
+        (insert (format "[diagram:%s]\n" token))
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                  ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+                  ((symbol-function 'create-image)
+                   (lambda (&rest _) '(image :type svg))))
+          ;; gptel passes marker positions, but a tool-result round leaves
+          ;; them nil, and nil used to reach `narrow-to-region'.
+          (gptel-yatools-diagram--post-response nil nil)
+          (should (= 1 (length gptel-yatools-diagram--overlays)))
+          ;; Out-of-range positions are clamped rather than signalled.
+          (gptel-yatools-diagram--post-response 1 100000)
+          (should (= 1 (length gptel-yatools-diagram--overlays))))))))
+
 ;;;; Nothing goes through the VFS
 
 (ert-deftest gptel-yatools-diagram-test-render-leaves-no-pending-change ()

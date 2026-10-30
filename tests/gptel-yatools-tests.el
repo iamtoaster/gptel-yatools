@@ -1081,6 +1081,43 @@ a workspace shares the connection that is being protected."
         (should (= done 3))
         (should (= peak 1))))))
 
+(ert-deftest gptel-yatools-test-a-queued-tool-call-does-not-wait-for-ever ()
+  "A call queued behind a stuck one must report, not hang in TOOL.
+
+Waiting for another call to finish is bounded only by that call
+finishing.  If it never does -- a connection that died silently, a host
+that stopped answering -- the queued calls sit in TOOL for ever with no
+result and no error, which is the state a stuck subagent was found in:
+the user sees it \"stuck in TOOL\" and nothing can recover it.
+
+The limit is what turns that into an error the request can act on."
+  (let ((gptel-yatools-remote-tool-delay 0.02)
+        (gptel-yatools-remote-tool-wait-limit 0.3)
+        (gptel-yatools-remote-tool-tries 1000)
+        (fsm nil)
+        (ran nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) nil))
+              ((symbol-function 'gptel--fsm-transition)
+               (lambda (machine state) (setf (gptel-fsm-state machine) state))))
+      (with-temp-buffer
+        (setq fsm (gptel-make-fsm :state 'TOOL
+                                  :info (list :buffer (current-buffer))))
+        ;; Somebody else's call is on the stack and never returns.
+        (let ((gptel-yatools--tool-call-running t))
+          (gptel-yatools--tool-calls-outside-the-sentinel
+           (lambda (&rest _) (setq ran t)) fsm)
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (eq (gptel-fsm-state fsm) 'TOOL)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.02))))
+        (should-not ran)
+        (should (eq (gptel-fsm-state fsm) 'ERRS))
+        (should (string-match-p "waited"
+                                (plist-get (gptel-fsm-info fsm) :error)))))))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

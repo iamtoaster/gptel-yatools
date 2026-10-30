@@ -234,12 +234,30 @@ Emacs is single-threaded, so this flag is enough: nothing else can begin
 while a call is on the stack, and a call that finds it set waits its
 turn.")
 
-(defun gptel-yatools--run-tool-call-later (function fsm args tries)
+(defcustom gptel-yatools-remote-tool-wait-limit 120
+  "Most seconds a tool call may wait for another call to finish.
+
+A call that is waiting behind another one is only bounded by that other
+call finishing.  If it never does -- a connection that has silently died,
+a host that stopped answering -- the waiting calls would sit in gptel's
+TOOL state for ever, with no result and no error, which is exactly the
+state a stuck subagent was found in.  At this limit the wait is reported
+as an error instead."
+  :type 'number
+  :group 'gptel-yatools)
+
+(defun gptel-yatools--run-tool-call-later (function fsm args tries &optional deadline)
   "Run FUNCTION on FSM and ARGS once the TRAMP connection is free.
 
 TRIES counts down; at zero the call is made anyway, so a connection that
 never reports itself free produces TRAMP's own error rather than a
 request that waits for ever.
+
+DEADLINE, in `float-time' units, bounds the whole wait: it is set on the
+first call and carried through every re-arm.  A call queued behind
+another one would otherwise be bounded only by that call finishing, and a
+connection that has died would leave it in TOOL for ever -- no result, no
+error, and a subagent the user cannot even see is stuck.
 
 Two things are waited for, and both were measured to matter.  The
 connection's own lock covers another operation's command; the flag above
@@ -255,7 +273,9 @@ not be handed another tool call.
 deferred call escaped every handler and left the request in TOOL for ever
 -- no result, no error, and a chat that could never continue.  A quit is
 reported as `Quit' so the request ends somewhere the user can see."
-  (let ((buffer (plist-get (gptel-fsm-info fsm) :buffer)))
+  (let* ((buffer (plist-get (gptel-fsm-info fsm) :buffer))
+         (deadline (or deadline
+                       (+ (float-time) gptel-yatools-remote-tool-wait-limit))))
     (run-at-time
      gptel-yatools-remote-tool-delay nil
      (lambda ()
@@ -267,9 +287,21 @@ reported as `Quit' so the request ends somewhere the user can see."
           ;; and running now would re-enter the connection the flag exists
           ;; to protect.
           (gptel-yatools--tool-call-running
-           (gptel-yatools--run-tool-call-later function fsm args tries))
+           (if (> (float-time) deadline)
+               (gptel-yatools--fail-request
+                fsm
+                (list 'error (format "waited %gs for another tool call to finish"
+                                     gptel-yatools-remote-tool-wait-limit)))
+             (gptel-yatools--run-tool-call-later
+              function fsm args tries deadline)))
           ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
-           (gptel-yatools--run-tool-call-later function fsm args (1- tries)))
+           (if (> (float-time) deadline)
+               (gptel-yatools--fail-request
+                fsm
+                (list 'error (format "waited %gs for the connection to be free"
+                                     gptel-yatools-remote-tool-wait-limit)))
+             (gptel-yatools--run-tool-call-later
+              function fsm args (1- tries) deadline)))
           (t
            (with-current-buffer buffer
              (let ((gptel-yatools--tool-call-running t))

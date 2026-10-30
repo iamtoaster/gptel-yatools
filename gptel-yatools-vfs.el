@@ -426,13 +426,27 @@ guessing."
     ;; Disk entries.  `directory-files' signals a raw `file-error'
     ;; for an unreadable directory or one deleted between the checks
     ;; above; turn that into a readable tool error instead.
+    ;;
+    ;; One `file-name-all-completions' answers the whole listing: the
+    ;; names, and whether each is a directory (a trailing "/" says so).
+    ;; The obvious spelling -- `directory-files' plus a `file-directory-p'
+    ;; per entry -- costs one TRAMP command per *entry*, so listing a
+    ;; directory of forty files took thirty-seven round trips, and each is
+    ;; a synchronous wait on the one connection the workspace shares.  A
+    ;; fan-out of subagents reading directories spent nearly all its time
+    ;; there; the profiler put 97% of the run inside
+    ;; `tramp-sh-handle-file-directory-p'.
+    ;;
+    ;; `directory-files-and-attributes' looks like the answer and is not:
+    ;; over TRAMP it falls back to one `stat' per entry, measured at
+    ;; thirty-seven round trips for the same listing.
     (when (file-directory-p full)
       (condition-case err
-          (dolist (entry (directory-files full t))
-            (let ((name (file-name-nondirectory (directory-file-name entry))))
-              (unless (member name '("." ".."))
-                (puthash name (if (file-directory-p entry) "dir" "file")
-                         entries))))
+          (dolist (entry (file-name-all-completions "" full))
+            (unless (member entry '("./" "../"))
+              (puthash (directory-file-name entry)
+                       (if (string-suffix-p "/" entry) "dir" "file")
+                       entries)))
         (file-error
          (error "Error: cannot read directory %s: %s"
                 (gptel-yatools--display-path full)
@@ -841,21 +855,58 @@ caller to wrap the call in `ignore-errors' and lose the reason."
           (list :kind :binary :path full :text vfs :provenance :vfs
                 :size (gptel-yatools-vfs--text-size vfs))
         (list :kind :text :path full :text vfs :provenance :vfs)))
-     ((file-directory-p full) (list :kind :directory :path full))
-     ((not (file-exists-p full)) (list :kind :missing :path full))
-     ((not (file-regular-p full)) (list :kind :special :path full))
-     ((not (file-readable-p full))
-      (list :kind :unreadable :path full :why "permission denied"))
      (t
-      (let ((content (gptel-yatools-vfs--disk-content full)))
-        (cond
-         ((null content)
-          (list :kind :unreadable :path full
-                :why "permission denied or I/O error"))
-         ((gptel-yatools-vfs--binary-p content)
-          (list :kind :binary :path full :text content :provenance :disk
-                :size (gptel-yatools-vfs--text-size content)))
-         (t (list :kind :text :path full :text content :provenance :disk))))))))
+      (gptel-yatools-vfs--read-from-disk full)))))
+
+(defun gptel-yatools-vfs--read-from-disk (full)
+  "Return the answer for the file at FULL, asking disk about it once.
+
+One `file-attributes' call answers what three predicates used to be asked
+separately -- does it exist, is it a directory, is it a regular file --
+and it answers them in one round trip.  That matters only over TRAMP,
+where each question is a separate command and a separate wait for the
+reply: reading ten files cost sixty-five round trips, and the model
+waiting on a fan-out felt every one of them.
+
+Readability is not asked at all.  The read itself is the only question
+that matters, and its failure already means \"unreadable\", which is what
+the fourth predicate was approximating.
+
+A symbolic link is the one case that needs asking again: `file-attributes'
+does not follow it, so the answer says \"a link\" and not what it links to.
+Only then is `file-directory-p' asked, which does follow.
+
+A file that is neither a directory nor a link gets `file-regular-p' --
+not because the check is free of meaning, but because it is free of cost:
+`file-attributes' has just filled TRAMP's cache, and the follow-up
+question is answered from it rather than from the host.  Measured, that
+is zero extra round trips, and it is what keeps a FIFO or a device
+refused instead of read."
+  (let* ((attrs (condition-case nil (file-attributes full) (file-error nil)))
+         (type (and attrs (file-attribute-type attrs))))
+    (cond
+     ((null attrs) (list :kind :missing :path full))
+     ((eq type t) (list :kind :directory :path full))
+     ((stringp type)
+      ;; A link: `file-directory-p' follows it, so a link to a directory
+      ;; is listed rather than reported unreadable.
+      (if (file-directory-p full)
+          (list :kind :directory :path full)
+        (gptel-yatools-vfs--read-regular full)))
+     ((file-regular-p full) (gptel-yatools-vfs--read-regular full))
+     (t (list :kind :special :path full)))))
+
+(defun gptel-yatools-vfs--read-regular (full)
+  "Return the answer for the regular file FULL, reading it once."
+  (let ((content (gptel-yatools-vfs--disk-content full)))
+    (cond
+     ((null content)
+      (list :kind :unreadable :path full
+            :why "permission denied or I/O error"))
+     ((gptel-yatools-vfs--binary-p content)
+      (list :kind :binary :path full :text content :provenance :disk
+            :size (gptel-yatools-vfs--text-size content)))
+     (t (list :kind :text :path full :text content :provenance :disk)))))
 
 (defun gptel-yatools-vfs--read-refusal (read)
   "Return READ's reason as the Result a tool can hand to the model.

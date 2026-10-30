@@ -245,6 +245,14 @@ rm -f *.elc
   defers such calls until the connection is free — a condition, not a
   sleep, so concurrent subagents take turns.  Any new entry point that
   calls tools directly must go through it.
+- **Remote cost is per command, so ask once.**  Every TRAMP filesystem
+  question is a command plus a synchronous wait on the one connection the
+  workspace shares.  Anything that looks at a *set* of paths must ask
+  about the set in one call: `file-name-all-completions` for a listing
+  (names and types together), `file-attributes` for one path's kind,
+  rather than a predicate per entry or per property.  Measured, cold: a
+  120-entry listing cost 125 round trips the obvious way and 4 the other
+  way.
 - **Nothing that runs on a timer may signal.**  A timer callback's error is
   logged by Emacs and nothing else: the work it was going to do simply
   does not happen, and whatever was waiting keeps waiting.  Every

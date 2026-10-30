@@ -997,6 +997,50 @@ request would sit in TOOL for ever with no result and no way to see why."
         (should (equal (plist-get (gptel-fsm-info fsm) :error) "boom"))
         (should (eq (gptel-fsm-state fsm) 'ERRS))))))
 
+(ert-deftest gptel-yatools-test-listing-costs-one-command-not-one-per-entry ()
+  "Listing must not ask the filesystem about each entry separately.
+
+`directory-files' plus a `file-directory-p' per entry is the obvious way
+to build a listing and the wrong one: over TRAMP each question is a
+separate command on the shared connection, and a synchronous wait for the
+reply.  Measured against a container with TRAMP's cache disabled: 120
+entries cost 125 round trips, 38 cost 40, 56 cost 58 -- one per entry,
+which is the 97% of a subagent fan-out the profiler put inside
+`tramp-sh-handle-file-directory-p'.
+
+`file-name-all-completions' answers names and types in one command: 4, 3
+and 3 round trips for the same three directories.  This test pins the
+shape rather than the speed, because the speed is a property of the
+network and the shape is not: the number of per-entry questions must not
+grow with the directory."
+  (let ((files nil)
+        (asked 0)
+        (real (symbol-function 'file-directory-p)))
+    (unwind-protect
+        (progn
+          (dotimes (i 40)
+            (push (make-temp-file "gptel-listing-" nil ".txt") files))
+          (let ((dir (file-name-as-directory (make-temp-file "gptel-dir-" t))))
+            (unwind-protect
+                (progn
+                  (dolist (file files)
+                    (rename-file file (expand-file-name
+                                       (file-name-nondirectory file) dir)))
+                  (cl-letf (((symbol-function 'file-directory-p)
+                             (lambda (path)
+                               (setq asked (1+ asked))
+                               (funcall real path))))
+                    (let ((listing (gptel-yatools-vfs--directory-listing dir)))
+                      (should (string-match-p "file" (plist-get listing :text)))))
+                  ;; One for the directory itself, and none per entry.  The
+                  ;; bound is generous -- two -- so that a future change can
+                  ;; ask once more without failing, but forty cannot pass.
+                  (should (<= asked 2)))
+              (ignore-errors (delete-directory dir t))))
+          ;; The files were moved into the directory above; nothing left.
+          (setq files nil))
+      (dolist (file files) (ignore-errors (delete-file file))))))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

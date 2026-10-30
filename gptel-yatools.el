@@ -305,6 +305,7 @@ also has to survive being run twice."
 (require 'gptel-yatools-shell)
 (require 'gptel-yatools-skills)
 (require 'gptel-yatools-diagram)
+(require 'gptel-yatools-agents)
 
 (provide 'gptel-yatools)
 ;;; gptel-yatools.el ends here

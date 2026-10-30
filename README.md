@@ -108,13 +108,13 @@ can edit buffers, start other chats, or read this one meanwhile.
 While something is running the header line shows how long:
 
 ```
- Running 2 commands... 14s (C-c C-k cancels)
+ Running 1 command, 2 subagents... 14s (C-c C-k cancels)
 ```
 
-Two commands issued in the same response run **concurrently**; the status
-line counts them together and stops when the last one finishes.  A model
-that needs one step to finish before the next starts has to use separate
-calls, and the tool's description says so.
+Several commands or subagents issued in the same response run
+**concurrently**; the status line counts them by kind and stops when the
+last one finishes.  A model that needs one step to finish before the next
+starts has to use separate calls, and the tool's description says so.
 
 <kbd>C-c C-k</kbd> in a `gptel-mode` buffer (`M-x
 gptel-yatools-cancel-tool-calls`) kills every command that buffer started
@@ -124,12 +124,12 @@ process, which has finished by the time a tool is running.  Rebind `C-c
 C-k` in your config if it is in your way — this package sets it in
 `gptel-mode-map`, so a later binding wins.
 
-`execute_command` is the only asynchronous tool.  Everything else answers
-from memory or from a quick disk read, and waiting for it is cheaper than
-the bookkeeping needed to deliver it later.  But the machinery belongs to
-the tool kit, not to that one tool: a new tool gets the same delivery,
-deadline, cancellation and status line by adding `:async t` to its
-definition, and the body stays exactly as it is.
+`execute_command` and `subagent` are the asynchronous tools.  Everything
+else answers from memory or from a quick disk read, and waiting for it is
+cheaper than the bookkeeping needed to deliver it later.  But the machinery
+belongs to the tool kit, not to those two: a new tool gets the same
+delivery, deadline, cancellation and status line by adding `:async t` to
+its definition, and the body stays exactly as it is.
 
 One honest limit: with a remote workspace, `make-process` has to establish
 the TRAMP connection before it can return, so the boundary blocks for that
@@ -245,6 +245,7 @@ the model still has to call `file_sync`.
 | `execute_command` | shell | Run a shell command from the workspace root and return its output. On a remote workspace it runs on that host. Asynchronous: the call returns while the command runs. |
 | `skill` | skills | List the installed [Agent Skills](https://agentskills.io), load one, or read a file it references. |
 | `render_diagram` | diagram | Render PlantUML source to an image the chat buffer draws inline, and return the token to show it. |
+| `subagent` | agents | Hand one self-contained task to a child agent that reads files and reports back. Asynchronous: the call returns while it works. |
 
 The virtual filesystem is buffer-local, so two chats never see each other's
 pending writes, and a request's tools run in the buffer that owns it rather
@@ -428,6 +429,57 @@ In the buffer:
 Drawing needs a graphic frame; on a terminal the token stays as text and the
 open command is the way to see the diagram.
 
+### Subagents
+
+`subagent` hands one self-contained task to a child agent.  The model writes
+the brief; the child sees that brief and nothing else — not the conversation
+it came from, not your attached files — reads what it needs, and replies.
+The reply comes back as that tool call's result.
+
+A child is a **reader**.  It gets `read_path`, `read_file_from_offset`,
+`fetch_lines_from_file_using_regex`, `read_workspace_root` and `skill`, and
+nothing else: it cannot write, cannot run a command, and cannot start
+another subagent.  That one restriction is why nothing needs reviewing
+afterwards — there is nothing to lose.  The list is
+`gptel-yatools-subagent-tools`; adding a writing tool to it invalidates the
+rest of the design, so think before you do.
+
+Each call is confirmed before it starts, because a child spends tokens with
+nobody watching.  Several children in one response run concurrently, so a
+fan-out is one approval per child.  The budgets are
+`gptel-yatools-subagent-max-turns` (50), `-max-tool-calls` (150) and
+`-timeout` (1800 s); a child that hits one is stopped and says how far it
+got, and the answer quotes what it had.  `gptel-yatools-subagent-model`
+runs children on a cheaper model without touching the parent's.
+
+The parent's tool result says more than the answer: the state, how long it
+took, how many turns and tool calls, and **the files the child read**.  That
+last list is what turns "no problems found" into something you can judge,
+and the reply is marked `:derived` — another model's conclusion, not a
+description of disk.
+
+While children run, the chatbot's header line shows how many and clicking
+the label — or <kbd>C-c C-s</kbd> (`M-x gptel-yatools-subagents`) — lists
+them.  gptel's own status text cannot do this: a click on it opens the
+request inspector, so the count is a label of its own.
+
+A child's buffer is hidden (` *gptel-yatools-subagent-*DeepSeek*-1`) but
+real: <kbd>C-x b</kbd> followed by a space finds it, and it is a working
+`gptel-mode` chat.  It is read-only while the child works — editing a
+transcript mid-run would change what gets sent on its next turn — and
+writable once it finishes, which is also how it becomes yours:
+
+- **Edit it** and it is detached: it stops dying with the chat that started
+  it, and you are offered a rename so it can become an ordinary session.
+  Declining keeps the hidden name; the detaching stands either way.
+- **Kill it** (<kbd>C-x k</kbd>) while it runs, and it is aborted — the
+  parent's call is answered rather than left waiting forever.
+- <kbd>C-c C-k</kbd> inside the child's buffer aborts that one child;
+  <kbd>C-c C-k</kbd> in the parent cancels all of them.
+
+A child is another agent with your permissions and your provider: the text
+it reads is sent to the model, exactly as the parent's is.
+
 ## Tests
 
 ERT, no network, no prompts, every test in a throwaway temp directory:
@@ -437,6 +489,7 @@ emacs -Q --batch -L . -l gptel-yatools.el \
   -l tests/gptel-yatools-tests.el -l tests/gptel-yatools-vfs-tests.el \
   -l tests/gptel-yatools-skills-tests.el \
   -l tests/gptel-yatools-diagram-tests.el \
+  -l tests/gptel-yatools-agents-tests.el \
   -f ert-run-tests-batch-and-exit
 ```
 

@@ -893,7 +893,7 @@ A module that calls `make-process' itself has reached past that seam."
                                         "")))
          (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
                   "gptel-yatools-shell.el" "gptel-yatools-skills.el"
-                  "gptel-yatools-diagram.el"))
+                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))
@@ -1698,7 +1698,7 @@ the budget is offered because `vfs_diff' has to page its own output."
                                         "")))
          (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
                   "gptel-yatools-shell.el" "gptel-yatools-skills.el"
-                  "gptel-yatools-diagram.el"))
+                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))

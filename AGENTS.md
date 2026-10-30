@@ -63,6 +63,7 @@ dependency declaration, and ERT is the test harness.
 | `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: the command's own wording and its VFS-pending warning, over the shared process runner. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
 | `gptel-yatools-skills.el` | Skill discovery, frontmatter validation, content-keyed parse cache, skill handles/resolution, the `skill` tool, attaching skills by hand, the skill browser. | `gptel-yatools-skills-resolve`, `-handle`, `-add`, `gptel-yatools-skills` |
 | `gptel-yatools-diagram.el` | The `render_diagram` tool, the content-addressed diagram cache, the render token, the inline overlay, and the transcript rebuild. | `gptel-yatools-render-diagram`, `gptel-yatools-diagram--token`, `--ensure`, `--refresh`, `--rebuild-missing` |
+| `gptel-yatools-agents.el` | The `subagent` tool: child records, the read-only capability list, the fixed boilerplate, the answer and its failures, the `[Subagents]` label and the picker. | `gptel-yatools-subagent`, `gptel-yatools-subagent--start`, `--callback`, `--settle`, `gptel-yatools-subagents` |
 | `gptel-yatools.el` | gptel glue only: run a tool call in the buffer that owns the request, draw the header-line extras, load the tool modules. | `gptel-yatools--accept-tool-calls-in-owner`, `gptel-yatools--extend-header-line` |
 
 Load order: `gptel-yatools-common.el` first; the tool modules require it
@@ -93,6 +94,7 @@ emacs -Q --batch -L . -L <dir-with-gptel> -L <dir-with-yaml> \
   -l tests/gptel-yatools-vfs-tests.el \
   -l tests/gptel-yatools-skills-tests.el \
   -l tests/gptel-yatools-diagram-tests.el \
+  -l tests/gptel-yatools-agents-tests.el \
   -f ert-run-tests-batch-and-exit
 ```
 
@@ -126,16 +128,21 @@ are gitignored):
 emacs -Q --batch -L . -L <dir-with-gptel> -L <dir-with-yaml> \
   -f batch-byte-compile gptel-yatools.el gptel-yatools-common.el \
   gptel-yatools-vfs.el gptel-yatools-shell.el gptel-yatools-skills.el \
-  gptel-yatools-diagram.el
+  gptel-yatools-diagram.el gptel-yatools-agents.el
 rm -f *.elc
 ```
 
 ### Test conventions
 
-- Test names use the `gptel-yatools-test-` prefix.  The three suites are
+- Test names use the `gptel-yatools-test-` prefix.  The suites are
   split by subject: package glue and shell tools in
   `gptel-yatools-tests.el`, filesystem in `-vfs-tests.el`, skills in
-  `-skills-tests.el`.
+  `-skills-tests.el`, diagrams in `-diagram-tests.el`, child agents in
+  `-agents-tests.el`.
+- A suite that fakes `gptel-request' calls the tool *body*
+  (`gptel-yatools-subagent--start`), not the boundary: an asynchronous
+  tool's boundary waits for its answer when gptel is not the caller, and a
+  fake never answers — which is a hang, not a test.
 - Call tools through `gptel-yatools-test--tool`, which returns the
   generated boundary, so assertions see exactly the envelope the model
   would receive.  Use `gptel-yatools-test--should-be-enveloped` to check
@@ -225,6 +232,20 @@ rm -f *.elc
   path that decides *where* to act must name the same connection as the
   workspace (`gptel-yatools--connection`), not merely look remote.  See
   ADR 0004.
+- **A child agent is a reader.**  `gptel-yatools-subagent-tools` lists only
+  read-only tools, and that is what every other decision in the agent module
+  rests on: nothing it does can be lost, so there is no VFS policy, no merge
+  and no recursion.  Adding a writing or a shell tool there invalidates the
+  reasoning in that file — revisit it rather than extending the list.
+- **A child's capabilities come from the package, not from the parent.**
+  The list is resolved against `gptel-yatools--tools`, never filtered
+  through the parent's `gptel-tools`: a parent that never enabled
+  `read_path` must not hand the model a child that cannot read.
+- **A subagent is a job, not a special case.**  It is a
+  `gptel-yatools-job` whose work is a request instead of a process, so the
+  deadline, the status line, `C-c C-k` and the exactly-once delivery rule
+  come from the kit.  A new long-running tool of any kind should conclude
+  through the same object.
 - **Tests are not part of the package.**  They are loaded on demand and
   must not run in a user's normal Emacs startup.
 
@@ -232,7 +253,7 @@ rm -f *.elc
 
 - The full ERT suite passes and any new behaviour has a test that goes
   through the tool boundary.
-- The six source files byte-compile without warnings.
+- The source files byte-compile without warnings.
 - User-visible changes are reflected in `README.md`; new or changed domain
   terms in `GLOSSARY.md`; architectural decisions in a new ADR.
 - No VFS changes are left pending: `vfs_diff`, then `file_sync` (or

@@ -152,11 +152,12 @@ interrupt
 
 **Provenance**:
 Where a Result's body came from: `:disk` when every byte of it is what
-is on disk, `:vfs` when it is pending state that is not on disk yet, and
+is on disk, `:vfs` when it is pending state that is not on disk yet,
 `:mixed` when it blends the two -- a directory listing that merges disk
-with VFS-only entries.  Carried as data on the Result and rendered once,
-at the tool boundary, so a tool never describes its own provenance in
-prose and cannot forget to.
+with VFS-only entries -- and `:derived` when it is another model's
+conclusion about what it read, which is neither.  Carried as data on the
+Result and rendered once, at the tool boundary, so a tool never describes
+its own provenance in prose and cannot forget to.
 _Avoid_: VFS flag, dirty flag, source
 
 **Header-line label**:
@@ -366,3 +367,26 @@ into `## <topic>' sections, one per diagram type plus `style' and
 from the sheet's own headings rather than kept beside them, so a section a
 user adds is offered without any other edit.
 _Avoid_: Syntax reference, prompt fragment
+
+**Subagent**:
+A second gptel request, in its own hidden buffer, that the model started
+with the `subagent` tool and whose answer arrives as that tool's result.
+It is a reader: `gptel-yatools-subagent-tools` offers read-only tools and
+no `subagent`, so nothing it does can be lost and it cannot recurse.  It
+sees the task and nothing else — no conversation, no attached context.
+_Avoid_: Child agent, worker, assistant, helper, delegate
+
+**Child record**:
+The one struct that describes a subagent — its buffer, parent, task,
+state, turns, tool calls and the paths it read.  Every lookup goes through
+it; the buffer name is decoration built from it, and nothing parses
+meaning back out of a name.
+_Avoid_: Subagent object, agent state
+
+**Detached child**:
+A subagent the user has taken over by editing its buffer after it
+finished.  It leaves the parent's record list, stops dying with the parent
+chat, and is offered a rename so it can become an ordinary session.  It is
+detached whether or not the rename is accepted: a child that is yours is
+not also the parent's.
+_Avoid_: Adopted buffer, promoted subagent, released child

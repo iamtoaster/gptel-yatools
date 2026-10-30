@@ -225,10 +225,16 @@ rm -f *.elc
 - **A remote workspace stays remote.**  Paths past the tool edge are
   ordinary file names, so file-name handlers carry the filesystem work to
   the host; anything this package does itself must not quietly happen
-  locally instead.  Two consequences are easy to get wrong: a walk up a
+  locally instead.  Three consequences are easy to get wrong: a walk up a
   path's parents must stop when the name stops shrinking (`/ssh:host:/` is
-  its own parent), and a subprocess must be asked for with
-  `:file-handler t` and the host's shell, or it runs on this machine.  A
+  its own parent), a subprocess must be asked for with `:file-handler t`
+  and the host's shell, or it runs on this machine, and an *absolute*
+  path the model writes must be rebased onto the workspace's connection --
+  `expand-file-name` ignores the root for an absolute name, so
+  `read_path "/etc/hostname"` used to answer with the local computer's
+  file and look completely ordinary doing it.  `gptel-yatools--resolve-path`
+  is the one place that decides, and `gptel-yatools--remote-prefix` is
+  what it rebases with (`file-remote-p` alone loses a multi-hop chain).  A
   path that decides *where* to act must name the same connection as the
   workspace (`gptel-yatools--connection`), not merely look remote.  See
   ADR 0004.

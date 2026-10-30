@@ -840,6 +840,72 @@ some server because DIRECTORY named one."
           (should (null (gptel-yatools--connection
                          (gptel-yatools-test--root-file "x")))))))))
 
+(ert-deftest gptel-yatools-test-an-absolute-path-stays-on-a-remote-workspace ()
+  "In a remote workspace, an absolute model path must not leave the machine.
+
+`expand-file-name' treats an absolute name as absolute and ignores the
+root, so `read_path \"/etc/hostname\"' in a container-based workspace read
+the *local* computer's `/etc/hostname'.  Its answer looked perfectly
+ordinary, which is what made it dangerous: a model asked to survey a
+host fanned out over `/etc', `/proc' and `/nix', and described the user's
+desktop instead -- PID 1, the root filesystem, the machine's own cgroup.
+
+An absolute path means the machine the workspace is on, because that is
+the only machine a tool call is approved for."
+  (gptel-yatools-test--with-remote
+    (should (equal (gptel-yatools--resolve-path "/etc/hostname")
+                   (concat gptel-yatools-test--remote-prefix "/etc/hostname")))
+    (should (equal (gptel-yatools--resolve-path "/proc/self/cgroup")
+                   (concat gptel-yatools-test--remote-prefix "/proc/self/cgroup")))
+    ;; A home-relative name is absolute too, and would otherwise expand to
+    ;; this machine's home directory.
+    (should (equal (gptel-yatools--resolve-path "~/notes")
+                   (concat gptel-yatools-test--remote-prefix "~/notes")))
+    ;; A relative path is unchanged, and so is one already on the host.
+    (should (equal (gptel-yatools--resolve-path "etc/hostname")
+                   (concat gptel-yatools-test--remote-prefix "/etc/hostname")))
+    (should (equal (gptel-yatools--resolve-path
+                    (concat gptel-yatools-test--remote-prefix "/etc/hostname"))
+                   (concat gptel-yatools-test--remote-prefix "/etc/hostname")))))
+
+(ert-deftest gptel-yatools-test-a-path-on-another-machine-is-refused ()
+  "A path naming a different machine must be refused, not visited.
+
+Rebasing an absolute path is only safe because the workspace is one
+machine; a name that says otherwise is the same hole with a longer
+reach, and asking any question about it would open a connection the user
+never approved."
+  (gptel-yatools-test--with-remote
+    (let* ((other (gptel-yatools-test--remote-prefix-for "elsewhere"))
+           (error-text (condition-case e
+                           (progn (gptel-yatools--resolve-path
+                                   (concat other "/etc/hostname"))
+                                  nil)
+                         (error (error-message-string e)))))
+      (should error-text)
+      (should (string-match-p "workspace is on" error-text))
+      (should (string-match-p "elsewhere" error-text)))))
+
+(ert-deftest gptel-yatools-test-a-local-workspace-keeps-absolute-paths-local ()
+  "A local workspace is unaffected: there is only one machine in play."
+  (gptel-yatools-test--in-dir
+    (should (equal (gptel-yatools--resolve-path "/etc/hostname")
+                   "/etc/hostname"))
+    (should (equal (gptel-yatools--resolve-path "etc/hostname")
+                   (expand-file-name "etc/hostname" gptel-yatools-test--dir)))))
+
+(ert-deftest gptel-yatools-test-remote-prefix-keeps-the-whole-hop-chain ()
+  "Rebasing needs the full prefix, not the last hop `file-remote-p' gives.
+
+\"/ssh:a|sudo:root@b:/etc/\" answered by `file-remote-p' is
+\"/sudo:root@b:\", which would rebase onto a name that reaches b without
+going through a."
+  (should (equal (gptel-yatools--remote-prefix "/ssh:a|sudo:root@b:/etc/")
+                 "/ssh:a|sudo:root@b:"))
+  (should (equal (gptel-yatools--remote-prefix "/ssh:host:/etc/")
+                 "/ssh:host:"))
+  (should-not (gptel-yatools--remote-prefix "/etc/")))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

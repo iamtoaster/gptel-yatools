@@ -147,6 +147,15 @@ conflict baselines, `vfs_diff`, the sync review, skills and the project
 root are all performed by TRAMP on that host.  Nothing needs configuring;
 TRAMP is not a dependency and is used only when a name already is remote.
 
+The workspace is one machine, and a path never leaves it.  A relative path
+is resolved against the root; an absolute one — `/etc/hostname`,
+`~/notes` — is resolved against the root's *host*, so `read_path
+"/etc/hostname"` in a container workspace reads the container's file.  This
+matters more than it sounds: `expand-file-name` ignores the root for an
+absolute name, so before this rule the same call quietly read *your own*
+computer, and the reply looked perfectly ordinary.  A path that names a
+different machine is refused rather than visited.
+
 `execute_command` runs on the host too — under that host's shell, not your
 `shell-file-name`, which is a path on your machine and would be
 `exec: …: not found`.  The exit-status line says where the command ran:

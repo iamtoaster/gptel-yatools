@@ -96,6 +96,7 @@
 (declare-function tramp-file-name-user "tramp" (vec))
 (declare-function tramp-file-name-host "tramp" (vec))
 (declare-function tramp-file-name-port "tramp" (vec))
+(declare-function tramp-file-name-localname "tramp" (vec))
 
 (defgroup gptel-yatools nil
   "Extra tools for gptel."
@@ -978,6 +979,28 @@ never see the pin change."
         (file-name-as-directory (expand-file-name (project-root proj)))
       (file-name-as-directory (expand-file-name default-directory)))))
 
+(defun gptel-yatools--remote-prefix (path)
+  "Return the part of PATH that names the machine it is on, or nil if local.
+
+`file-remote-p' is not enough to rebase a path with, because for a
+multi-hop name it returns only the last hop: \"/ssh:a|sudo:root@b:/etc/\"
+answers \"/sudo:root@b:\", and prepending that to a path would produce a
+name that reaches b without going through a.  So the prefix is taken as
+\"PATH minus its local name\", which keeps the whole hop chain.
+
+A name handled by something other than TRAMP falls back on what
+`file-remote-p' gives, which is all such a handler offers."
+  (when (file-remote-p path)
+    (or (and (fboundp 'tramp-tramp-file-p)
+             (tramp-tramp-file-p path)
+             (ignore-errors
+               (let* ((local (tramp-file-name-localname
+                              (tramp-dissect-file-name path))))
+                 (and (stringp local)
+                      (string-suffix-p local path)
+                      (substring path 0 (- (length path) (length local)))))))
+        (file-remote-p path))))
+
 (defun gptel-yatools--resolve-path (path)
   "Return PATH as an absolute path, resolved against the workspace root.
 
@@ -985,8 +1008,39 @@ This is where a path the model wrote becomes a path this package acts
 on, and it is the only such place.  Everything past it takes absolute
 paths, so what a relative path means is decided once, by the tool that
 received it, rather than re-guessed by the VFS from whichever buffer
-happens to be current."
-  (expand-file-name path (gptel-yatools--workspace-root)))
+happens to be current.
+
+A remote workspace is one machine, and a path never leaves it:
+
+- A relative path is resolved against the root, which carries the root's
+  connection with it.
+- An absolute path -- \"/etc/hostname\", or \"~/notes\" -- is resolved
+  against the root's *machine*.  `expand-file-name' would have treated it
+  as a local absolute name and read this computer instead: in a
+  container-based workspace, `read_path \"/etc/hostname\"' used to answer
+  with the user's own desktop, which is the most misleading thing a file
+  tool can do, because the reply looks perfectly ordinary.
+- A path that already names a machine is kept, unless it names a
+  different one, in which case it is refused: a tool call approved for a
+  workspace must not go and act on another host.
+
+A local workspace is unaffected: there, an absolute path is already a
+path on the one machine in play."
+  (let* ((root (gptel-yatools--workspace-root))
+         (prefix (gptel-yatools--remote-prefix root)))
+    (cond
+     ((file-remote-p path)
+      (unless (equal (gptel-yatools--connection root)
+                     (gptel-yatools--connection path))
+        (error "Error: the workspace is on %s, but %s is on %s. Give a path relative to the workspace root, or an absolute path on %s, so the tool acts where the workspace is."
+               (gptel-yatools--connection-label root)
+               (gptel-yatools--display-path path)
+               (gptel-yatools--connection-label path)
+               (gptel-yatools--connection-label root)))
+      path)
+     ((and prefix (file-name-absolute-p path))
+      (concat prefix path))
+     (t (expand-file-name path root)))))
 
 (defconst gptel-yatools--invisible-char-regexp
   "[\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"

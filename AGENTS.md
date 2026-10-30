@@ -31,6 +31,21 @@ dependency declaration, and ERT is the test harness.
     outside the VFS (conditions on the model's inability to name a path and
     the artifact being disposable), and why `execute_command` is not an
     instance of it.
+  - `0004-a-remote-workspace-runs-on-its-host.md` — what a TRAMP workspace
+    means for the file tools, the shell tool and the deadline; read it
+    before adding a structural path walk (they must stop at `/ssh:host:/`)
+    or a subprocess (it must be handler-built when the directory is
+    remote).
+  - `0005-a-tool-may-deliver-its-answer-later.md` — why `:async` is about
+    delivery rather than about what a body does, what a job is, why a
+    conclusion must run exactly once, and why cancellation had to be built
+    here (gptel's own abort cannot see a tool call).  Read it before adding
+    a tool that runs a process.
+  - `0006-a-subprocess-runs-where-its-artifacts-live.md` — a process runs
+    in its artifacts' directory, stated at the call, never inherited from
+    `default-directory`.  Only `execute_command` has the workspace as its
+    artifact; the diagram renderer has its cache, which is why it works in a
+    remote workspace.
 - **`docs/performance.md`** — how performance claims were measured
   (offline gptel loop, fixed `gptel--escape-raw-bytes` hot spot).  Measure
   before optimising.
@@ -43,7 +58,7 @@ dependency declaration, and ERT is the test harness.
 
 | File | Owns | Start at |
 | --- | --- | --- |
-| `gptel-yatools-common.el` | The tool kit: `Result`, size limits, envelope, provenance rendering, deadline/call context, `gptel-yatools-define-tool`, previews, enabling tools, and the process runner both subprocess tools share. | `gptel-yatools-define-tool`, `gptel-yatools-ok`, `gptel-yatools--respond`, `gptel-yatools-page`, `gptel-yatools--run-process` |
+| `gptel-yatools-common.el` | The tool kit: `Result`, size limits, envelope, provenance rendering, deadline/call context, `gptel-yatools-define-tool`, previews, enabling tools, and the process runner both subprocess tools share. | `gptel-yatools-define-tool`, `gptel-yatools-ok`, `gptel-yatools--respond`, `gptel-yatools-page`, `gptel-yatools--run-process`, `gptel-yatools--remote-shell` |
 | `gptel-yatools-vfs.el` | The buffer-local VFS: entries and baselines, conflict/refusal logic, pending changes, encoding, diffing, sync review UI, and the filesystem tools. | `gptel-yatools-vfs-entry`, `-pending`, `-read`, `-write`, `-edit`, `-refusal`, `-sync`; `gptel-yatools-write-diff-mode` |
 | `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: the command's own wording and its VFS-pending warning, over the shared process runner. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
 | `gptel-yatools-skills.el` | Skill discovery, frontmatter validation, content-keyed parse cache, skill handles/resolution, the `skill` tool, attaching skills by hand, the skill browser. | `gptel-yatools-skills-resolve`, `-handle`, `-add`, `gptel-yatools-skills` |
@@ -143,11 +158,24 @@ rm -f *.elc
 ## Rules that the code depends on
 
 - **One definition per tool.**  `gptel-yatools-define-tool` generates the
-  implementation `NAME-tool` (returns a `gptel-yatools-result`) and the
-  boundary `NAME` (takes the trailing `timeout`, checks arguments, enforces
+  implementation `NAME-tool` (returns a `gptel-yatools-result` or a job) and
+  the boundary `NAME` (takes the trailing `timeout`, checks arguments, enforces
   the deadline, renders the envelope, catches errors), then registers the
   tool.  Its body returns a Result, not formatted text; every tool goes
   through that one definition path.
+- **`:async` is about delivery only.**  A body returns a Result or a job
+  (from `gptel-yatools--spawn-process`); `:async t` makes the boundary hand
+  the job's envelope to gptel's callback instead of returning it, and
+  nothing else about the body changes.  A conclusion runs exactly once —
+  gptel counts a result every time the callback fires — and a synchronous
+  tool that returns a job is reported as the definition bug it is.  See ADR
+  0005.
+- **Cancellation belongs here, not to gptel.**  `gptel-abort` looks a
+  request up by its network process, which has finished by the time a tool
+  runs, so it cannot stop one.  The buffer-local job registry,
+  `gptel-yatools-cancel-tool-calls`, the `gptel-abort` advice and the
+  kill-buffer hook are what make a running command stoppable; a new
+  long-running tool inherits all of it by returning a job.
 - **The response seam is narrow.**  A tool module may call
   `gptel-yatools--respond` and `gptel-yatools-page`; sizing, truncation,
   escaping and the XML envelope stay in `gptel-yatools-common.el`.
@@ -178,10 +206,25 @@ rm -f *.elc
   the output of a process it kills, and kills the whole process group.  A
   tool module that calls `make-process` has reached past it — a test
   enforces that, the same way the respond seam is enforced.
+- **A subprocess runs where its artifacts live.**  Pass `:directory`
+  explicitly; do not let the process inherit `default-directory`.  Only
+  `execute_command` has the workspace as its artifact, and only because
+  the workspace is what it acts on — the diagram renderer has its cache.
+  ADR 0006.
 - **Skills are read from disk only.**  A pending `SKILL.md` write is
   invisible to discovery; the model must not author instructions that are
   then treated as authoritative before review.  `allowed-tools` is advisory
   and must stay labelled as such.
+- **A remote workspace stays remote.**  Paths past the tool edge are
+  ordinary file names, so file-name handlers carry the filesystem work to
+  the host; anything this package does itself must not quietly happen
+  locally instead.  Two consequences are easy to get wrong: a walk up a
+  path's parents must stop when the name stops shrinking (`/ssh:host:/` is
+  its own parent), and a subprocess must be asked for with
+  `:file-handler t` and the host's shell, or it runs on this machine.  A
+  path that decides *where* to act must name the same connection as the
+  workspace (`gptel-yatools--connection`), not merely look remote.  See
+  ADR 0004.
 - **Tests are not part of the package.**  They are loaded on demand and
   must not run in a user's normal Emacs startup.
 

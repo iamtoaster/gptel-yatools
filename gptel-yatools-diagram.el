@@ -405,6 +405,29 @@ short `timeout' argument cannot be outlived by the layout engine."
     (max 1 (min gptel-yatools-plantuml-graphviz-timeout
                 (if (numberp budget) (truncate budget) 1)))))
 
+(defun gptel-yatools-diagram--run-directory ()
+  "Return the directory PlantUML runs in: where the cache is.
+
+`gptel-yatools--run-process' runs a command in `default-directory' unless
+it is told otherwise, and a chat about a remote workspace has a *remote*
+`default-directory'.  That is wrong here twice over: the renderer is found
+on this machine, and the cache it writes into is a directory on this
+machine (`user-emacs-directory').  Inheriting the workspace handed a local
+executable path to the host's shell, which is `exec:
+/etc/profiles/.../plantuml: not found', exit 127, and no picture.
+
+So the rule is: a subprocess runs where its artifacts live, not where the
+chat's workspace happens to be.  For the renderer those are the same
+directory, because PlantUML writes the SVG beside the source it was given.
+
+Running it *here* is not a limitation to apologise for: the image is drawn
+by this Emacs, from a cache this Emacs owns, and a remote host has no way
+to send one back.  A user who points
+`gptel-yatools-diagram-cache-directory` at a remote path gets a render on
+that host instead -- which needs PlantUML there -- because the directory
+decides, not a hardcoded rule about remote."
+  (gptel-yatools-diagram--ensure-cache-directory))
+
 (defun gptel-yatools-diagram--run (files)
   "Render FILES, writing SVGs beside them.  Return the process outcome.
 
@@ -412,7 +435,9 @@ One process serves every file, which is the whole point of the batch
 path: a JVM start dominates a render, so ten diagrams cost one start
 rather than ten.  The polling, the kill and the reap belong to
 `gptel-yatools--run-process'; this function is the adapter that supplies
-PlantUML's own environment and arguments."
+PlantUML's own environment and arguments, and the directory it runs in --
+the cache's, not the workspace's, for the reason
+`gptel-yatools-diagram--run-directory' gives."
   (let* ((executable (gptel-yatools-diagram--executable))
          (cache (gptel-yatools-diagram--ensure-cache-directory))
          (profile gptel-yatools-plantuml-security-profile)
@@ -427,7 +452,8 @@ PlantUML's own environment and arguments."
                    "-o" cache
                    "--graphviz-timeout"
                    (number-to-string (gptel-yatools-diagram--graphviz-timeout)))
-             files))))
+             files)
+     :directory (gptel-yatools-diagram--run-directory))))
 
 (defun gptel-yatools-diagram--cached (source)
   "Return SOURCE's cached SVG path, or nil when it has not been rendered.

@@ -17,6 +17,18 @@
 ;; reading, writing, diffing, syncing and discarding.  What the tools share
 ;; with the rest of the package -- the response envelope, path resolution, the
 ;; timeout guard -- is in `gptel-yatools.el', which loads this file.
+;;
+;; A workspace can live on another machine: every path here is an ordinary
+;; Emacs file name, so a TRAMP name such as "/ssh:host:/repo" works as a
+;; workspace root, and reads, writes, encoding detection, conflict baselines
+;; and the sync itself are performed by TRAMP on the host.  What that costs
+;; is round trips -- each `file-exists-p', `file-regular-p' or
+;; `insert-file-contents' is one -- so a structural check that walks a
+;; directory chain must be written to stop on its own (see
+;; `gptel-yatools-vfs--ancestors'): a name's top-most directory is
+;; "/ssh:host:/", not "/", and a walk that does not notice will spin against
+;; the host forever.  `execute_command' is the one tool that does not follow
+;; the name to the host by itself; `gptel-yatools--run-process' carries that.
 
 ;;; Code:
 
@@ -473,23 +485,21 @@ regular file on disk or in the VFS, writing is impossible without
 deleting that file first.
 
 Both paths are shown workspace-relative, like every other message
-the tools return."
-  (let ((ancestor (directory-file-name (file-name-directory full))))
-    (cond
-     ((or (null ancestor)
-          (equal ancestor "")
-          (equal ancestor "/")
-          (equal ancestor full))
-      nil)
-     ((gptel-yatools-vfs-entry ancestor)
-      (format "Error: cannot write %s: ancestor %s is a file in the VFS. Use vfs_discard to remove it first."
-              (gptel-yatools--display-path full)
-              (gptel-yatools--display-path ancestor)))
-     ((file-regular-p ancestor)
-      (format "Error: cannot write %s: ancestor %s is a file on disk."
-              (gptel-yatools--display-path full)
-              (gptel-yatools--display-path ancestor)))
-     (t (gptel-yatools-vfs--validate-insertable ancestor)))))
+the tools return.  The walk -- and its stop condition, which has to
+hold for remote names too -- is `gptel-yatools-vfs--ancestors'."
+  (catch 'refusal
+    (dolist (ancestor (gptel-yatools-vfs--ancestors full))
+      (when (gptel-yatools-vfs-entry ancestor)
+        (throw 'refusal
+               (format "Error: cannot write %s: ancestor %s is a file in the VFS. Use vfs_discard to remove it first."
+                       (gptel-yatools--display-path full)
+                       (gptel-yatools--display-path ancestor))))
+      (when (file-regular-p ancestor)
+        (throw 'refusal
+               (format "Error: cannot write %s: ancestor %s is a file on disk."
+                       (gptel-yatools--display-path full)
+                       (gptel-yatools--display-path ancestor)))))
+    nil))
 
 ;;-------------------------------------------------------------------------
 ;; The VFS label for the header line
@@ -1693,24 +1703,51 @@ test, and a target that is no longer a regular file is caught before
                             (gptel-yatools-vfs--resolve-coding entry-coding))))
      (t nil))))
 
+(defun gptel-yatools-vfs--ancestors (full)
+  "Return FULL's ancestor directories, nearest first, top-most last.
+
+Every structural check about a path's parents asks this, so the walk is
+written once: `--file-ancestor' asks which ancestor is a file and
+`--validate-insertable' asks the same question to word a refusal, and
+they used to be two hand-rolled loops that disagreed about when to stop.
+
+The stop test is \"the name stopped getting shorter\", not \"we reached
+/\".  A remote (TRAMP) name's top-most directory is \"/ssh:host:/\",
+which `file-name-directory' returns unchanged: a test for \"/\" alone
+never fires there, so the walk never ends -- and because each pass asks
+`file-regular-p' about that root, it is not a cheap spin either, it is an
+endless round trip to the host.  That is why `vfs_diff' and `file_sync'
+hung on a remote workspace while `write_file' did not.
+
+A plain \"/\" and the empty string are skipped, as they always were, and
+so is FULL itself: walking up from a path never yields that path."
+  (let ((ancestor (directory-file-name (file-name-directory full)))
+        (ancestors nil)
+        (next nil))
+    (while (and ancestor
+                (not (equal ancestor ""))
+                (not (equal ancestor "/"))
+                (not (equal ancestor full)))
+      (push ancestor ancestors)
+      (setq next (directory-file-name (file-name-directory ancestor)))
+      ;; No progress means this is the top of the name space: keep it as
+      ;; `ancestor' would have been, then stop.
+      (setq ancestor (and (not (equal next ancestor)) next)))
+    (nreverse ancestors)))
+
 (defun gptel-yatools-vfs--file-ancestor (full)
   "Return FULL's nearest ancestor that is a file, or nil.
 
 An ancestor that is a file -- on disk or as a VFS entry -- makes the
 target unwritable without deleting it first.  Checked here so that the
-review never offers a file whose write is certain to fail."
-  (let ((ancestor (directory-file-name (file-name-directory full)))
-        (found nil))
-    (while (and (not found)
-                ancestor
-                (not (equal ancestor ""))
-                (not (equal ancestor "/"))
-                (not (equal ancestor full)))
-      (when (or (gptel-yatools-vfs-entry ancestor)
-                (file-regular-p ancestor))
-        (setq found ancestor))
-      (setq ancestor (directory-file-name (file-name-directory ancestor))))
-    found))
+review never offers a file whose write is certain to fail.
+
+The walk itself is `gptel-yatools-vfs--ancestors', which knows when to
+stop; this function only says what it is looking for."
+  (cl-find-if (lambda (ancestor)
+                (or (gptel-yatools-vfs-entry ancestor)
+                    (file-regular-p ancestor)))
+              (gptel-yatools-vfs--ancestors full)))
 
 (defun gptel-yatools-vfs--confirm-sync (paths &optional skipped)
   "Show a diff of PATHS (VFS vs disk) and ask the user to accept or reject.

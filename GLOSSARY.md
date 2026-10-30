@@ -67,6 +67,30 @@ shell runner does, to run in a subdirectory -- cannot change what a path
 means half way through.
 _Avoid_: Project root, working directory, cwd
 
+**Remote workspace**:
+A workspace root that is a TRAMP file name (`/ssh:host:/repo`).  Every
+path the tools use is still an ordinary Emacs file name, so the VFS, the
+encoding policy, the conflict baselines and the sync are performed on the
+host by file-name handlers, and no tool has a remote special case.  The
+one thing that does not follow a name by itself is a subprocess, so
+`execute_command` runs on the host only because `gptel-yatools--run-process`
+asks for a handler-built process, names the host's own shell and kills the
+host's pid.  Its deadline covers the connection, and a structural walk
+has to stop at `/ssh:host:/` -- a root that `file-name-directory` calls
+its own parent.
+_Avoid_: Remote project, TRAMP mode, remote buffer
+
+**Connection**:
+The machine a path lives on, as an identity rather than a name:
+`gptel-yatools--connection` returns TRAMP's method, user, host, port and
+hop chain, or the handler prefix for a backend that is not TRAMP's, or
+nil for a local path.  It exists because `file-remote-p` answers with the
+last hop alone, so `/ssh:a|sudo:root@b:/x` and `/ssh:c|sudo:root@b:/x`
+look identical although they leave from different machines.  A tool that
+accepts a path deciding *where* to act compares connections; one that
+merely reads a path does not.
+_Avoid_: Host, remote id, target machine
+
 **Resolved path**:
 An absolute path, made by `gptel-yatools--resolve-path` at the tool's
 edge from the text the model wrote and the workspace root.  Past that
@@ -97,6 +121,34 @@ What a tool function returns: the body the model reads, the provenance
 of that body, and an optional context comment.  Never formatted text,
 and never a half-rendered envelope.
 _Avoid_: Response, output, return value
+
+**Job**:
+Work a tool body has started and not yet finished: the process, the
+buffer that owns the call, the deadline, and a function of the outcome
+plist returning the Result to report.  A body that has real work to wait
+for returns a job instead of a Result; the boundary decides whether to
+wait for it or hand it to gptel's callback.  A job concludes exactly
+once, because gptel counts a tool result every time the callback runs.
+_Avoid_: Task, future, promise, handle
+
+**Asynchronous tool**:
+A tool whose `:async` key is set, so gptel calls its boundary with a
+callback first and the envelope is delivered later instead of returned.
+It is the same body, the same Result and the same envelope as a
+synchronous tool; only the delivery differs.  A direct call passes the
+tool's own first argument instead of a callback and is answered
+synchronously, so `eval`, hooks and tests still read an envelope.
+_Avoid_: Background tool, non-blocking tool, deferred tool
+
+**Cancellation**:
+Killing the jobs a buffer has running and moving its request to gptel's
+abort state.  It exists because nothing else can do it: `gptel-abort`
+finds a request by its network process, which has finished by the time a
+tool is running, and `C-g` has no stack to interrupt once the call has
+returned.  It kills first and aborts second — delivering a "cancelled"
+result instead would invite the model to retry.
+_Avoid_: Abort (that is gptel's, and it cannot see a tool call), stop,
+interrupt
 
 **Provenance**:
 Where a Result's body came from: `:disk` when every byte of it is what
@@ -142,6 +194,11 @@ Concretely it is the other half of a tool, the function named
 `gptel-yatools-<name>`: the one gptel calls, the one that takes the
 trailing `timeout` argument.  Advise it to observe or replace a whole call,
 including its timing and its wire format.
+
+It is also where a job is either waited for or handed to gptel's
+callback, which is the whole difference between a synchronous and an
+asynchronous tool: the rendering, sizing, escaping and error handling are
+the same on both paths.
 _Avoid_: Response builder, wrapper, formatter
 
 **Tool definition**:
@@ -274,6 +331,11 @@ changed PlantUML is not, which is why the directory is disposable and
 it is reachable by a path the model chooses, which is what lets it be
 written without a review -- see
 docs/adr/0003-a-tool-may-own-an-opaque-directory.md.
+
+The cache is also where the renderer runs, because it is what the render
+produces: the process's directory is the cache's, not the chat's
+workspace's, so a remote workspace still gets its picture drawn locally.
+See docs/adr/0006-a-subprocess-runs-where-its-artifacts-live.md.
 _Avoid_: Image store, diagram folder
 
 **Rebuild**:

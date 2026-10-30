@@ -710,6 +710,178 @@ the only way to fail the start itself is for the shell to be missing."
       (should (string-match-p (regexp-quote "sub")
                               (plist-get outcome :output))))))
 
+(ert-deftest gptel-yatools-test-run-process-sends-a-remote-command-to-the-host ()
+  "A remote directory must reach the file-name handler, not this machine.
+
+Without `:file-handler' Emacs starts the program here, in \"~\", because
+the directory is not local -- and the tool then reports on a workspace it
+never touched, which is exactly what `execute_command' did on a TRAMP
+workspace.  The connection type is pinned for the same reason: TRAMP's
+`pipe' path echoes its own wrapper into the very buffer this function
+reads as output, so the model would be handed the machinery instead of
+the command's answer."
+  (gptel-yatools-test--with-remote
+    (let* ((outcome (gptel-yatools--run-process
+                     (list shell-file-name shell-command-switch "pwd")
+                     :timeout 10))
+           (args (car gptel-yatools-test--remote-process-args)))
+      (should (eq (plist-get outcome :status) 'exited))
+      (should (= (plist-get outcome :exit) 0))
+      ;; The stand-in host ran it in its own root, not in "~".
+      (should (string-match-p
+               (regexp-quote (directory-file-name
+                              gptel-yatools-test--remote-root))
+               (plist-get outcome :output)))
+      (should (eq (plist-get args :file-handler) t))
+      (should (null (plist-get args :connection-type)))
+      ;; The program is a path on the host, never `shell-file-name'.
+      (should (equal (car (plist-get args :command)) "/bin/sh")))))
+
+(ert-deftest gptel-yatools-test-run-process-picks-an-available-remote-shell ()
+  "The remote shell is the host's, and a stripped host still has one.
+
+`/bin/sh' is what a POSIX system has; a busybox environment may be left
+with `/bin/ash' or a bare `ash' on the login shell's PATH, which is why
+the candidate list is more than one entry.  A host that names its shell
+is believed first, and the answer is cached so the probe is paid once per
+host rather than once per tool call."
+  (gptel-yatools-test--with-remote
+    (should (equal (gptel-yatools--remote-shell "/gptel-test-remote:host:/w/")
+                   "/bin/sh"))
+    ;; Same host, second call: answered from the cache.
+    (clrhash gptel-yatools--remote-shell-cache)
+    (let ((gptel-yatools-test--remote-executables '("/bin/ash")))
+      (should (equal (gptel-yatools--remote-shell "/gptel-test-remote:host:/w/")
+                     "/bin/ash")))
+    (clrhash gptel-yatools--remote-shell-cache)
+    (let ((gptel-yatools-test--remote-executables '("ash")))
+      (should (equal (gptel-yatools--remote-shell "/gptel-test-remote:host:/w/")
+                     "ash")))))
+
+(ert-deftest gptel-yatools-test-execute-command-refuses-a-local-directory-remotely ()
+  "An absolute local DIRECTORY must not run the command on this machine.
+
+`expand-file-name' lets an absolute path replace the workspace root, so
+the command would run here while the user approved it for a remote
+workspace.  A refusal that names both forms that do work is one retry
+away from correct; re-rooting the path would guess at what was meant."
+  (gptel-yatools-test--with-remote
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((result (gptel-yatools-execute-command "pwd" "/tmp/")))
+          (gptel-yatools-test--should-be-enveloped result)
+          (should (string-match-p "remote host" result))
+          (should (string-match-p "on this machine" result))
+          ;; Nothing ran: no process was even asked for.
+          (should (null gptel-yatools-test--remote-process-args)))))))
+
+(ert-deftest gptel-yatools-test-execute-command-names-the-remote-host ()
+  "A command report from a remote workspace says where it ran.
+
+The sentence the model reads used to be \"Command succeeded in `.`\",
+which is indistinguishable from a local run in the workspace root -- the
+one fact it needed, and did not get."
+  (gptel-yatools-test--with-remote
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((result (gptel-yatools-execute-command "pwd")))
+          (gptel-yatools-test--should-be-enveloped result)
+          (should (string-match-p "on the remote host" result))
+          (should (string-match-p
+                   (regexp-quote (string-remove-suffix
+                                  ":" gptel-yatools-test--remote-prefix))
+                   result))
+          (should (string-match-p "exit code 0" result)))))))
+
+(ert-deftest gptel-yatools-test-execute-command-refuses-another-host ()
+  "A DIRECTORY naming a different remote host must be refused too.
+
+Refusing only the local case would leave the same hole with a longer
+reach: `/ssh:other:/tmp` looks remote, is remote, and is the wrong
+machine.  The refusal has to name both machines, because \"which one did
+I get wrong\" is the only question the message has to answer."
+  (gptel-yatools-test--with-remote
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((other (gptel-yatools-test--remote-prefix-for "elsewhere")))
+          (should (equal (gptel-yatools--connection
+                          (concat other "/srv"))
+                         (list other)))
+          (let ((result (gptel-yatools-execute-command
+                         "pwd" (concat other "/srv") 10)))
+            (gptel-yatools-test--should-be-enveloped result)
+            (should (string-match-p
+                     (regexp-quote (format "workspace is on the remote host %s"
+                                           (string-remove-suffix
+                                            ":" gptel-yatools-test--remote-prefix)))
+                     result))
+            (should (string-match-p
+                     (regexp-quote (format "which is on the remote host %s"
+                                           (string-remove-suffix ":" other)))
+                     result))
+            ;; Nothing ran on either machine.
+            (should (null gptel-yatools-test--remote-process-args))))))))
+
+(ert-deftest gptel-yatools-test-execute-command-refuses-a-foreign-host-locally ()
+  "A local workspace may not run its command on a remote host either.
+
+The check is about the two paths agreeing, not about one of them being
+local: a command approved for a local repository must not be executed on
+some server because DIRECTORY named one."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((result (gptel-yatools-execute-command
+                       "pwd" "/gptel-test-remote:host:/srv" 10)))
+          (gptel-yatools-test--should-be-enveloped result)
+          ;; The stand-in handler is not installed here, so the name is
+          ;; just an odd local path -- which is exactly the case: the
+          ;; workspace is local and DIRECTORY is not.
+          (should (null (gptel-yatools--connection
+                         (gptel-yatools-test--root-file "x")))))))))
+
+(ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
+  "A DIRECTORY on the workspace's own host is what the tool is for."
+  (gptel-yatools-test--with-remote
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        ;; The stand-in host's own root exists on it, so this reaches the
+        ;; spawner rather than a refusal -- the point being that a
+        ;; DIRECTORY on the workspace's machine is allowed through.
+        (let ((result (gptel-yatools-execute-command
+                       "pwd" gptel-yatools-test--remote-prefix 10))
+              (deadline (+ (float-time) 15)))
+          (while (and (null result) (< (float-time) deadline))
+            (accept-process-output nil 0.05))
+          (should result)
+          (gptel-yatools-test--should-be-enveloped result)
+          (should (string-match-p "exit code 0" result)))))))
+
+(ert-deftest gptel-yatools-test-connection-distinguishes-hops ()
+  "Two names that `file-remote-p' calls equal may leave from different machines.
+
+`file-remote-p' reports only the last hop, so
+\"/ssh:a|sudo:root@b:/etc/\" and \"/ssh:c|sudo:root@b:/etc/\" both answer
+\"/sudo:root@b:\".  They are different machines -- one reaches b through
+a, the other through c -- and the check that decides where a command runs
+must not confuse them.  The identity therefore comes from TRAMP's
+dissection, which keeps the hop."
+  (skip-unless (require 'tramp nil t))
+  (let ((via-a "/ssh:a|sudo:root@b:/etc/")
+        (via-c "/ssh:c|sudo:root@b:/etc/"))
+    (should (equal (file-remote-p via-a) (file-remote-p via-c)))
+    (should-not (equal (gptel-yatools--connection via-a)
+                       (gptel-yatools--connection via-c)))
+    (should (equal (gptel-yatools--connection-label via-a) "ssh:a|sudo:root@b"))
+    ;; User and port are part of the answer: the same host name reached as
+    ;; two users, or on two ports, is two connections.
+    (should-not (equal (gptel-yatools--connection "/ssh:root@h:/x")
+                       (gptel-yatools--connection "/ssh:alice@h:/x")))
+    (should-not (equal (gptel-yatools--connection "/ssh:h#22:/x")
+                       (gptel-yatools--connection "/ssh:h#2222:/x")))
+    ;; A local path is not on any connection.
+    (should (null (gptel-yatools--connection "/tmp/")))))
+
 (ert-deftest gptel-yatools-test-subprocesses-are-run-at-one-seam ()
   "No tool module may build its own process loop.
 
@@ -781,31 +953,92 @@ user takes; a plain `setq' deliberately does not go through it."
                               :description))))
       (customize-set-variable 'gptel-yatools-timeout original))))
 
-(ert-deftest gptel-yatools-test-registering-an-async-tool-is-refused ()
-  "An asynchronous tool cannot cross the boundary, so registering one must fail.
+(ert-deftest gptel-yatools-test-an-async-tool-delivers-once ()
+  "An asynchronous tool's boundary takes the callback first and uses it once.
 
-Its result arrives long after the call returns, so there is no Result for
-the boundary to render -- and a deadline around the call would only
-mislabell it as timed out while it still runs."
-  (gptel-yatools-test--noninteractive
-    (let ((gptel-yatools--tools nil))
-      (unwind-protect
-          (progn
-            (should-error (gptel-yatools--register-tool
-                           :name "probe_async"
-                           :category "probe"
-                           :description "Probe."
-                           :async t
-                           :function (lambda (_callback) nil))
-                          :type 'error)
-            ;; The refusal must happen before the tool reaches gptel's
-            ;; registry; otherwise the model can still call a tool that
-            ;; cannot return a Result.
-            (should-not (alist-get "probe_async"
-                                   (alist-get "probe" gptel--known-tools
-                                              nil nil #'equal)
-                                   nil nil #'equal)))
-        (setf (alist-get "probe" gptel--known-tools nil nil #'equal) nil)))))
+gptel calls an asynchronous tool with its callback before the declared
+arguments, and counts a tool result every time that callback runs -- so a
+second delivery would inject the result twice and could advance the
+request twice.  The one-shot guard in `gptel-yatools--job-settle' is what
+prevents it, and this pins that the callback is not reached twice even
+though the deadline timer and the process sentinel both fire.
+"
+  (skip-unless (executable-find "sh"))
+  (gptel-yatools-test--in-dir
+    (let ((calls 0)
+          (result nil))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; The callback is the first argument, exactly as gptel passes it.
+          (gptel-yatools-execute-command
+           (lambda (value) (setq calls (1+ calls) result value))
+           "printf hi" nil 5)
+          (let ((deadline (+ (float-time) 20)))
+            (while (and (null result) (< (float-time) deadline))
+              (accept-process-output nil 0.05)))
+          (should result)
+          (should (string-match-p "hi" result))
+          (gptel-yatools-test--should-be-enveloped result)
+          ;; Give a late sentinel or timer the chance to deliver again.
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (< (float-time) deadline)
+              (accept-process-output nil 0.05)))
+          (should (= calls 1)))))))
+
+(ert-deftest gptel-yatools-test-async-tool-takes-a-callback-first ()
+  "The registered function's arity must match what gptel will pass.
+
+gptel does `(apply FUNCTION CALLBACK ARG-VALUES)', so an asynchronous
+tool's boundary has to accept one more leading argument than a
+synchronous one.  Reading it off the tool struct is what catches a
+definition that forgot `:async' -- or a macro that stopped generating the
+callback form."
+  (let ((tool (gptel-yatools-test--tool-spec "execute_command")))
+    (should (gptel-tool-async tool))
+    (should (equal (func-arity (gptel-tool-function tool))
+                   '(0 . many)))
+    ;; And a synchronous tool is still declared with its own arity.
+    (should-not (gptel-tool-async (gptel-yatools-test--tool-spec "write_file")))))
+
+(ert-deftest gptel-yatools-test-async-tools-state-their-own-timeout-default ()
+  "An asynchronous tool must quote the budget that applies to it.
+
+A synchronous call holds Emacs for as long as it runs, so its default is
+two minutes; an asynchronous one does not, so its default is ten.  A
+description that quoted the wrong one would have the model either
+rushing or waiting for no reason."
+  (let* ((async (gptel-yatools-test--tool-spec "execute_command"))
+         (sync (gptel-yatools-test--tool-spec "write_file"))
+         (async-arg (car (last (gptel-tool-args async))))
+         (sync-arg (car (last (gptel-tool-args sync)))))
+    (should (equal (plist-get async-arg :name) "timeout"))
+    (should (string-match-p
+             (format "(%d seconds)" (gptel-yatools--timeout-default t))
+             (plist-get async-arg :description)))
+    (should (string-match-p
+             "runs in the background"
+             (plist-get async-arg :description)))
+    (should (string-match-p
+             (format "(%d seconds)" (gptel-yatools--timeout-default nil))
+             (plist-get sync-arg :description)))
+    (should-not (string-match-p
+                 "runs in the background"
+                 (plist-get sync-arg :description)))))
+
+(ert-deftest gptel-yatools-test-synchronous-tool-may-not-return-a-job ()
+  "A job from a non-async tool is a definition bug, and is said so.
+
+gptel would stringify the job and hand the printed struct to the model as
+the tool's answer, which is corrupt rather than merely useless.  The
+boundary catches it and reports it in the same envelope as any other
+failure."
+  (gptel-yatools-test--in-dir
+    (let ((out (gptel-yatools--call-tool
+                "probe" (lambda (&rest _)
+                          (gptel-yatools--make-job))
+                nil)))
+      (should (string-match-p "not declared :async" out))
+      (gptel-yatools-test--should-be-enveloped out))))
 
 
 ;;;; 50. Tool calls must run in the buffer that owns the request
@@ -1080,15 +1313,42 @@ the status slot that gptel rewrites in place."
   (setq-local header-line-format '("" " status" " info")))
 
 (ert-deftest gptel-yatools-test-execute-command-announces-itself ()
-  "`execute_command' must say that it is running before it does."
+  "`execute_command' must say that it is running before it does.
+
+With the header line in use the ticking status owns that slot (see
+`gptel-yatools-test-execute-command-counts-the-seconds'); without it,
+`gptel--update-status' falls through to `message', and the one-shot
+announcement is what the user sees.  A message every second would be
+unusable, so the ticker does not run there."
+  (with-temp-buffer
+    (gptel-yatools-test--vfs
+      (setq-local gptel-mode t)
+      (let ((gptel-use-header-line nil)
+            (messages nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (funcall (gptel-yatools-test--tool "execute_command") "printf hello"))
+        (should (cl-some (lambda (m) (string-match-p "Executing command" m))
+                         messages))))))
+
+(ert-deftest gptel-yatools-test-execute-command-counts-the-seconds ()
+  "A running command's status counts up, and stops when nothing runs.
+
+gptel sets \" Calling tool (execute_command)\" before the tool runs and
+leaves it there, so the only thing missing is how long it has been going.
+One timer per buffer paints that, and it must stop itself: a timer that
+outlived its job would keep repainting a stale number over whatever gptel
+says next."
   (with-temp-buffer
     (gptel-yatools-test--vfs
       (gptel-yatools-test--chat-with-header-line)
-      (let ((out (funcall (gptel-yatools-test--tool "execute_command")
-                          "printf hello")))
-        (should (string-match-p "hello" out))
-        (should (equal (nth 1 header-line-format)
-                       " Executing command..."))))))
+      ;; Long enough that the one-second tick lands inside the call.
+      (funcall (gptel-yatools-test--tool "execute_command") "sleep 1.3")
+      (should (string-match-p "Running 1 command"
+                              (nth 1 header-line-format)))
+      (should-not (timerp gptel-yatools--jobs-timer))
+      (should-not (gptel-yatools--jobs-live)))))
 
 (ert-deftest gptel-yatools-test-announcement-redraws-the-frame ()
   "Announcing a running command must redraw, not just set the string.

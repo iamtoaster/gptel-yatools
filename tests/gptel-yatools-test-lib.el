@@ -325,13 +325,25 @@ with a throwaway `gptel--fsm-last' pointing at OWNER -- the shape
 directly would run in CALLER and pass even while the dispatch bug is
 present, which is why no test in this section does that.
 
-Returns whatever the tool returned."
+A tool that delivers asynchronously returns from the dispatcher before its
+result exists, so the loop below waits for the callback.  It gives up
+after a hard deadline rather than hanging the suite: a test that can wait
+forever is not a test.
+
+Returns whatever the tool returned, or signalled if it never returned."
   (with-current-buffer caller
     (let* ((result nil)
+           (delivered nil)
            (gptel--fsm-last
             (gptel-make-fsm :state 'TOOL :info (list :buffer owner))))
       (gptel--accept-tool-calls
-       (list (list tool args (lambda (value) (setq result value)))))
+       (list (list tool args (lambda (value)
+                               (setq result value delivered t)))))
+      (let ((deadline (+ (float-time) 20)))
+        (while (and (not delivered) (< (float-time) deadline))
+          (accept-process-output nil 0.05)))
+      (unless delivered
+        (error "The tool never delivered a result within 20 seconds"))
       result)))
 
 (defun gptel-yatools-test--advice-count (symbol advice)
@@ -363,6 +375,155 @@ stats object; inspect it or look at the *ert* buffer for failures."
       (setq count (1+ count)
             position (+ position step)))
     count))
+
+;;;; A remote workspace, without a network
+;;
+;; What makes a file name "remote" to Emacs is a handler in
+;; `file-name-handler-alist', not its syntax.  So the remote-workspace
+;; tests install a stand-in handler under a prefix no TRAMP method claims
+;; and no real file has: the package cannot tell it from `/ssh:host:/',
+;; and no test needs a connection.  The handler answers only the
+;; questions these tests ask -- and sits exactly where it matters, between
+;; `gptel-yatools--run-process' and `make-process'.
+;;
+;; This is a stand-in, not a TRAMP emulator.  It cannot prove how TRAMP
+;; behaves; that was established against a real host and is recorded in
+;; the README's remote-workspace section.  It does pin the two things this
+;; package is responsible for: that a remote name is recognised, and that
+;; a remote process is asked for the way TRAMP needs it.
+
+(defvar gptel-yatools-test--remote-prefix "/gptel-test-remote:host:"
+  "The remote file-name prefix the remote-workspace tests use.
+
+The host part is a placeholder: the stand-in handler answers for any host
+under this method, so a test can name a second machine
+\(`gptel-yatools-test--remote-prefix-for') and check that the package
+notices they are not the same one.")
+
+(defconst gptel-yatools-test--remote-method "/gptel-test-remote:"
+  "The method every stand-in host shares, up to the host name.")
+
+(defun gptel-yatools-test--remote-prefix-for (host)
+  "Return the stand-in prefix naming HOST."
+  (concat gptel-yatools-test--remote-method host ":"))
+
+(defun gptel-yatools-test--remote-connection (name)
+  "Return the stand-in connection prefix of NAME, or nil.
+
+That is the part `file-remote-p' reports for a real handler: the method
+and host, ending at the colon before the local name."
+  (when (string-prefix-p gptel-yatools-test--remote-method name)
+    (when (string-match
+           (concat "\\`\\(" (regexp-quote gptel-yatools-test--remote-method)
+                   "[^:/]*:\\)")
+           name)
+      (match-string 1 name))))
+
+(defvar gptel-yatools-test--remote-root nil
+  "The temp directory the stand-in host maps its root onto.")
+
+(defvar gptel-yatools-test--remote-executables '("/bin/sh" "/bin/ash" "ash")
+  "The paths the stand-in host reports as executable.")
+
+(defvar gptel-yatools-test--remote-process-args nil
+  "The argument lists `make-process' received through the stand-in host.")
+
+(defun gptel-yatools-test--remote-handler (operation &rest args)
+  "Stand in for a TRAMP file-name handler, for OPERATION with ARGS.
+
+Only what the remote-workspace tests need is answered.  The operations
+Emacs requires a *name* answer for are implemented rather than left to a
+fallback: a handler that returns nil for one of those is reported as
+\"Invalid handler in `file-name-handler-alist'\", so `file-name-as-
+directory' and friends are answered on the name's local part and given
+the prefix back."
+  (let ((local (lambda (name)
+                 (if-let* ((prefix (gptel-yatools-test--remote-connection name)))
+                     (string-remove-prefix prefix name)
+                   name))))
+    (pcase operation
+      ('file-remote-p (gptel-yatools-test--remote-connection (car args)))
+      ;; TRAMP answers this with a *local* directory so that a synchronous
+      ;; `call-process' runs here instead of trying to chdir on the host;
+      ;; `vfs_diff' depends on it, since it diffs local temp copies.
+      ('unhandled-file-name-directory temporary-file-directory)
+      ('file-executable-p
+       (member (funcall local (car args))
+               gptel-yatools-test--remote-executables))
+      ((or 'file-name-directory 'file-name-as-directory)
+       (let ((rest (funcall local (car args))))
+         (concat (gptel-yatools-test--remote-connection (car args))
+                 (file-name-as-directory (if (string-empty-p rest) "/" rest)))))
+      ('file-name-nondirectory
+       (file-name-nondirectory (funcall local (car args))))
+      ('directory-file-name
+       (concat (gptel-yatools-test--remote-connection (car args))
+               (directory-file-name (funcall local (car args)))))
+      ('expand-file-name
+       ;; An absolute local name is returned unchanged, as TRAMP does:
+       ;; that is how `expand-file-name' lets a local absolute path escape
+       ;; a remote root, and what `execute_command' has to refuse.
+       (let ((name (car args))
+             (dir (car (cdr args))))
+         (cond ((string-prefix-p gptel-yatools-test--remote-method name) name)
+               ((file-name-absolute-p name) name)
+               (t (concat (if (and dir (string-prefix-p
+                                        gptel-yatools-test--remote-method dir))
+                              dir
+                            (or (and dir (gptel-yatools-test--remote-connection
+                                          dir))
+                                gptel-yatools-test--remote-prefix))
+                          name)))))
+      ('file-truename (car args))
+      ('abbreviate-file-name (car args))
+      ('file-relative-name (car args))
+      ;; Nothing exists on the stand-in host except its root: that is what
+      ;; makes the ancestor walk have to stop by itself.
+      ('file-directory-p
+       (let ((name (file-name-as-directory (car args))))
+         (or (equal name (file-name-as-directory
+                          (or (gptel-yatools-test--remote-connection (car args))
+                              "")))
+             (equal name (file-name-as-directory
+                          (or gptel-yatools-test--remote-root ""))))))
+      ('file-regular-p nil)
+      ('file-exists-p
+       (equal (file-name-as-directory (car args))
+              (file-name-as-directory
+               (or (gptel-yatools-test--remote-connection (car args)) ""))))
+      ('make-directory t)
+      ('make-process
+       (push (copy-sequence args) gptel-yatools-test--remote-process-args)
+       ;; Run it for real, but locally: the shell the package picks is
+       ;; "/bin/sh", which also exists here, so the argv under test is
+       ;; exercised end to end rather than only inspected.
+       (let ((file-name-handler-alist nil)
+             (default-directory (or gptel-yatools-test--remote-root
+                                    temporary-file-directory)))
+         (apply #'make-process args)))
+      (_ nil))))
+
+(defmacro gptel-yatools-test--with-remote (&rest body)
+  "Run BODY in a workspace whose root is on a stand-in remote host.
+
+The root is the stand-in prefix, `default-directory' is that root, and
+the handler above is installed, so `file-remote-p' answers with a host --
+which is the only signal the package has that it is on another machine."
+  (declare (indent 0) (debug t))
+  `(let* ((gptel-yatools-test--remote-root
+           (file-name-as-directory (make-temp-file "gptel-test-remote-" t)))
+          (gptel-yatools-test--remote-process-args nil)
+          ;; A host is probed once; a test must not inherit the previous
+          ;; test's answer.
+          (gptel-yatools--remote-shell-cache (make-hash-table :test #'equal))
+          (file-name-handler-alist
+           (cons (cons (concat "\\`" (regexp-quote gptel-yatools-test--remote-method))
+                       #'gptel-yatools-test--remote-handler)
+                 file-name-handler-alist))
+          (default-directory (file-name-as-directory
+                              gptel-yatools-test--remote-prefix)))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (delete-directory gptel-yatools-test--remote-root t)))))
 
 (provide 'gptel-yatools-test-lib)
 ;;; gptel-yatools-test-lib.el ends here

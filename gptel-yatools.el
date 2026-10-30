@@ -170,6 +170,39 @@ more."
               #'gptel-yatools--forget-inspection-vfs))
 
 ;;-------------------------------------------------------------------------
+;; Stopping a tool call that is still running
+;;
+;; An asynchronous tool call is the one piece of work a user can start and
+;; then have no way to stop: `C-g' has nothing on the stack to interrupt,
+;; and `gptel-abort' looks the request up in `gptel--request-alist', whose
+;; entry is the *network* process -- removed once the response arrived, so
+;; during a tool call it finds nothing and does nothing.
+;;
+;; So cancellation is provided here, where the gptel adaptation lives: a
+;; command, a key in `gptel-mode-map', and advice so that gptel's own abort
+;; does what its name promises when the thing running is a tool.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools--abort-cancels-tools (buffer)
+  "Kill this package's running tool jobs when gptel aborts BUFFER.
+
+Aborting a request should stop the command it started, not leave it
+running on the host with its output going nowhere."
+  (when (buffer-live-p buffer)
+    (gptel-yatools--cancel-jobs buffer)))
+
+(unless (advice-member-p #'gptel-yatools--abort-cancels-tools 'gptel-abort)
+  (advice-add 'gptel-abort :before #'gptel-yatools--abort-cancels-tools))
+
+;; `C-c RET' is the only binding `gptel-mode-map' ships with, and gptel's
+;; own `C-c C-k' bindings live in other maps (the tool-call actions map,
+;; the inspection map, the request-preview buffer), which take precedence
+;; wherever they apply.  A user who wants a different key rebinds this one
+;; in their config, as with any package key.
+(when (boundp 'gptel-mode-map)
+  (define-key gptel-mode-map (kbd "C-c C-k")
+              #'gptel-yatools--cancel-tool-calls))
+
+;;-------------------------------------------------------------------------
 ;; Drawing the header line
 ;;
 ;; gptel builds `header-line-format' as (BACKEND STATUS INFO), and INFO

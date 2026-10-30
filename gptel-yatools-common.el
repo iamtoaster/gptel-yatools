@@ -84,6 +84,19 @@
 (require 'gptel)
 (require 'project)
 
+;; TRAMP is not a dependency: it is loaded by Emacs whenever a remote file
+;; name is read, and a workspace is remote only when it already is.  These
+;; two functions are the only ones this package calls, and both are asked
+;; behind a `fboundp' guard.
+(declare-function tramp-dissect-file-name "tramp" (file &optional nested))
+(declare-function tramp-get-method-parameter "tramp" (vec key))
+(declare-function tramp-tramp-file-p "tramp" (name))
+(declare-function tramp-file-name-hop "tramp" (vec))
+(declare-function tramp-file-name-method "tramp" (vec))
+(declare-function tramp-file-name-user "tramp" (vec))
+(declare-function tramp-file-name-host "tramp" (vec))
+(declare-function tramp-file-name-port "tramp" (vec))
+
 (defgroup gptel-yatools nil
   "Extra tools for gptel."
   :group 'gptel
@@ -93,6 +106,7 @@
 ;; that gives it a value and a setter is further down, once the setter
 ;; exists -- `defcustom' calls its `:set' as it defines the variable.
 (defvar gptel-yatools-timeout)
+(defvar gptel-yatools-async-timeout)
 
 (cl-defstruct (gptel-yatools-call (:constructor gptel-yatools--make-call))
   "The facts about the tool call in progress.
@@ -173,7 +187,559 @@ helper called directly used to read anyway."
 ;; A real process is polled rather than `call-process' because only that
 ;; can be interrupted when the call's deadline expires: timers do not run
 ;; while `call-process' waits.
+;;
+;; When the workspace is remote -- a TRAMP name such as "/ssh:host:/repo"
+;; -- two of those rules mean something different, and getting either
+;; wrong is silent rather than loud:
+;;
+;;   - the program is the *remote* shell, because `shell-file-name' names a
+;;     file on this machine.  Asking a container for
+;;     "/run/current-system/sw/bin/zsh" is a command that never starts;
+;;   - the kill goes through `signal-process' on the process object, which
+;;     TRAMP translates into a remote `kill'.  A remote process's id is the
+;;     id of the local ssh/docker client, so the process-group kill used
+;;     for local commands signals a group here and leaves the command
+;;     running on the host.
+;;
+;; Everything else -- merging stderr, closing stdin, keeping the output of
+;; a process that was killed -- is the same on a remote host, because it is
+;; the shell we ask the host to run that does it.
 ;;-------------------------------------------------------------------------
+
+(defconst gptel-yatools--remote-shell-candidates '("/bin/sh" "/bin/ash" "ash")
+  "Shells to try, in order, when a command runs on a remote host.
+
+The first is what a POSIX system has.  The other two are what a stripped
+busybox environment -- a busybox image with nothing added -- may be left
+with, where `/bin/sh' is not there at all, `/bin/ash' might not be
+either, and the login shell's `PATH' is the only thing that knows where
+`ash' went.
+
+The host's own answer (`tramp-remote-shell', \"/bin/sh\" for every method
+that ships with Emacs) is tried first of all; it is a default rather than
+a promise, so it is asked whether it is executable just like these are.")
+
+(defvar gptel-yatools--remote-shell-cache (make-hash-table :test #'equal)
+  "The shell found on each remote host, so a host is probed only once.
+
+Deciding costs one `file-executable-p' per candidate, and on a remote
+host each of those is a round trip: worth paying once per host, not once
+per tool call.")
+
+(defun gptel-yatools--remote-shell-declared (directory)
+  "Return the shell DIRECTORY's TRAMP method declares, or nil.
+
+That is TRAMP's own answer, kept in the connection and needing no round
+trip.  It is only consulted when TRAMP is loaded, which it is by the time
+a remote file name can reach a tool."
+  (when (fboundp 'tramp-dissect-file-name)
+    (ignore-errors
+      (let ((shell (tramp-get-method-parameter
+                    (tramp-dissect-file-name directory) 'tramp-remote-shell)))
+        (and (stringp shell) shell)))))
+
+(defun gptel-yatools--connection (path)
+  "Return a value identifying the machine PATH lives on, or nil for this one.
+
+Two paths whose connections are `equal' run on the same host -- which is
+the question `execute_command' has to answer before running a command,
+because a command is approved for a workspace and must run where that
+workspace is.
+
+`file-remote-p' alone cannot answer it.  For a multi-hop name it returns
+only the last hop, so \"/ssh:a|sudo:root@b:/etc/\" and
+\"/ssh:c|sudo:root@b:/etc/\" both answer \"/sudo:root@b:\" although they
+leave from different machines.  TRAMP's dissection keeps the hop, so its
+fields are the identity: method, user, host, port and the hop chain.
+
+A name handled by something other than TRAMP falls back on the prefix
+`file-remote-p' gives, which is all such a handler offers."
+  (when-let* ((remote (file-remote-p path)))
+    (or (and (fboundp 'tramp-tramp-file-p)
+             (tramp-tramp-file-p path)
+             (ignore-errors
+               (let ((v (tramp-dissect-file-name path)))
+                 (list (tramp-file-name-hop v)
+                       (tramp-file-name-method v)
+                       (tramp-file-name-user v)
+                       (tramp-file-name-host v)
+                       (tramp-file-name-port v)))))
+        (list remote))))
+
+(defun gptel-yatools--connection-label (path)
+  "Return the connection PATH lives on as a short string, or nil if local.
+
+The label is what a message can name: \"ssh:a|sudo:root@b\" rather than
+the last hop alone.  It is built from `gptel-yatools--connection', so the
+two cannot describe different hosts -- there is one dissection, and one
+place that says what a connection is called."
+  (pcase (gptel-yatools--connection path)
+    (`(,hop ,method ,user ,host ,port)
+     (concat hop method ":"
+             (and user (concat user "@"))
+             host
+             (and port (concat "#" port))))
+    (`(,prefix) (string-remove-suffix ":" prefix))))
+
+(defun gptel-yatools--remote-shell (directory)
+  "Return the shell to run a remote command with on DIRECTORY's host.
+
+DIRECTORY is a remote file name; the answer is an absolute path *on that
+host*, fit to be the program of a process that `:file-handler' sends
+there.
+
+Every candidate is asked whether it is executable *on the host*, including
+the shell the TRAMP method declares: a method's declared shell is a
+default (\"\\/bin/sh\" for every backend that ships with Emacs), not a
+promise, and a stripped busybox host where `/bin/sh' does not exist is
+exactly the case the fallbacks are for.  When nothing answers -- a
+backend that does not implement `file-executable-p' cannot be asked --
+the first candidate is returned anyway, so the command that fails names
+the shell it tried."
+  (let ((remote (file-remote-p directory)))
+    (or (gethash remote gptel-yatools--remote-shell-cache)
+        (let* ((candidates
+                (delete-dups
+                 (delq nil (cons (gptel-yatools--remote-shell-declared directory)
+                                 gptel-yatools--remote-shell-candidates))))
+               (found (cl-find-if
+                       (lambda (shell)
+                         (file-executable-p (concat remote shell)))
+                       candidates)))
+          (puthash remote (or found (car candidates))
+                   gptel-yatools--remote-shell-cache)))))
+;;-------------------------------------------------------------------------
+
+;;-------------------------------------------------------------------------
+;; Jobs: work a tool has started and not yet finished
+;;
+;; A tool that hands its work to a process returns a JOB instead of a
+;; Result.  The body then says only *what to run* and *how to read the
+;; outcome*; the boundary decides whether to wait for it and render it, or
+;; to let gptel's callback render it whenever it arrives.
+;;
+;; That single decision is the whole difference between a synchronous and
+;; an asynchronous tool.  It is not a difference in the body, in the
+;; Result, or in the envelope -- so `execute_command' and `vfs_diff' run
+;; through the same spawner, and a synchronous tool is an asynchronous one
+;; whose answer is waited for.
+;;
+;; A job is concluded exactly once.  A deadline timer and a process
+;; sentinel can both fire, and gptel counts a tool result every time its
+;; callback runs, so a second delivery would inject the result twice and
+;; could advance the request twice.
+;;-------------------------------------------------------------------------
+
+(defconst gptel-yatools--job-output-limit 1000000
+  "Characters of output a running job will hold before it stops reading.
+
+A tool reply is capped at `gptel-yatools--output-char-limit' (64000), so
+everything past the first chunk would be discarded anyway.  Without a
+ceiling, a command that loops for its whole budget -- which for an
+asynchronous tool can be ten minutes -- would hold every byte it printed
+in a buffer.  The ceiling sits far above the envelope limit so ordinary
+truncation is unaffected.")
+
+(cl-defstruct (gptel-yatools-job (:constructor gptel-yatools--make-job))
+  "Work a tool has started and not yet finished.
+
+PROCESS    the process, or nil when it could not be started.
+BUFFER     the buffer that owns the call: its VFS, its status line and
+           its cancellation are what the outcome belongs to.
+OUTPUT     the buffer the process writes into.
+RESULT     a function of the outcome plist returning the Result to report.
+           The body owns the wording; the boundary owns delivery.
+REMOTE     non-nil when the process runs on a TRAMP host.
+STARTED    `float-time' at which the job was spawned.
+DEADLINE   `float-time' after which the job is killed, or nil for none.
+CONCLUDE   a function of the outcome plist, run exactly once.
+TIMER      the deadline timer, cancelled when the job concludes.
+TIMED-OUT  non-nil once the deadline has fired.
+START-ERROR the message when the process could not be started.
+DELIVERED  non-nil once CONCLUDE has run: the one-shot flag."
+  (process nil)
+  (buffer nil)
+  (output nil)
+  (result nil)
+  (remote nil)
+  (started nil)
+  (deadline nil)
+  (description "process")
+  (conclude nil)
+  (timer nil)
+  (timed-out nil)
+  (start-error nil)
+  (delivered nil))
+
+(defvar-local gptel-yatools--jobs nil
+  "The jobs this buffer has started and not yet concluded, newest first.
+
+Buffer-local because a job belongs to the chat that started it: its
+result is rendered against that buffer's VFS and its status is shown in
+that buffer's header line.  `gptel-yatools--cancel-tool-calls' empties
+it.")
+
+(defun gptel-yatools--jobs-live (&optional buffer)
+  "Return the jobs still running for BUFFER, or for the current buffer."
+  (let ((jobs (if buffer
+                  (and (buffer-live-p buffer)
+                       (buffer-local-value 'gptel-yatools--jobs buffer))
+                gptel-yatools--jobs)))
+    (cl-remove-if #'gptel-yatools-job-delivered jobs)))
+
+;;-------------------------------------------------------------------------
+;; Saying that something is running
+;;
+;; gptel already shows that a tool call is in progress -- it sets
+;; " Calling tool (execute_command)" before the function is called and
+;; leaves it there until the result arrives -- so the only thing left to
+;; add is how long it has been running, which gptel does not track.
+;;
+;; One timer per buffer, not per job: it runs while any job in that buffer
+;; is live and stops when the last one concludes, so two parallel commands
+;; share one clock.  It only runs when the header line is in use, because
+;; with `gptel-use-header-line' nil `gptel--update-status' falls through to
+;; `message', and a message every second is not a status, it is a nuisance.
+;;-------------------------------------------------------------------------
+
+(defvar-local gptel-yatools--jobs-timer nil
+  "The timer that ticks this buffer's running-tool status, or nil.")
+
+(defconst gptel-yatools--jobs-tick-interval 1.0
+  "Seconds between refreshes of the running-tool status.")
+
+(declare-function gptel--update-status "gptel" (msg &optional face))
+(declare-function gptel--fsm-transition "gptel-request" (machine &optional new-state))
+
+(defun gptel-yatools--jobs-status-text (jobs)
+  "Return the status line for JOBS, or nil when there are none."
+  (when jobs
+    (let* ((count (length jobs))
+           (oldest (apply #'min (mapcar #'gptel-yatools-job-started jobs)))
+           (elapsed (max 0 (truncate (- (float-time) oldest)))))
+      (format " Running %d command%s... %ds (C-c C-k cancels)"
+              count
+              (if (= count 1) "" "s")
+              elapsed))))
+
+(defun gptel-yatools--jobs-tick (buffer)
+  "Refresh BUFFER's running-tool status, or stop ticking when nothing runs."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((jobs (gptel-yatools--jobs-live)))
+        (cond
+         ((null jobs)
+          (when (timerp gptel-yatools--jobs-timer)
+            (cancel-timer gptel-yatools--jobs-timer)
+            (setq gptel-yatools--jobs-timer nil)))
+         ((not (and (bound-and-true-p gptel-mode) gptel-use-header-line))
+          nil)
+         ((fboundp 'gptel--update-status)
+          (gptel--update-status (gptel-yatools--jobs-status-text jobs)
+                                'mode-line-emphasis)))))))
+
+(defun gptel-yatools--jobs-note-change ()
+  "Start or stop this buffer's ticking status, as its jobs come and go."
+  (let ((jobs (gptel-yatools--jobs-live)))
+    (if (and jobs
+             (bound-and-true-p gptel-mode)
+             gptel-use-header-line)
+        (unless (timerp gptel-yatools--jobs-timer)
+          (setq gptel-yatools--jobs-timer
+                (run-with-timer 0 gptel-yatools--jobs-tick-interval
+                                #'gptel-yatools--jobs-tick (current-buffer))))
+      (when (timerp gptel-yatools--jobs-timer)
+        (cancel-timer gptel-yatools--jobs-timer)
+        (setq gptel-yatools--jobs-timer nil)))
+    ;; No status is set when nothing is running: gptel's own handlers move
+    ;; the status on to "Waiting..." or "Ready" as the request continues,
+    ;; and a second opinion from here would only race them.
+    nil))
+
+;;-------------------------------------------------------------------------
+;; Cancelling
+;;
+;; An asynchronous tool call is the one thing a user can start and then
+;; have no way to stop: `C-g' has nothing to interrupt, and `gptel-abort'
+;; looks the request up in `gptel--request-alist', whose entry is the
+;; network process -- removed once curl finished, so during a tool call it
+;; finds nothing.  So cancellation is a thing this package has to provide.
+;;
+;; It kills the jobs first and stops the request second.  Delivering a
+;; "cancelled" result instead would let the model retry the command, which
+;; turns one cancel into a loop of them.
+;;-------------------------------------------------------------------------
+
+(defun gptel-yatools--abort-request (&optional buffer)
+  "Move BUFFER's gptel request to its abort state, when it has one.
+
+The state machine is recorded in the chat buffer as `gptel--fsm-last' by
+`gptel--update-tool-call', before the tool runs, which is where it can be
+found while a tool call is what is holding the request."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((fsm (bound-and-true-p gptel--fsm-last)))
+      (when (gptel-fsm-p fsm)
+        (ignore-errors (gptel--fsm-transition fsm 'ABRT))))))
+
+(defun gptel-yatools--cancel-jobs (&optional buffer)
+  "Kill every job BUFFER has running, delivering nothing.  Return how many."
+  (let ((jobs (gptel-yatools--jobs-live (or buffer (current-buffer)))))
+    (mapc #'gptel-yatools--job-abandon jobs)
+    (length jobs)))
+
+(defun gptel-yatools--cancel-tool-calls (&optional buffer)
+  "Kill the running tool calls of BUFFER and stop its request.
+
+With no job running there is nothing to stop, and that is a `user-error'
+rather than a silent success: the command is offered as a key, and a key
+that does nothing cannot be told apart from one that is not bound."
+  (interactive)
+  (let* ((buffer (or buffer (current-buffer)))
+         (count (gptel-yatools--cancel-jobs buffer)))
+    (if (zerop count)
+        (user-error "No tool call is running in %s" (buffer-name buffer))
+      (gptel-yatools--abort-request buffer)
+      (message "Cancelled %d tool call%s" count (if (= count 1) "" "s")))))
+
+(defun gptel-yatools--job-filter (process chunk)
+  "Record CHUNK as PROCESS's output, up to the job's ceiling.
+
+A filter is used rather than `:buffer' so that a command which prints
+without end cannot grow a buffer without end."
+  (let ((buffer (process-buffer process)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let ((room (- gptel-yatools--job-output-limit (buffer-size))))
+          (when (> room 0)
+            (goto-char (point-max))
+            (insert (if (> (length chunk) room)
+                        (concat (substring chunk 0 room)
+                                "\n[... output truncated: the command printed more than this while it was still running ...]\n")
+                      chunk))))))))
+
+(defun gptel-yatools--job-outcome (job)
+  "Return JOB's outcome as the plist `gptel-yatools--run-process' returns.
+
+The keys are `:status', `:exit' and `:output', plus `:timed-out' when the
+deadline is what ended it.  A process that never started has no output of
+its own, so the reason it did not travels the same way output does."
+  (let* ((process (gptel-yatools-job-process job))
+         (start-error (gptel-yatools-job-start-error job))
+         (timed-out (gptel-yatools-job-timed-out job))
+         (exit (and process (not timed-out) (not start-error)
+                    (ignore-errors (process-exit-status process))))
+         (output (or start-error
+                     (let ((buffer (gptel-yatools-job-output job)))
+                       (if (buffer-live-p buffer)
+                           (with-current-buffer buffer
+                             (buffer-substring-no-properties
+                              (point-min) (point-max)))
+                         "")))))
+    (list :status (cond (start-error 'start-error)
+                        (timed-out 'timed-out)
+                        (t 'exited))
+          :exit (and (not timed-out) (not start-error) exit)
+          :timed-out (and timed-out t)
+          :output output)))
+
+(defun gptel-yatools--job-release (job)
+  "Forget JOB: cancel its timer, unlist it and drop its output buffer."
+  (let ((timer (gptel-yatools-job-timer job)))
+    (when (timerp timer) (cancel-timer timer))
+    (setf (gptel-yatools-job-timer job) nil))
+  (let ((buffer (gptel-yatools-job-buffer job)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq gptel-yatools--jobs (delq job gptel-yatools--jobs))
+        (gptel-yatools--jobs-note-change))))
+  (let ((output (gptel-yatools-job-output job)))
+    (when (buffer-live-p output) (kill-buffer output))
+    (setf (gptel-yatools-job-output job) nil)))
+
+(defun gptel-yatools--kill-buffer-jobs ()
+  "Abandon this buffer's jobs when the buffer itself is killed.
+
+A job's Result has nowhere to go once the chat that started it is gone,
+and the buffer is what held its status line and its cancellation, so a
+process left running would be one nothing could reach.  The deadline would
+eventually reap it; this makes it immediate."
+  (dolist (job (gptel-yatools--jobs-live))
+    (gptel-yatools--job-abandon job)))
+
+(defun gptel-yatools--job-settle (job)
+  "Conclude JOB with its outcome, once, and only once.
+
+Nothing happens if JOB has already concluded: that is what keeps a late
+sentinel from delivering a second result after the deadline already
+reported a timeout."
+  (unless (or (null job) (gptel-yatools-job-delivered job))
+    (setf (gptel-yatools-job-delivered job) t)
+    (let ((outcome (gptel-yatools--job-outcome job))
+          (conclude (gptel-yatools-job-conclude job)))
+      (gptel-yatools--job-release job)
+      (when conclude (funcall conclude outcome)))))
+
+(defun gptel-yatools--job-conclude-with (job function)
+  "Set JOB's conclusion to FUNCTION, concluding at once if JOB failed.
+
+A process that could not be started has no sentinel to report it, so the
+conclusion has to be made now that there is one."
+  (setf (gptel-yatools-job-conclude job) function)
+  (when (gptel-yatools-job-start-error job)
+    (gptel-yatools--job-settle job))
+  job)
+
+(defun gptel-yatools--job-abandon (job)
+  "Kill JOB and mark it concluded, delivering nothing.
+
+A cancelled job reports no result: the request it belonged to is being
+aborted, so there is no conversation left for the result to join."
+  (unless (or (null job) (gptel-yatools-job-delivered job))
+    (setf (gptel-yatools-job-delivered job) t)
+    (gptel-yatools--kill-process (gptel-yatools-job-process job)
+                                 (gptel-yatools-job-remote job))
+    (gptel-yatools--job-release job)))
+
+(defun gptel-yatools--job-expire (job)
+  "Kill JOB because its deadline has passed, and conclude it as timed out."
+  (unless (gptel-yatools-job-delivered job)
+    (setf (gptel-yatools-job-timed-out job) t)
+    (gptel-yatools--kill-process (gptel-yatools-job-process job)
+                                 (gptel-yatools-job-remote job))
+    (gptel-yatools--job-settle job)))
+
+(defun gptel-yatools--job-sentinel (process _event)
+  "Conclude the job PROCESS belongs to, once PROCESS has stopped."
+  (unless (process-live-p process)
+    (let ((job (process-get process 'gptel-yatools-job)))
+      (when job (gptel-yatools--job-settle job)))))
+
+(defun gptel-yatools--kill-process (process remote)
+  "Kill PROCESS, locally or on the host, and give it a moment to be reaped.
+
+A local process is killed with its whole process group, because Emacs puts
+each subprocess in one and the shell may ignore SIGINT while its children
+carry on.  A remote process cannot be killed that way: `(process-id
+PROCESS)' is the pid of the *local* ssh/docker client, so signalling that
+group signals a group here and leaves the command running on the host.
+`signal-process' on the process object is what TRAMP turns into a remote
+`kill'."
+  (when (and process (process-live-p process))
+    (if remote
+        (ignore-errors (signal-process process 'SIGKILL))
+      (unless (ignore-errors
+                (signal-process (- (process-id process)) 'SIGKILL))
+        (ignore-errors (signal-process process 'SIGKILL))))
+    (accept-process-output process 0.5)
+    (when (process-live-p process)
+      (ignore-errors (delete-process process)))))
+
+(cl-defun gptel-yatools--spawn-process (argv &key directory timeout
+                                            result description)
+  "Start ARGV in the background and return a `gptel-yatools-job'.
+
+ARGV is a list of strings: the program and its arguments, not a shell
+command.  The process is the one `gptel-yatools--run-process' would
+start, under the same rules: stderr merged into stdout, stdin closed at
+once, the host's own shell when the directory is remote, and a
+handler-built process there so the command runs on the host rather than
+on this machine.
+
+RESULT is a function of the outcome plist returning the Result to
+report; DESCRIPTION names the work in the header line.  TIMEOUT is the
+budget in seconds, or nil for the call's own deadline, less a margin so
+that the kill still lands inside it -- larger on a remote host, where
+killing is a round trip before it is even a signal.
+
+Nothing waits.  The process reports to its sentinel when it exits and the
+deadline timer kills it if it does not, so the caller either concludes the
+job itself or leaves the boundary to."
+  (let* ((directory (or directory default-directory))
+         (timeout (or timeout (gptel-yatools--call-deadline)))
+         (remote (file-remote-p directory))
+         (default-directory directory)
+         (program (if remote
+                      (gptel-yatools--remote-shell directory)
+                    shell-file-name))
+         (switch (if remote "-c" shell-command-switch))
+         (margin (if remote
+                     (min 1.5 (max 0.2 (* 0.25 timeout)))
+                   (min 0.5 (max 0.05 (* 0.1 timeout)))))
+         (started (float-time))
+         (output (generate-new-buffer " *gptel-job*"))
+         (job (gptel-yatools--make-job
+               :buffer (current-buffer)
+               :output output
+               :result result
+               :remote (and remote t)
+               :started started
+               :description (or description "process")
+               :deadline (- (+ started timeout) margin))))
+    (condition-case err
+        (let ((process
+               (make-process
+                :name "gptel-job"
+                :buffer output
+                :command (list program switch
+                               (concat "exec 2>&1; exec "
+                                       (mapconcat #'shell-quote-argument
+                                                  argv " ")))
+                ;; Only a handler-built process runs on the host.
+                ;; Without this flag `make-process' starts the command
+                ;; here, in "~", and the reply then describes a workspace
+                ;; it never touched.
+                :file-handler (and remote t)
+                ;; TRAMP's `pipe' path rewrites the command into a heredoc
+                ;; fed to /dev/tty, and the tty echoes that wrapper into
+                ;; the very buffer read as output; only the tty path
+                ;; returns the command's own bytes.
+                :connection-type (unless remote 'pipe)
+                :filter #'gptel-yatools--job-filter
+                :noquery t
+                :sentinel #'gptel-yatools--job-sentinel)))
+          (setf (gptel-yatools-job-process job) process)
+          (process-put process 'gptel-yatools-job job)
+          (ignore-errors (process-send-eof process))
+          (push job gptel-yatools--jobs)
+          (add-hook 'kill-buffer-hook #'gptel-yatools--kill-buffer-jobs nil t)
+          (setf (gptel-yatools-job-timer job)
+                (run-at-time (max 0.01 (- (gptel-yatools-job-deadline job)
+                                          (float-time)))
+                             nil #'gptel-yatools--job-expire job))
+          (gptel-yatools--jobs-note-change)
+          job)
+      (error
+       (setf (gptel-yatools-job-start-error job) (error-message-string err))
+       (kill-buffer output)
+       (setf (gptel-yatools-job-output job) nil)
+       (push job gptel-yatools--jobs)
+       job))))
+
+(defun gptel-yatools--await-job (job)
+  "Wait for JOB to conclude and return its outcome plist.
+
+This is the synchronous delivery path: the same job, the same process and
+the same rules, waited for on the stack instead of handed to gptel's
+callback.  `quit' and a signalled error leave through the
+`unwind-protect', which abandons the job so that no process outlives the
+call that started it."
+  (let ((outcome nil)
+        (done nil))
+    (unwind-protect
+        (progn
+          (gptel-yatools--job-conclude-with
+           job (lambda (o) (setq outcome o done t)))
+          (let ((process (gptel-yatools-job-process job)))
+            (while (and (not done) process (process-live-p process))
+              ;; The deadline timer concludes the job while we wait; the
+              ;; check here is only for a job whose process has already
+              ;; gone but whose conclusion has not run yet.
+              (accept-process-output process 0.05))
+            (while (and (not done) process)
+              (accept-process-output process 0.01)))
+          outcome)
+      (unless done
+        (gptel-yatools--job-abandon job)))))
 
 (cl-defun gptel-yatools--run-process (argv &key directory timeout)
   "Run ARGV under a deadline and return a plist describing what happened.
@@ -194,73 +760,16 @@ The answer is always a plist, never a signal, so a caller writes one
 STDERR IS MERGED into STDOUT, STDIN IS CLOSED, and the output of a
 process that timed out is kept: a caller that reports why a command
 failed needs the bytes it managed to write.  The kill signals the whole
-process group, so a shell's children go with it."
-  (let* ((timeout (or timeout (gptel-yatools--call-deadline)))
-         (default-directory (or directory default-directory))
-         (outbuf (generate-new-buffer " *gptel-process*"))
-         (process nil)
-         (start-error nil)
-         (exit-code nil)
-         (timed-out nil))
-    (unwind-protect
-        (progn
-          (unwind-protect
-              (condition-case err
-                  (progn
-                    (setq process
-                          (make-process
-                           :name "gptel-process"
-                           :buffer outbuf
-                           :command (list shell-file-name shell-command-switch
-                                          (concat "exec 2>&1; exec "
-                                                  (mapconcat
-                                                   #'shell-quote-argument
-                                                   argv " ")))
-                           :connection-type 'pipe
-                           :noquery t
-                           ;; The default sentinel would append its own
-                           ;; line to the buffer this function reads.
-                           :sentinel #'ignore))
-                    (ignore-errors (process-send-eof process))
-                    ;; Stop a little early, so the kill and reap below
-                    ;; still fit inside the deadline and the partial
-                    ;; output gets reported rather than being cut short by
-                    ;; the tool-level timer.  The margin scales down with
-                    ;; the timeout, so a caller asking for one second
-                    ;; still gets most of it.
-                    (let ((deadline (+ (float-time)
-                                       (- timeout
-                                          (min 0.5 (max 0.05 (* 0.1 timeout)))))))
-                      (while (and (process-live-p process)
-                                  (< (float-time) deadline))
-                        (accept-process-output
-                         process
-                         (min 0.2 (max 0.01 (- deadline (float-time))))))
-                      (if (process-live-p process)
-                          (setq timed-out t)
-                        (setq exit-code (process-exit-status process)))))
-                (error (setq start-error (error-message-string err))))
-            ;; This also runs when the tool-level timer unwound us out of
-            ;; the polling loop above.
-            (when (and process (process-live-p process))
-              (unless (ignore-errors
-                        (signal-process (- (process-id process)) 'SIGKILL))
-                (ignore-errors (signal-process process 'SIGKILL)))
-              (accept-process-output process 0.5)
-              (when (process-live-p process)
-                (ignore-errors (delete-process process)))))
-          (list :status (cond (start-error 'start-error)
-                              (timed-out 'timed-out)
-                              (t 'exited))
-                :exit (and (not timed-out) (not start-error) exit-code)
-                ;; A process that never started has no output of its own;
-                ;; the reason it did not is the only thing there is to
-                ;; report, so it travels the same way output does.
-                :output (or start-error
-                            (with-current-buffer outbuf
-                              (buffer-substring-no-properties
-                               (point-min) (point-max))))))
-      (when (buffer-live-p outbuf) (kill-buffer outbuf)))))
+process group, so a shell's children go with it -- on a remote host the
+group is the remote one, killed through TRAMP.
+
+The process is started by `gptel-yatools--spawn-process', the same
+spawner a tool uses when it hands the work to the boundary, and waited
+for here.  So there is one process implementation, and a tool that needs
+the outcome rather than a Result -- `render_diagram', which batches --
+asks for it with this function instead of duplicating the rules."
+  (gptel-yatools--await-job
+   (gptel-yatools--spawn-process argv :directory directory :timeout timeout)))
 
 (defmacro gptel-yatools--with-deadline-suspended (&rest body)
   "Run BODY without counting its time against the call's deadline.
@@ -880,28 +1389,46 @@ failure from arriving as \"Error: Error: ...\"."
 ;;-------------------------------------------------------------------------
 ;; Tool call timeouts
 ;;
-;; Tool calls run synchronously inside gptel's request handler, so a tool
-;; that blocks -- a hung shell command, a read from a FIFO -- blocks Emacs
-;; itself.  Every tool therefore gets a deadline (120 seconds by default)
+;; Tool calls used to run synchronously inside gptel's request handler, so a
+;; tool that blocked -- a hung shell command, a read from a FIFO -- blocked
+;; Emacs itself.  Every tool still gets a deadline (120 seconds by default,
+;; or `gptel-yatools-async-timeout' for one that delivers asynchronously)
 ;; plus an optional TIMEOUT argument for the rare call that genuinely needs
 ;; longer, and that argument's description tells the model not to raise it
 ;; unless it truly has to.
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools--resolve-timeout (value)
+(defun gptel-yatools--timeout-default (&optional async)
+  "Return the default number of seconds a call may run, ASYNC or not.
+
+A synchronous call blocks Emacs for its whole duration, so its default is
+`gptel-yatools-timeout' (two minutes).  An asynchronous one does not hold
+Emacs at all, so its budget is about the host's resources rather than the
+user's keyboard -- `gptel-yatools-async-timeout' (ten minutes).
+
+Both fall back on a number when the variable holds something that is not
+one, so a bad `setq' in a config file cannot make a tool unbounded."
+  (gptel-yatools--coerce-integer
+   (if async
+       (bound-and-true-p gptel-yatools-async-timeout)
+     (bound-and-true-p gptel-yatools-timeout))
+   120 1))
+
+(defun gptel-yatools--resolve-timeout (value &optional async)
   "Return the timeout in seconds to use for one tool call.
 
 VALUE is the TIMEOUT argument supplied by the model: a number, a
 numeric string, or nil for the default.  Unusable values fall back on
-`gptel-yatools-timeout', which itself falls back on 120 seconds when it
-holds something that is not a number.  The result is always at least
-one second."
-  (gptel-yatools--coerce-integer
-   value
-   (gptel-yatools--coerce-integer (bound-and-true-p gptel-yatools-timeout) 120 1)
-   1))
+the default for this kind of call -- see
+`gptel-yatools--timeout-default', which is `gptel-yatools-timeout' for a
+synchronous tool and `gptel-yatools-async-timeout' for an asynchronous
+one.  The result is always at least one second."
+  (gptel-yatools--coerce-integer value (gptel-yatools--timeout-default async) 1))
 
-(defun gptel-yatools--timeout-arg ()
+(defun gptel-yatools--timeout-arg (&optional async)
   "Return the optional TIMEOUT argument plist added to every tool.
+
+ASYNC says which default to state, because the two kinds of tool quote a
+different one: see `gptel-yatools--timeout-default'.
 
 This is the only place the model is told about timeouts: one argument
 description, stated once, naming the default and telling the model not
@@ -912,8 +1439,11 @@ re-appended on every reload to stay in step with this one."
   (list :name "timeout"
         :type "integer"
         :description
-        (format "Optional maximum number of seconds this call may run. Omit it to use the default (%s seconds). Do not raise it unless the task genuinely needs more time than the default allows."
-                (gptel-yatools--resolve-timeout nil))
+        (format "Optional maximum number of seconds this call may run. Omit it to use the default (%s seconds). Do not raise it unless the task genuinely needs more time than the default allows.%s"
+                (gptel-yatools--timeout-default async)
+                (if async
+                    " This tool runs in the background: the call returns before the work finishes, and the result arrives when it does."
+                  ""))
         :optional t))
 
 (define-error 'gptel-yatools-timeout-error
@@ -933,21 +1463,48 @@ NAME, when given, is the tool that ran out of time."
   "Rewrite the TIMEOUT argument's description in every tool.
 
 Kept separate from registration so that changing
-`gptel-yatools-timeout' during a session updates what the model is told
-instead of leaving a stale number behind.  The tools are taken from this
-package's own list, not from `gptel-tools': a tool that the user has not
-enabled is not in `gptel-tools', but its argument must still be correct
-when it is enabled later."
+`gptel-yatools-timeout' or `gptel-yatools-async-timeout' during a session
+updates what the model is told instead of leaving a stale number behind.
+The tools are taken from this package's own list, not from `gptel-tools':
+a tool that the user has not enabled is not in `gptel-tools', but its
+argument must still be correct when it is enabled later.
+
+Each tool states the default that applies to it, which is why the async
+flag is read from the tool rather than assumed."
   (dolist (tool gptel-yatools--tools)
     (let ((args (gptel-tool-args tool)))
       (when (equal (plist-get (car (last args)) :name) "timeout")
         (setf (gptel-tool-args tool)
-              (append (butlast args) (list (gptel-yatools--timeout-arg))))))))
+              (append (butlast args)
+                      (list (gptel-yatools--timeout-arg
+                             (gptel-tool-async tool)))))))))
 
 (defun gptel-yatools--set-timeout (symbol value)
   "Set `gptel-yatools-timeout' to VALUE, updating the tool arguments."
   (set-default symbol value)
   (gptel-yatools--refresh-timeout-arg))
+
+(defun gptel-yatools--set-async-timeout (symbol value)
+  "Set `gptel-yatools-async-timeout' to VALUE, updating the tool arguments."
+  (set-default symbol value)
+  (gptel-yatools--refresh-timeout-arg))
+
+(defcustom gptel-yatools-async-timeout 600
+  "Maximum number of seconds an asynchronous tool call may run.
+
+An asynchronous tool does not hold Emacs: the call returns, the user keeps
+working, and the result is delivered when the work finishes.  So this
+budget is about the host's resources and about not leaving a runaway
+command behind -- not about how long the editor is unavailable, which is
+what `gptel-yatools-timeout' bounds.  That is why it is ten minutes rather
+than two.
+
+Every asynchronous tool takes the same optional TIMEOUT argument, whose
+description states this default, so the model is not left guessing what a
+raised value would mean."
+  :type 'number
+  :group 'gptel-yatools
+  :set #'gptel-yatools--set-async-timeout)
 
 (defcustom gptel-yatools-timeout 120
   "Maximum number of seconds a gptel tool call may run before it is aborted.
@@ -967,6 +1524,24 @@ case that matters when the value is set in a config file."
   :type 'number
   :group 'gptel-yatools
   :set #'gptel-yatools--set-timeout)
+
+(defun gptel-yatools--new-call (&optional timeout)
+  "Return the `gptel-yatools-call' for a tool call starting now.
+
+The root is inherited from an enclosing call when there is one, so a call
+never moves its workspace half way through; otherwise it is detected from
+the current buffer.  The deadline is TIMEOUT, already resolved.
+
+Both halves of the boundary build their call here: the synchronous one
+that waits under a timer, and the asynchronous one that binds the same
+context again when the answer arrives, long after the buffer that started
+the call has stopped being current."
+  (let ((outer gptel-yatools--call))
+    (gptel-yatools--make-call
+     :root (if outer
+               (gptel-yatools-call-root outer)
+             (gptel-yatools--detect-workspace-root))
+     :deadline (or timeout (gptel-yatools--resolve-timeout nil)))))
 
 (defun gptel-yatools--call-with-timeout (function args &optional timeout name)
   "Call FUNCTION with positional ARGS, aborting after TIMEOUT seconds.
@@ -993,12 +1568,7 @@ consumed by Emacs's timer loop and the call would carry on running.  So
 the timer throws a fresh marker, and the catch site re-signals it as the
 condition the boundary renders."
   (let* ((timeout (gptel-yatools--resolve-timeout timeout))
-         (outer gptel-yatools--call)
-         (call (gptel-yatools--make-call
-                :root (if outer
-                          (gptel-yatools-call-root outer)
-                        (gptel-yatools--detect-workspace-root))
-                :deadline timeout))
+         (call (gptel-yatools--new-call timeout))
          (tag (make-symbol "gptel-yatools-timeout"))
          (expired (list 'expired timeout name))
          (start (float-time))
@@ -1056,7 +1626,31 @@ number is left for the body to refuse in its own words."
                        args arg-specs)
             (nthcdr (length arg-specs) args))))
 
-(defun gptel-yatools--call-tool (name function args &optional timeout arg-specs)
+(defun gptel-yatools--job-timed-out-p (job outcome)
+  "Return non-nil when OUTCOME is a deadline kill and JOB cannot describe it.
+
+A body that declared a result function gets to describe its own timeout,
+and it does so better than the boundary can: `execute_command' knows the
+command, the directory and the output it managed to produce, and says
+\"Command killed ... Partial output: ...\" rather than a generic sentence.
+So the boundary's timeout envelope is for a job that has no such function
+-- one that spawned a process without saying how to read its outcome."
+  (and (plist-get outcome :timed-out)
+       (not (functionp (gptel-yatools-job-result job)))))
+
+(defun gptel-yatools--job-tool-result (job name seconds)
+  "Wait for JOB and return the Result its body declared.
+
+A job that outlived its deadline and has no result function of its own
+signals `gptel-yatools-timeout-error', so the model is told the call was
+abandoned rather than handed the output of a process killed mid-sentence."
+  (let ((outcome (gptel-yatools--await-job job)))
+    (if (gptel-yatools--job-timed-out-p job outcome)
+        (signal 'gptel-yatools-timeout-error
+                (list :seconds seconds :tool name))
+      (gptel-yatools--job-report job outcome))))
+
+(defun gptel-yatools--call-tool (name function args &optional timeout arg-specs async)
   "Call FUNCTION with positional ARGS and render the outcome for the model.
 
 This is the tool boundary in one function: the deadline is enforced, the
@@ -1072,7 +1666,13 @@ refusal raised here is inside the `condition-case' below, so it reaches
 the model as an enveloped sentence rather than as bare text.
 
 NAME labels the tool in a timeout message.  TIMEOUT is the call's own
-deadline, or nil for `gptel-yatools-timeout'.
+deadline, or nil for the default; ASYNC says which default that is (see
+`gptel-yatools--timeout-default').
+
+A body that handed its work to a process returns a job rather than a
+Result, and is waited for here.  That is the synchronous half of the
+delivery decision: `gptel-yatools--call-tool-async' is the other half, and
+the job, the process and the rules are the same for both.
 
 The call's context -- the workspace root, settled once -- is bound by
 `gptel-yatools--call-with-timeout', so a tool that rebinds
@@ -1082,19 +1682,122 @@ change what a later relative path or message means.
 `quit' passes through untouched, and so does anything the user asked to
 debug: `condition-case-unless-debug' leaves the signal alone while
 `debug-on-error' is set."
-  (condition-case-unless-debug err
-      (gptel-yatools--respond
-       (gptel-yatools--call-with-timeout
-        function (gptel-yatools--checked-args args arg-specs) timeout name))
-    (gptel-yatools-timeout-error
-     (gptel-yatools--envelope
-      :disk "Tool call timed out."
-      (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
-                                      (or (plist-get (cdr err) :tool) name))))
-    (error
-     (gptel-yatools--envelope
-      :disk "The tool reported an error."
-      (format "Error: %s" (gptel-yatools--error-text err))))))
+  (let ((seconds (gptel-yatools--resolve-timeout timeout async)))
+    (condition-case-unless-debug err
+        (let ((value (gptel-yatools--call-with-timeout
+                      function (gptel-yatools--checked-args args arg-specs)
+                      seconds name)))
+          (gptel-yatools--respond
+           (cond
+            ((not (gptel-yatools-job-p value)) value)
+            (async (gptel-yatools--job-tool-result value name seconds))
+            (t
+             ;; A synchronous tool cannot hand gptel a job: gptel would
+             ;; stringify it and send the printed struct to the model.
+             ;; That is a definition bug, and it is said so.
+             (error "Error: internal error: the %s tool returned a job but is not declared :async. Nothing was changed." name)))))
+      (gptel-yatools-timeout-error
+       (gptel-yatools--envelope
+        :disk "Tool call timed out."
+        (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
+                                        (or (plist-get (cdr err) :tool) name))))
+      (error
+       (gptel-yatools--envelope
+        :disk "The tool reported an error."
+        (format "Error: %s" (gptel-yatools--error-text err)))))))
+
+(defun gptel-yatools--start-async (name function callback args arg-specs)
+  "Run FUNCTION for an asynchronous tool call and deliver its envelope.
+
+gptel calls an asynchronous tool with its callback as the first argument.
+The body runs here, in the buffer that owns the call, and returns either a
+Result -- it had nothing to wait for -- or a job, whose conclusion
+delivers.
+
+Delivery re-enters the owner buffer and rebinds the call context, because
+the answer arrives long after the call returned and both
+`default-directory' and the VFS are buffer-local: rendering outside that
+buffer would resolve paths against the wrong root and read the wrong VFS.
+The callback is called exactly once, because gptel counts a tool result
+every time it runs."
+  (let* ((split (gptel-yatools--split-args args arg-specs))
+         (checked (gptel-yatools--checked-args (car split) arg-specs))
+         (timeout (gptel-yatools--resolve-timeout (cdr split) t))
+         (call (gptel-yatools--new-call timeout))
+         (owner (current-buffer))
+         (gptel-yatools--call call)
+         (value (apply function checked)))
+    (if (gptel-yatools-job-p value)
+        (progn
+          (gptel-yatools--job-conclude-with
+           value
+           (lambda (outcome)
+             (when (buffer-live-p owner)
+               (with-current-buffer owner
+                 (let ((gptel-yatools--call call))
+                   (funcall callback
+                            (if (gptel-yatools--job-timed-out-p value outcome)
+                                (gptel-yatools--envelope
+                                 :disk "Tool call timed out."
+                                 (gptel-yatools--timeout-message timeout name))
+                              (gptel-yatools--respond
+                               (gptel-yatools--job-report value outcome)))))))))
+          ;; The answer is coming: there is nothing to return.
+          nil)
+      (funcall callback (gptel-yatools--respond value))
+      nil)))
+
+(defun gptel-yatools--job-report (job outcome)
+  "Return JOB's Result, read from OUTCOME by the function its body gave."
+  (let ((result (gptel-yatools-job-result job)))
+    (if (functionp result)
+        (funcall result outcome)
+      (gptel-yatools-ok
+       (format "The %s tool started work but declared no way to read its outcome. This is a bug in gptel-yatools; nothing was changed."
+               (or (gptel-yatools-job-description job) "tool"))))))
+
+(defun gptel-yatools--split-args (args arg-specs)
+  "Return (TOOL-ARGS . TIMEOUT) from the positional ARGS gptel passes.
+
+ARGS holds the tool's declared arguments in order, then the TIMEOUT every
+tool takes; the declaration says how many of the first are the tool's own.
+gptel passes them positionally, so this is the only place the boundary has
+to know where the tool's arguments end."
+  (let ((n (length arg-specs)))
+    (cons (cl-subseq args 0 (min n (length args)))
+          (nth n args))))
+
+(defun gptel-yatools--call-tool-async (name function first args arg-specs)
+  "Tool boundary for a tool registered with `:async t'.
+
+FIRST is what gptel passed first.  On a real tool call that is gptel's
+callback, and the answer is delivered to it.  A direct call -- from
+`eval', a hook, or a test -- passes the tool's own first argument instead,
+and is answered synchronously, so both ways of calling a tool keep
+working and both end at the same envelope.
+
+An error raised before a job exists has to be delivered here: returning it
+would leave gptel waiting for a callback that is never going to come."
+  (if (not (functionp first))
+      (let ((split (gptel-yatools--split-args (cons first args) arg-specs)))
+        (gptel-yatools--call-tool name function (car split) (cdr split)
+                                  arg-specs t))
+    (condition-case-unless-debug err
+        (gptel-yatools--start-async name function first args arg-specs)
+      (gptel-yatools-timeout-error
+       (funcall first
+                (gptel-yatools--envelope
+                 :disk "Tool call timed out."
+                 (gptel-yatools--timeout-message
+                  (plist-get (cdr err) :seconds)
+                  (or (plist-get (cdr err) :tool) name))))
+       nil)
+      (error
+       (funcall first
+                (gptel-yatools--envelope
+                 :disk "The tool reported an error."
+                 (format "Error: %s" (gptel-yatools--error-text err))))
+       nil))))
 
 (defun gptel-yatools-page (text offset lines &optional reserve)
   "Return a page of TEXT, described by a plist.
@@ -1202,14 +1905,17 @@ naming it would suggest it is."
            (eq value :json-false)
            (and (stringp value) (string-empty-p value)))))
 
-(defun gptel-yatools--preview-line (name display arg-specs values)
+(defun gptel-yatools--preview-line (name display arg-specs values
+                                         &optional async)
   "Return the one-line confirmation for a call to NAME.
 
 DISPLAY is the tool's `:preview' list: the arguments to show, in the
 order to show them.  ARG-SPECS is the tool's `:args' declaration, which
 gives each shown name its position and says whether it may be omitted.
 VALUES is the positional argument list gptel hands the tool function,
-with the trailing TIMEOUT every tool takes.
+with the trailing TIMEOUT every tool takes.  ASYNC says the call returns
+before the work finishes, which is stated on the line: whether the
+command keeps running after you accept is part of what is being approved.
 
 A required argument is printed where it belongs -- positionally, the
 way the call reads -- and an optional one as NAME=VALUE, so the two
@@ -1228,7 +1934,7 @@ than as the model wrote it, since \"5\" and 5 mean the same seconds."
              (value (and position (nth position values))))
         (when (equal shown "timeout")
           (setq value (and (gptel-yatools--preview-shows-p value)
-                           (gptel-yatools--resolve-timeout value))))
+                           (gptel-yatools--resolve-timeout value async))))
         (cond
          ((null position) nil)
          ((member shown required)
@@ -1245,13 +1951,16 @@ than as the model wrote it, since \"5\" and 5 mean the same seconds."
                 parts)))))
     (concat "(" name
             (if parts (concat " " (mapconcat #'identity (nreverse parts) " ")) "")
+            (if async " [runs in the background]" "")
             ")\n")))
 
-(defun gptel-yatools--register-preview (name display arg-specs)
+(defun gptel-yatools--register-preview (name display arg-specs &optional async)
   "Point gptel's preview alist at a renderer for NAME, showing DISPLAY.
 
 ARG-SPECS is the tool's `:args', which the renderer reads positions
-from.  Nothing is registered for a tool that asks for no preview.
+from; ASYNC is passed through so the line can say the call returns
+before the work does.  Nothing is registered for a tool that asks for no
+preview.
 
 The registration is guarded: the alist is gptel's, so a gptel that stops
 defining it simply falls back to the default rendering, which is
@@ -1260,7 +1969,7 @@ truncated but not wrong in the way a missing prompt would be."
     (setf (alist-get name gptel--tool-preview-alist nil nil #'equal)
           (list (lambda (values _info)
                   (insert (gptel-yatools--preview-line name display
-                                                       arg-specs values))
+                                                       arg-specs values async))
                   nil)))))
 
 (defun gptel-yatools--literal (form)
@@ -1286,33 +1995,20 @@ and to `gptel-yatools--tools', replacing an earlier tool of the same name
 in place.  Replacing in place is what lets one tool module be reloaded
 without reordering the list the rest of the package reads.
 
-An asynchronous tool is refused rather than accepted and quietly left
-outside the boundary: gptel calls such a tool with a callback and the
-tool returns before its work is done, so there is no Result for the
-boundary to render.  This package defines none, and a tool that needs to
-be asynchronous needs a different interface, not an exception.
-
-The refusal happens before `gptel-make-tool', because that call is what
-registers the tool in `gptel--known-tools': a tool refused afterwards
-would stay visible to the model, callable, and unable to return a
-Result.  The check is repeated once the tool exists as a safety net, and
-that path unregisters it again if it ever fires."
-  (when (plist-get slots :async)
-    (error "gptel-yatools: %s cannot be asynchronous: an asynchronous tool returns before its work is done, so its response cannot be rendered at the tool boundary"
-           (plist-get slots :name)))
-  (let* ((slots (plist-put slots :args
+An asynchronous tool is accepted, and `:async' travels to gptel unchanged.
+gptel calls such a tool with a callback as its first argument and does not
+use the return value; the boundary delivers the envelope to that callback
+instead, which is why the result can arrive after the call has returned
+without any of the rendering rules changing.  The one thing that is still
+refused is a *synchronous* tool whose body returns a job: gptel would
+stringify it and send the printed struct to the model, so the boundary
+reports it as the definition bug it is when it happens."
+  (let* ((async (plist-get slots :async))
+         (slots (plist-put slots :args
                            (append (plist-get slots :args)
-                                   (list (gptel-yatools--timeout-arg)))))
+                                   (list (gptel-yatools--timeout-arg async)))))
          (tool (apply #'gptel-make-tool slots))
          (name (gptel-tool-name tool)))
-    (when (gptel-tool-async tool)
-      (setf (alist-get name
-                       (alist-get (or (gptel-tool-category tool) "misc")
-                                  gptel--known-tools nil nil #'equal)
-                       nil nil #'equal)
-            nil)
-      (error "gptel-yatools: %s cannot be asynchronous: an asynchronous tool returns before its work is done, so its response cannot be rendered at the tool boundary"
-             name))
     (let ((existing (cl-position name gptel-yatools--tools
                                  :key #'gptel-tool-name :test #'equal)))
       (if existing
@@ -1379,12 +2075,14 @@ then its description wrapped underneath it."
                 (or (gptel-yatools--fill-text (plist-get arg :description) 6)
                     "")))      arg-specs "\n"))))
 
-(defun gptel-yatools--tool-docstring (name category description arg-specs)
+(defun gptel-yatools--tool-docstring (name category description arg-specs
+                                           &optional async)
   "Return the docstring for a tool's boundary function.
 
 NAME is the tool's name as the model sees it, CATEGORY is its category,
 DESCRIPTION is the description the model is given, and ARG-SPECS are the
-declared arguments; the TIMEOUT argument every tool takes is added.
+declared arguments; the TIMEOUT argument every tool takes is added, with
+the default ASYNC calls quote.
 
 The description is the same text the model reads, so `C-h f' answers what
 this function is for with the words the tool was written in, and cannot
@@ -1399,7 +2097,7 @@ drift from them: both come from one definition."
                            (match-string 2 description))))
          (summary (or (car-safe split) description))
          (rest (cadr split))
-         (args (append arg-specs (list (gptel-yatools--timeout-arg)))))
+         (args (append arg-specs (list (gptel-yatools--timeout-arg async)))))
     (mapconcat
      #'identity
      (delq nil
@@ -1448,6 +2146,12 @@ SPEC is a sequence of keyword/value pairs followed by the body:
                string at 256 characters -- so a tool whose arguments are
                what the user is approving should name them here, or a
                long one can be approved on a harmless prefix.
+  :async       Non-nil to hand the answer to gptel's callback instead of
+               returning it.  The body is unchanged: it returns either a
+               Result or a job (`gptel-yatools--spawn-process'), and this
+               key only says whether the boundary waits for it.  A tool
+               that runs a command should set it, so that the command
+               does not hold Emacs for as long as it runs.
 
 The body is the tool's implementation.  The arguments named in :args are
 bound to the values the model sent, and the body returns a
@@ -1475,6 +2179,12 @@ Two functions are defined:
 Both are named, so both can be advised, traced with `trace-function' and
 found with `C-h f'.  Advice survives reloading the tool: it attaches to
 the symbol, not to a closure built at load time.
+
+An asynchronous tool (`:async t') has the same two functions, but its
+boundary takes gptel's callback first, because that is how gptel calls it.
+A direct call -- from `eval', a hook or a test -- passes the tool's own
+first argument instead and is answered synchronously, so both ways of
+calling a tool produce the same envelope.
 
 The tool itself is registered in gptel's registry -- which is what
 `gptel-menu' lists -- and in `gptel-yatools--tools'.  Nothing is sent to
@@ -1509,9 +2219,10 @@ Here is a whole tool:
            (args-form (plist-get plist :args))
            (arg-specs (gptel-yatools--literal args-form))
            (display (gptel-yatools--literal (plist-get plist :preview)))
+           (async (plist-get plist :async))
            (body rest)
            (doc (gptel-yatools--tool-docstring
-                 name category description arg-specs))
+                 name category description arg-specs async))
            (param-names (mapcar (lambda (arg) (intern (plist-get arg :name)))
                                 arg-specs))
            ;; An argument the model may omit has to be optional in Lisp
@@ -1561,12 +2272,20 @@ Here is a whole tool:
          (defun ,impl ,impl-params
            ,(gptel-yatools--tool-impl-docstring symbol name)
            ,@body)
-         (defun ,symbol ,boundary-params
+         (defun ,symbol ,(if async '(&rest args) boundary-params)
            ,doc
-           (gptel-yatools--call-tool ,name #',impl
-                                     (list ,@param-names)
-                                     timeout
-                                     (copy-tree ',arg-specs)))
+           ,(if async
+                ;; gptel passes the callback first, so the argument list
+                ;; cannot be the declared one; the boundary tells the two
+                ;; callers apart by type, which is safe because no tool
+                ;; declares a function argument.
+                `(gptel-yatools--call-tool-async ,name #',impl
+                                                 (car args) (cdr args)
+                                                 (copy-tree ',arg-specs))
+              `(gptel-yatools--call-tool ,name #',impl
+                                         (list ,@param-names)
+                                         timeout
+                                         (copy-tree ',arg-specs))))
          (gptel-yatools--register-tool
           :name ,name
           :category ,category
@@ -1576,9 +2295,10 @@ Here is a whole tool:
           ;; modify.
           :args (copy-tree ',arg-specs)
           :function #',symbol
+          ,@(when async (list :async t))
           ,@(when (plist-get plist :confirm)
               (list :confirm (plist-get plist :confirm))))
-         (gptel-yatools--register-preview ,name ',display ',arg-specs)
+         (gptel-yatools--register-preview ,name ',display ',arg-specs ,async)
          ',symbol))))
 
 ;;-------------------------------------------------------------------------

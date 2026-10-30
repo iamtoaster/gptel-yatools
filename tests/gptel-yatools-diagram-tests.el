@@ -279,6 +279,53 @@ same shape the `skill' tool uses, for the same reason."
       (should (string-match-p "security profile" reply))
       (should (string-match-p "gptel-yatools-plantuml-security-profile" reply)))))
 
+(ert-deftest gptel-yatools-diagram-test-runs-where-its-cache-is ()
+  "The renderer must not inherit the workspace's directory.
+
+`gptel-yatools--run-process' runs a command in `default-directory' unless
+told otherwise, and a chat about a remote workspace has a remote
+`default-directory'.  Inheriting it handed a PlantUML found on this
+machine to the host's shell -- `exec: .../plantuml: not found', exit 127,
+and no picture -- because the cache is local and the renderer is local
+while the workspace is not.
+
+Advice records the directory rather than stubbing the runner out
+entirely, so the argument under test still travels through the real code
+path that would have used it."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-diagram-test--cache
+      (let ((asked nil))
+        (cl-letf (((symbol-function 'gptel-yatools--run-process)
+                   (lambda (_argv &rest args)
+                     (setq asked (plist-get args :directory))
+                     (list :status 'exited :exit 0 :output ""))))
+          (funcall (gptel-yatools-test--tool "render_diagram")
+                   gptel-yatools-diagram-test--source nil))
+        (should asked)
+        ;; The cache's directory, and a local one.
+        (should (equal (file-name-as-directory asked)
+                       gptel-yatools-diagram-cache-directory))
+        (should-not (file-remote-p asked))
+        ;; And nothing was asked of the stand-in host.
+        (should (null gptel-yatools-test--remote-process-args))))))
+
+(ert-deftest gptel-yatools-diagram-test-renders-in-a-remote-workspace ()
+  "A remote workspace still gets a picture, drawn here.
+
+This is the end-to-end shape of the same bug: the whole tool, through its
+boundary, with `default-directory' on a stand-in host.  The SVG has to
+appear in the local cache and no process may reach the handler."
+  (skip-unless (gptel-yatools-diagram-test--plantuml-p))
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-diagram-test--cache
+      (let* ((source gptel-yatools-diagram-test--source)
+             (reply (funcall (gptel-yatools-test--tool "render_diagram")
+                             source nil)))
+        (gptel-yatools-test--should-be-enveloped reply)
+        (should (string-match-p "\\[diagram:" reply))
+        (should (file-exists-p (gptel-yatools-diagram--svg-file source)))
+        (should (null gptel-yatools-test--remote-process-args))))))
+
 ;;;; Rebuilding from the transcript
 
 (ert-deftest gptel-yatools-diagram-test-transcript-source-is-recovered ()

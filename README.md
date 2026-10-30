@@ -17,9 +17,11 @@ assumes.  `gptel-yatools` runs with **your** permissions: it can read any file
 you can read and run any command you can run, and the text it reads is sent to
 the model's provider.  `execute_command` asks before it runs anything and
 `file_sync` shows a diff before it writes; those two prompts are the whole of
-the protection.  Do not enable the shell tool on a repository you do not
-trust, and do not set `gptel-yatools-sync-without-review` unless you have read
-what it waives.
+the protection.  A command you approve keeps running after the call returns,
+so the confirmation line says `[runs in the background]`, and <kbd>C-c C-k</kbd>
+(or `M-x gptel-abort`) is how you stop it.  Do not enable the shell tool on a
+repository you do not trust, and do not set
+`gptel-yatools-sync-without-review` unless you have read what it waives.
 
 What you are shown is what will happen.  File names and file contents are
 displayed with anything invisible made visible, so a diff cannot describe
@@ -82,13 +84,134 @@ with its own `gptel-tools` keeps it.
 
 ### Timeouts
 
-Tool calls run synchronously inside gptel's request handler, so a tool that
-blocks blocks Emacs.  Every tool takes an optional `timeout` argument, and
-carries a deadline that aborts it when it expires; `gptel-yatools-timeout`
-(default 120) sets the default.  Time spent waiting for you — reading a
-`file_sync` diff, confirming `execute_command` — does not count against it.
-Timers only run while Emacs waits for input, so the deadline bounds calls that
-block on I/O, not purely CPU-bound work.
+Every tool takes an optional `timeout` argument and carries a deadline that
+aborts it when it expires.  There are two defaults, because there are two
+kinds of tool:
+
+- `gptel-yatools-timeout` (120 s) bounds a **synchronous** call.  It blocks
+  Emacs for as long as it runs, so this is also how long your editor is
+  unavailable.
+- `gptel-yatools-async-timeout` (600 s) bounds an **asynchronous** one.
+  The call returns immediately, so this is about not leaving a runaway
+  command behind, not about your patience.
+
+Time spent waiting for you — reading a `file_sync` diff, confirming
+`execute_command` — does not count against either.
+
+### Long-running commands
+
+`execute_command` is asynchronous: it starts the command and returns, so
+Emacs stays usable while the command runs.  The chat waits for it — gptel
+does not send the next request until every tool call has reported — but you
+can edit buffers, start other chats, or read this one meanwhile.
+
+While something is running the header line shows how long:
+
+```
+ Running 2 commands... 14s (C-c C-k cancels)
+```
+
+Two commands issued in the same response run **concurrently**; the status
+line counts them together and stops when the last one finishes.  A model
+that needs one step to finish before the next starts has to use separate
+calls, and the tool's description says so.
+
+<kbd>C-c C-k</kbd> in a `gptel-mode` buffer (`M-x
+gptel-yatools-cancel-tool-calls`) kills every command that buffer started
+and stops the request.  `M-x gptel-abort` does the same, because gptel's
+own abort cannot see a tool call: it looks the request up by its network
+process, which has finished by the time a tool is running.  Rebind `C-c
+C-k` in your config if it is in your way — this package sets it in
+`gptel-mode-map`, so a later binding wins.
+
+`execute_command` is the only asynchronous tool.  Everything else answers
+from memory or from a quick disk read, and waiting for it is cheaper than
+the bookkeeping needed to deliver it later.  But the machinery belongs to
+the tool kit, not to that one tool: a new tool gets the same delivery,
+deadline, cancellation and status line by adding `:async t` to its
+definition, and the body stays exactly as it is.
+
+One honest limit: with a remote workspace, `make-process` has to establish
+the TRAMP connection before it can return, so the boundary blocks for that
+(about 3 s cold, under 1 s on a live connection) even though the command
+itself does not.  Local commands do not block at all.
+
+### Remote workspaces
+
+A workspace can live on another machine.  Every path the tools use is an
+ordinary Emacs file name, so a chat buffer whose `default-directory` (or
+project root) is a TRAMP name — `/ssh:host:/repo`, `/docker:name:/src`,
+`/sudo:root@host:/etc` — works: reads, writes, encoding detection,
+conflict baselines, `vfs_diff`, the sync review, skills and the project
+root are all performed by TRAMP on that host.  Nothing needs configuring;
+TRAMP is not a dependency and is used only when a name already is remote.
+
+`execute_command` runs on the host too — under that host's shell, not your
+`shell-file-name`, which is a path on your machine and would be
+`exec: …: not found`.  The exit-status line says where the command ran:
+
+```
+Command succeeded in . on the remote host /ssh:host: (exit code 0).
+```
+
+Two limits are deliberate:
+
+- **`directory` must be on the workspace's own machine.**  A relative
+  path (resolved against the root) or a full path on that same host both
+  work; anything else is refused before it is even looked at, and the
+  refusal names both machines:
+
+  ```
+  Error: the workspace is on the remote host docker:gy-a, but DIRECTORY
+  resolves to /docker:gy-b:/tmp/other, which is on the remote host
+  docker:gy-b. Give DIRECTORY relative to the workspace root, or as a
+  path on the remote host docker:gy-a, so the command runs where the
+  workspace is.
+  ```
+
+  Refusing *this* machine was the obvious case; refusing another *server*
+  is the same hole with a longer reach.  The check compares connections
+  rather than host names, because `file-remote-p` reports only the last hop
+  of `/ssh:a|sudo:root@b:/x`, so two names that reach `b` through
+  different jump hosts are correctly told apart.
+- **The deadline covers the connection.**  Opening a TRAMP connection
+  costs a second or two on the first call and comes out of the tool's
+  `timeout`; a call that needs a real budget should say so.
+
+Round trips are the cost of a remote workspace: a directory listing asks
+the host about each entry, and `vfs_diff` reads every pending file, so
+these calls take longer than the same calls locally.  Nothing about their
+answers changes.
+
+What each tool does there is recorded in
+[ADR 0004](docs/adr/0004-a-remote-workspace-runs-on-its-host.md), including
+the measured facts it rests on (TRAMP echoes its wrapper script through a
+`pipe` connection; `(process-id)` is the local ssh client's pid; a remote
+kill has to go through `signal-process`).
+
+`render_diagram` is the exception, and deliberately: it renders where its
+cache lives rather than where the workspace lives, so a remote workspace
+still gets its picture drawn locally (see
+[ADR 0006](docs/adr/0006-a-subprocess-runs-where-its-artifacts-live.md)).
+The rule is "a subprocess runs where its artifacts are", and only
+`execute_command` has the workspace as its artifact.
+
+#### Checking it by hand
+
+The suite tests remote behaviour against a stand-in file-name handler, so
+no test needs a network.  To exercise a real host, any container will do:
+
+```sh
+docker run -d --name gptel-tramp-check alpine sleep 3600
+```
+
+then open a buffer with `default-directory` at
+`/docker:gptel-tramp-check:/tmp/`, enable the filesystem and shell tools,
+and ask for a diff before and after a `write_file`, plus
+`execute_command "pwd; hostname"` — `pwd` must be `/tmp` and `hostname`
+the container's id, not your machine's.  `execute_command "sleep 600"`
+with a short `timeout` should report a timeout *and* leave nothing running
+on the host (`docker exec gptel-tramp-check ps -eo args | grep sleep`).
 
 ### Syncing unattended
 
@@ -119,7 +242,7 @@ the model still has to call `file_sync`.
 | `vfs_diff` | filesystem | Unified diff of pending changes, with paging. |
 | `vfs_discard` | filesystem | Drop pending changes — the way out of a conflict. |
 | `read_workspace_root` | workspace | Absolute path of the workspace root. |
-| `execute_command` | shell | Run a shell command from the workspace root and return its output. |
+| `execute_command` | shell | Run a shell command from the workspace root and return its output. On a remote workspace it runs on that host. Asynchronous: the call returns while the command runs. |
 | `skill` | skills | List the installed [Agent Skills](https://agentskills.io), load one, or read a file it references. |
 | `render_diagram` | diagram | Render PlantUML source to an image the chat buffer draws inline, and return the token to show it. |
 
@@ -272,6 +395,14 @@ Images go to `gptel-yatools-diagram-cache-directory`
 without a review, because the model cannot name a path in it and nothing
 there is data: see [ADR 0003](docs/adr/0003-a-tool-may-own-an-opaque-directory.md).
 `M-x gptel-yatools-diagram-clear-cache` empties it.
+
+Rendering happens **where the cache is**, which normally means on this
+machine — including when the chat is about a remote workspace: the cache
+is local, the renderer is found locally, and the picture is drawn by this
+Emacs, so nothing about a diagram needs the remote host.  Point the cache
+at a remote path and the render moves there instead, provided PlantUML is
+installed on that host.  See
+[ADR 0006](docs/adr/0006-a-subprocess-runs-where-its-artifacts-live.md).
 
 The security profile is a **default, not a boundary**.  Under `SANDBOX` the
 renderer cannot read a file or fetch a URL — `!include ./theme.puml` and

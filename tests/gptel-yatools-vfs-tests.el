@@ -2167,7 +2167,7 @@ renders `(execute_command nil)', which approves nothing and describes
 nothing."
   (should (equal (gptel-yatools-test--preview "execute_command"
                                               (list :command "echo hi"))
-                 "(execute_command \"echo hi\")\n")))
+                 "(execute_command \"echo hi\" [runs in the background])\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-escapes-a-newline ()
   "A command may span lines; the confirmation must still be one heading.
@@ -2177,7 +2177,7 @@ like the rest of gptel's prompt.
 "
   (should (equal (gptel-yatools-test--preview
                   "execute_command" (list :command "echo one\necho two"))
-                 "(execute_command \"echo one<U+000A>echo two\")\n")))
+                 "(execute_command \"echo one<U+000A>echo two\" [runs in the background])\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-names-the-directory ()
   "The working directory is part of what is being approved."
@@ -2210,7 +2210,7 @@ directory called nothing rather than as \"the workspace root\".
 "
   (should (equal (gptel-yatools-test--preview
                   "execute_command" (list :command "ls" :directory ""))
-                 "(execute_command \"ls\")\n")))
+                 "(execute_command \"ls\" [runs in the background])\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-says-when-the-command-is-missing ()
   "A confirmation must not describe a missing command as `nil'.
@@ -2367,6 +2367,41 @@ fact the user needs.
                  :blocked (("/b" . "why")) :failed nil))))
     (should (string-match-p "synced 1 file(s)" line))
     (should (string-match-p "2 NOT synced" line))))
+
+(ert-deftest gptel-yatools-test-remote-ancestor-walk-terminates ()
+  "The ancestor walk must stop at a remote name's top-most directory.
+
+`file-name-directory' of \"/ssh:host:/\" is itself, so a walk whose only
+stop test is \"/\" never ends.  Every pending file reaches that walk
+through `gptel-yatools-vfs-refusal', which is why a remote workspace made
+`vfs_diff' and `file_sync' spin at 100% CPU instead of reporting a diff,
+while `write_file' (whose walk happens to stop against the file name)
+kept working.
+
+The last element is what makes the test worth having: it is the ancestor
+that only a remote name has."
+  (should (equal (gptel-yatools-vfs--ancestors "/ssh:host:/repo/src/a.el")
+                 '("/ssh:host:/repo/src" "/ssh:host:/repo" "/ssh:host:/")))
+  ;; The same walk, unbounded by that root, still ends where it always did.
+  (should (equal (gptel-yatools-vfs--ancestors "/repo/src/a.el")
+                 '("/repo/src" "/repo")))
+  (should (null (gptel-yatools-vfs--ancestors "/a.el"))))
+
+(ert-deftest gptel-yatools-test-remote-workspace-diffs-without-hanging ()
+  "A pending file in a remote workspace produces a diff, not a spin.
+
+This is the user-visible shape of the bug above: `vfs_diff' is what the
+model calls before every sync, so a workspace it could not diff was a
+workspace it could not safely write to at all.
+"
+  (gptel-yatools-test--with-remote
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (gptel-yatools-write-file "a.txt" "one\n")
+        (let ((diff (gptel-yatools-vfs-diff)))
+          (gptel-yatools-test--should-be-enveloped diff)
+          (should (string-match-p "a\\.txt" diff))
+          (should (string-match-p "^\\+one" diff)))))))
 
 (provide 'gptel-yatools-vfs-tests)
 ;;; gptel-yatools-vfs-tests.el ends here

@@ -896,6 +896,58 @@ arguments\" and stopped aborting anything."
                       (progn (gptel-abort (current-buffer)) nil)
                     (error (error-message-string err)))))))
 
+(ert-deftest gptel-yatools-test-a-tool-call-reports-a-quit ()
+  "A `C-g' during a deferred tool call must end the request, not strand it.
+
+`condition-case' does not treat `quit' as an `error', so a quit escaped
+every handler around the deferred call and left the state machine in TOOL
+for ever: `:tool-result' nil, the chat never continuing, and nothing on
+screen to say why.  That is the state a stuck subagent was found in.
+
+`error' alone is therefore not enough anywhere this package runs from a
+timer or a sentinel."
+  (should (eq (condition-case _e (signal 'quit nil)
+                (error 'caught)
+                (quit 'escaped))
+              'escaped))
+  (let ((fsm nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) nil))
+              ((symbol-function 'gptel--fsm-transition)
+               (lambda (machine state) (setf (gptel-fsm-state machine) state))))
+      (with-temp-buffer
+        (setq fsm (gptel-make-fsm :state 'TOOL
+                                  :info (list :buffer (current-buffer))))
+        (gptel-yatools--tool-calls-outside-the-sentinel
+         (lambda (&rest _) (signal 'quit nil)) fsm)
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (eq (gptel-fsm-state fsm) 'TOOL) (< (float-time) deadline))
+            (condition-case _q (accept-process-output nil 0.05) (quit nil))))
+        (should (eq (gptel-fsm-state fsm) 'ERRS))
+        (should (equal (plist-get (gptel-fsm-info fsm) :error) "Quit"))))))
+
+(ert-deftest gptel-yatools-test-subagent-settles-when-its-callback-is-quit ()
+  "A quit inside the child's callback must settle the child too.
+
+The same reason as above, one layer in: the child's callback is called
+from a sentinel, so a quit escaping it ends the run with no result and a
+parent tool call waiting for ever."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (job (gptel-yatools-subagent--record-job record))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (cl-letf (((symbol-function 'gptel-yatools-subagent--dispatch)
+                 (lambda (&rest _) (signal 'quit nil))))
+        (gptel-yatools-agent-test--deliver "an answer"))
+      (should (eq (gptel-yatools-subagent--record-state record) 'aborted))
+      (should (string-match-p "interrupted"
+                              (gptel-yatools-subagent--record-error record)))
+      (should outcome))))
+
 (ert-deftest gptel-yatools-test-subagent-label-counts-only-running ()
   "The label counts children that are still working, and says so when none are.
 

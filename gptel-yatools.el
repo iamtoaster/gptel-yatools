@@ -207,6 +207,20 @@ looking up the process is a name lookup in `process-list'."
                 (proc (ignore-errors (tramp-get-connection-process vec))))
       (tramp-get-connection-property proc "locked"))))
 
+(defun gptel-yatools--fail-request (fsm err)
+  "Record ERR on FSM and move it to gptel's error state.
+
+Used from callbacks and timers, where an escaping condition is not
+reported to anyone: a signal from a timer is only logged, and one from a
+process sentinel breaks the request's state machine.  The request is told
+instead, which is the only outcome a waiting chat can act on."
+  (ignore-errors
+    (plist-put (gptel-fsm-info fsm) :error
+               (if (eq (car-safe err) 'quit)
+                   "Quit"
+                 (error-message-string err))))
+  (ignore-errors (gptel--fsm-transition fsm 'ERRS)))
+
 (defun gptel-yatools--run-tool-call-later (function fsm args tries)
   "Run FUNCTION on FSM and ARGS once the TRAMP connection is free.
 
@@ -216,7 +230,13 @@ request that waits for ever.
 
 The state is checked first: an abort between the sentinel and this timer
 leaves nothing to run, and a state machine that has already moved on must
-not be handed another tool call."
+not be handed another tool call.
+
+`quit' is caught as well as `error', and that is not pedantry:
+`condition-case' does not treat a quit as an error, so a `C-g' during a
+deferred call escaped every handler and left the request in TOOL for ever
+-- no result, no error, and a chat that could never continue.  A quit is
+reported as `Quit' so the request ends somewhere the user can see."
   (let ((buffer (plist-get (gptel-fsm-info fsm) :buffer)))
     (run-at-time
      gptel-yatools-remote-tool-delay nil
@@ -230,12 +250,8 @@ not be handed another tool call."
            (with-current-buffer buffer
              (condition-case err
                  (apply function fsm args)
-               (error
-                ;; A signal escaping a timer is swallowed and the request
-                ;; would sit in TOOL for ever, so it is reported instead.
-                (plist-put (gptel-fsm-info fsm) :error
-                           (error-message-string err))
-                (ignore-errors (gptel--fsm-transition fsm 'ERRS))))))))))
+               (quit (gptel-yatools--fail-request fsm err))
+               (error (gptel-yatools--fail-request fsm err)))))))))
     nil))
 
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)

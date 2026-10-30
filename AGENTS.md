@@ -252,6 +252,12 @@ rm -f *.elc
   deferred tool call — settles what it owns even when stopping the work
   itself fails, and reports the failure as the outcome it was, not as
   silence.
+- **`quit` is not an `error`.**  `condition-case` does not catch `quit`
+  under an `error` handler, so a `C-g` during a deferred tool call or a
+  child's callback escaped every handler and left the state machine in
+  TOOL for ever — no result, no error, a chat that could never continue.
+  Anywhere this package runs from a timer or a sentinel, `quit` is caught
+  and reported as an outcome.
 - **A child agent is a reader.**  `gptel-yatools-subagent-tools` lists only
   read-only tools, and that is what every other decision in the agent module
   rests on: nothing it does can be lost, so there is no VFS policy, no merge

@@ -729,10 +729,20 @@ Everything is wrapped, because gptel calls this from a process sentinel:
 an error escaping here does not become a tool result, it breaks the
 request's state machine and the child is left running with nothing
 watching it.  A failure is reported as the child failing, which is the
-truth and is recoverable."
+truth and is recoverable.
+
+`quit' is caught separately from `error' because `condition-case' does
+not treat it as one: a `C-g' while the child's answer was being handled
+used to escape every handler here too, leaving the child running and its
+parent's tool call waiting for a result that was never going to arrive."
   (setf (gptel-yatools-subagent--record-info record) info)
   (condition-case err
       (gptel-yatools-subagent--dispatch record response info)
+    (quit
+     (unless (gptel-yatools-subagent--record-finished record)
+       (gptel-yatools-subagent--settle
+        record 'aborted
+        "Error: the subagent was interrupted before it finished. Its partial output is not an answer.")))
     (error
      (unless (gptel-yatools-subagent--record-finished record)
        (gptel-yatools-subagent--settle
@@ -941,6 +951,13 @@ reported as the timeout it was, not as silence."
                                (gptel-yatools-job-started job)))
                      (gptel-yatools-subagent--record-calls record)
                      (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))
+        (quit
+         ;; `condition-case' does not treat a quit as an error, and a
+         ;; `C-g' during a deadline is normal: the user is stopping
+         ;; something.  The child is settled all the same.
+         (gptel-yatools-subagent--settle
+          record 'timed-out
+          "Error: the subagent timed out and was interrupted while being stopped."))
         (error
          (gptel-yatools-subagent--settle
           record 'timed-out
@@ -1027,7 +1044,11 @@ the boundary waits for -- or does not, when the tool is asynchronous.
        (gptel-yatools-subagent--settle
         record 'failed
         (format "Error: the subagent could not be started: %s"
-                (error-message-string err)))))
+                (error-message-string err))))
+      (quit
+       (gptel-yatools-subagent--settle
+        record 'aborted
+        "Error: the subagent was interrupted before it started. Its partial output is not an answer.")))
     job))
 
 ;;-------------------------------------------------------------------------

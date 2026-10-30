@@ -246,6 +246,36 @@ as an error instead."
   :type 'number
   :group 'gptel-yatools)
 
+(defcustom gptel-yatools-tool-trace nil
+  "Whether to record what happens to each deferred tool call.
+
+When non-nil every step is appended to `gptel-yatools-tool-trace-file':
+the call arriving, whether it ran inline or was deferred, each timer
+firing with the state it found, and every reason a call was dropped.
+
+It exists because a request that stops in TOOL leaves nothing behind --
+no error, no timer, no result -- so the only way to find out where the
+chain broke is to record the chain.  Leave it off: it is a diagnostic,
+and it writes a line per step."
+  :type 'boolean
+  :group 'gptel-yatools)
+
+(defcustom gptel-yatools-tool-trace-file "/tmp/gptel-yatools-trace.log"
+  "Where `gptel-yatools-tool-trace' writes."
+  :type 'file
+  :group 'gptel-yatools)
+
+(defun gptel-yatools--trace (format-string &rest arguments)
+  "Append FORMAT-STRING and ARGUMENTS to the trace file, if tracing is on."
+  (when gptel-yatools-tool-trace
+    (ignore-errors
+      (with-temp-buffer
+        (insert (format-time-string "%H:%M:%S.%3N ")
+                (apply #'format format-string arguments)
+                "\n")
+        (append-to-file (point-min) (point-max)
+                        gptel-yatools-tool-trace-file)))))
+
 (defun gptel-yatools--run-tool-call-later (function fsm args tries &optional deadline)
   "Run FUNCTION on FSM and ARGS once the TRAMP connection is free.
 
@@ -287,14 +317,22 @@ reported as `Quit' so the request ends somewhere the user can see."
        ;; result and no error.  That is the shape of a subagent that
        ;; silently never finishes.
        (condition-case err
-           (when (and (buffer-live-p buffer)
-                      (eq (gptel-fsm-state fsm) 'TOOL))
+           (if (not (and (buffer-live-p buffer)
+                         (eq (gptel-fsm-state fsm) 'TOOL)))
+               ;; Two legitimate reasons to stop, and both used to be silent:
+               ;; the request moved on, or its buffer died.  Recorded so that
+               ;; "the call never ran" has a cause on file.
+               (gptel-yatools--trace "drop: buffer=%S state=%S"
+                                     (and (buffer-live-p buffer) t)
+                                     (and (buffer-live-p buffer)
+                                          (gptel-fsm-state fsm)))
              (cond
               ;; Another of this package's calls is on the stack.  Wait for
               ;; it without spending a try: it is bounded by that call
               ;; finishing, and running now would re-enter the connection
               ;; the flag exists to protect.
               (gptel-yatools--tool-call-running
+               (gptel-yatools--trace "wait: another call is running")
                (if (> (float-time) deadline)
                    (gptel-yatools--fail-request
                     fsm
@@ -303,6 +341,7 @@ reported as `Quit' so the request ends somewhere the user can see."
                  (gptel-yatools--run-tool-call-later
                   function fsm args tries deadline)))
               ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
+               (gptel-yatools--trace "wait: connection locked")
                (if (> (float-time) deadline)
                    (gptel-yatools--fail-request
                     fsm
@@ -311,11 +350,15 @@ reported as `Quit' so the request ends somewhere the user can see."
                  (gptel-yatools--run-tool-call-later
                   function fsm args (1- tries) deadline)))
               (t
+               (gptel-yatools--trace "run: %s" buffer)
                (with-current-buffer buffer
                  (let ((gptel-yatools--tool-call-running t))
-                   (apply function fsm args))))))
-         (quit (gptel-yatools--fail-request fsm err))
-         (error (gptel-yatools--fail-request fsm err)))))
+                   (prog1 (apply function fsm args)
+                     (gptel-yatools--trace "ran: %s" buffer)))))))
+         (quit (gptel-yatools--trace "quit: %S" err)
+               (gptel-yatools--fail-request fsm err))
+         (error (gptel-yatools--trace "error: %S" err)
+                (gptel-yatools--fail-request fsm err)))))
     nil))
 
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)
@@ -337,10 +380,26 @@ subagents can arrive at once and each takes its turn.  Emacs runs one
 timer at a time, which is what makes that safe.
 
 A local workspace is untouched: there is no connection to re-enter, and a
-tool call keeps running inline."
+tool call keeps running inline.
+
+Both paths are guarded, and that matters as much as the waiting.  This
+runs from gptel's state-machine handler, which itself runs inside
+`with-demoted-errors' in the process sentinel: an error escaping here is
+turned into a message and the request is left in TOOL with no result and
+no error, for ever.  A failure is reported to the request instead, so the
+chat says what happened."
   (let ((buffer (plist-get (gptel-fsm-info fsm) :buffer)))
+    (gptel-yatools--trace "arrive: buffer=%S remote=%S state=%S"
+                          buffer
+                          (and (buffer-live-p buffer)
+                               (gptel-yatools--remote-buffer-p buffer))
+                          (gptel-fsm-state fsm))
     (if (not (gptel-yatools--remote-buffer-p buffer))
-        (apply function fsm args)
+        (condition-case err
+            (apply function fsm args)
+          (quit (gptel-yatools--fail-request fsm err))
+          (error (gptel-yatools--fail-request fsm err)))
+      (gptel-yatools--trace "defer: buffer=%S" buffer)
       (gptel-yatools--run-tool-call-later function fsm args
                                          gptel-yatools-remote-tool-tries))))
 

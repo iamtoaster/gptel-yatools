@@ -276,91 +276,145 @@ and it writes a line per step."
         (append-to-file (point-min) (point-max)
                         gptel-yatools-tool-trace-file)))))
 
+(defvar gptel-yatools--deferred-tool-calls nil
+  "Tool calls waiting their turn at the remote filesystem.
+
+Each entry is a list (FUNCTION FSM ARGS TRIES DEADLINE).  The oldest is
+first, and only the oldest is ever considered, so calls run in the order
+they arrived.
+
+A queue rather than one timer per call, because of what TRAMP does to
+timers: `with-tramp-suspended-timers' -- which wraps every operation it
+performs -- binds `timer-list' to nil for the duration and discards
+whatever was pushed onto it.  A `run-at-time' made inside that section is
+therefore *silently lost*: it is never cancelled, never fires, and nothing
+reports it.  Measured directly: a timer created inside such a section
+never fires, while one created outside survives one.
+
+The tool-use handler runs from gptel's process sentinel, which can be
+inside exactly such a section, so scheduling a timer there is precisely
+the thing that does not work.  One timer, created when this package
+loads, works through the queue instead.")
+
+(defvar gptel-yatools--tool-drain-timer nil
+  "The timer that works through `gptel-yatools--deferred-tool-calls'.
+
+Created once at load time and re-armed from its own body.  Re-arming from
+inside the callback is safe because by then the TRAMP section is over;
+creating one from a request would not be.")
+
+(defun gptel-yatools--drain-deferred-calls ()
+  "Run the oldest deferred tool call, if it can run now.
+
+Called on a timer.  Leaves the queue alone while another of this package's
+calls is on the stack, and drops entries whose request has moved on --
+with a trace line, because a call that vanished without a word is what
+this queue exists to stop happening.
+
+The deadline is checked before the reasons for waiting, not after: a call
+queued behind something that never finishes must still give up, and that
+is exactly the case where nothing else would ever reconsider it."
+  (when gptel-yatools--deferred-tool-calls
+    (let* ((entry (car gptel-yatools--deferred-tool-calls))
+           (function (nth 0 entry))
+           (fsm (nth 1 entry))
+           (args (nth 2 entry))
+           (tries (nth 3 entry))
+           (deadline (nth 4 entry))
+           (buffer (ignore-errors (plist-get (gptel-fsm-info fsm) :buffer))))
+      (condition-case err
+          (cond
+           ;; The request moved on, or its buffer died.  Legitimate
+           ;; reasons to stop, but they are recorded: a call that simply
+           ;; disappears is indistinguishable from a hang.
+           ((not (and (buffer-live-p buffer)
+                      (eq (gptel-fsm-state fsm) 'TOOL)))
+            (setq gptel-yatools--deferred-tool-calls
+                  (cdr gptel-yatools--deferred-tool-calls))
+            (gptel-yatools--trace "drop: buffer=%S state=%S"
+                                  (and (buffer-live-p buffer) t)
+                                  (and (buffer-live-p buffer)
+                                       (gptel-fsm-state fsm))))
+           ;; Waited too long, whatever it was waiting for.
+           ((> (float-time) deadline)
+            (gptel-yatools--trace "expired after %gs" gptel-yatools-remote-tool-wait-limit)
+            (setq gptel-yatools--deferred-tool-calls
+                  (cdr gptel-yatools--deferred-tool-calls))
+            (gptel-yatools--fail-request
+             fsm
+             (list 'error
+                   (format "waited %gs for the remote filesystem to be free"
+                           gptel-yatools-remote-tool-wait-limit))))
+           ;; Another of this package's calls is on the stack.  Emacs runs
+           ;; one timer at a time, so this is the only guard that keeps
+           ;; two calls from starting inside one another: TRAMP runs
+           ;; timers while it waits for a reply.
+           (gptel-yatools--tool-call-running
+            (gptel-yatools--trace "wait: another call is running"))
+           ;; Another operation holds the connection.  Leave it queued.
+           ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
+            (gptel-yatools--trace "wait: connection locked, tries left %d" (1- tries))
+            (setcar (nthcdr 3 entry) (1- tries)))
+           (t
+            ;; Free: take it off the queue and run it.
+            (setq gptel-yatools--deferred-tool-calls
+                  (cdr gptel-yatools--deferred-tool-calls))
+            (gptel-yatools--trace "run: %s" buffer)
+            (with-current-buffer buffer
+              (let ((gptel-yatools--tool-call-running t))
+                (apply function fsm args)))
+            (gptel-yatools--trace "ran: %s" buffer)))
+        (quit (gptel-yatools--fail-request fsm err))
+        (error (gptel-yatools--fail-request fsm err))))))
+
+(defun gptel-yatools--ensure-drain-timer ()
+  "Start the queue's timer, if it is not already running.
+
+Called at load time, and from anywhere the queue grows: when the timer is
+missing this creates it, which only works from outside a TRAMP section --
+but the timer is a repeating one that re-arms from its own body, so it is
+not missing at those moments."
+  (unless (timerp gptel-yatools--tool-drain-timer)
+    (setq gptel-yatools--tool-drain-timer
+          (run-with-timer
+           0.01 gptel-yatools-remote-tool-delay
+           (lambda ()
+             (condition-case err
+                 (gptel-yatools--drain-deferred-calls)
+               ;; A signal here would be logged and the queue would stop
+               ;; being worked, which is the failure this file keeps
+               ;; rediscovering.  The timer repeats, so it recovers.
+               (error (gptel-yatools--trace "drain error: %S" err))))))))
+
 (defun gptel-yatools--run-tool-call-later (function fsm args tries &optional deadline)
-  "Run FUNCTION on FSM and ARGS once the TRAMP connection is free.
+  "Queue FUNCTION on FSM and ARGS to run when the connection is free.
 
 TRIES counts down; at zero the call is made anyway, so a connection that
 never reports itself free produces TRAMP's own error rather than a
 request that waits for ever.
 
 DEADLINE, in `float-time' units, bounds the whole wait: it is set on the
-first call and carried through every re-arm.  A call queued behind
-another one would otherwise be bounded only by that call finishing, and a
-connection that has died would leave it in TOOL for ever -- no result, no
-error, and a subagent the user cannot even see is stuck.
+first call and carried through every pass of the queue.
 
-Two things are waited for, and both were measured to matter.  The
-connection's own lock covers another operation's command; the flag above
-covers this package's own calls, which can otherwise start inside one
-another because TRAMP runs timers while it waits for output.
+Nothing is scheduled here.  That is the whole point: this can run inside
+TRAMP's suspended-timer section, where a timer created for the purpose is
+silently discarded.  The entry is queued, and the one timer made at load
+time picks it up."
+  (let ((deadline (or deadline
+                      (+ (float-time) gptel-yatools-remote-tool-wait-limit))))
+    (unless (gptel-yatools--deferred-call-p fsm)
+      (setq gptel-yatools--deferred-tool-calls
+            (append gptel-yatools--deferred-tool-calls
+                    (list (list function fsm args tries deadline))))
+      (gptel-yatools--trace "queued: %S entries=%d"
+                            (plist-get (gptel-fsm-info fsm) :buffer)
+                            (length gptel-yatools--deferred-tool-calls)))
+    (gptel-yatools--ensure-drain-timer)))
 
-The state is checked first: an abort between the sentinel and this timer
-leaves nothing to run, and a state machine that has already moved on must
-not be handed another tool call.
-
-`quit' is caught as well as `error', and that is not pedantry:
-`condition-case' does not treat a quit as an error, so a `C-g' during a
-deferred call escaped every handler and left the request in TOOL for ever
--- no result, no error, and a chat that could never continue.  A quit is
-reported as `Quit' so the request ends somewhere the user can see."
-  (let* ((buffer (plist-get (gptel-fsm-info fsm) :buffer))
-         (deadline (or deadline
-                       (+ (float-time) gptel-yatools-remote-tool-wait-limit))))
-    (run-at-time
-     gptel-yatools-remote-tool-delay nil
-     (lambda ()
-       ;; The whole body is guarded, not just the tool call.  Deciding
-       ;; whether to wait -- asking TRAMP for a connection property,
-       ;; asking the state machine for its state -- can signal too, and a
-       ;; signal from a timer is only logged: the call would neither run
-       ;; nor be re-armed, leaving the request in TOOL for ever with no
-       ;; result and no error.  That is the shape of a subagent that
-       ;; silently never finishes.
-       (condition-case err
-           (if (not (and (buffer-live-p buffer)
-                         (eq (gptel-fsm-state fsm) 'TOOL)))
-               ;; Two legitimate reasons to stop, and both used to be silent:
-               ;; the request moved on, or its buffer died.  Recorded so that
-               ;; "the call never ran" has a cause on file.
-               (gptel-yatools--trace "drop: buffer=%S state=%S"
-                                     (and (buffer-live-p buffer) t)
-                                     (and (buffer-live-p buffer)
-                                          (gptel-fsm-state fsm)))
-             (cond
-              ;; Another of this package's calls is on the stack.  Wait for
-              ;; it without spending a try: it is bounded by that call
-              ;; finishing, and running now would re-enter the connection
-              ;; the flag exists to protect.
-              (gptel-yatools--tool-call-running
-               (gptel-yatools--trace "wait: another call is running")
-               (if (> (float-time) deadline)
-                   (gptel-yatools--fail-request
-                    fsm
-                    (list 'error (format "waited %gs for another tool call to finish"
-                                         gptel-yatools-remote-tool-wait-limit)))
-                 (gptel-yatools--run-tool-call-later
-                  function fsm args tries deadline)))
-              ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
-               (gptel-yatools--trace "wait: connection locked")
-               (if (> (float-time) deadline)
-                   (gptel-yatools--fail-request
-                    fsm
-                    (list 'error (format "waited %gs for the connection to be free"
-                                         gptel-yatools-remote-tool-wait-limit)))
-                 (gptel-yatools--run-tool-call-later
-                  function fsm args (1- tries) deadline)))
-              (t
-               (gptel-yatools--trace "run: %s" buffer)
-               (with-current-buffer buffer
-                 (let ((gptel-yatools--tool-call-running t))
-                   (prog1 (apply function fsm args)
-                     (gptel-yatools--trace "ran: %s" buffer)))))))
-         (quit (gptel-yatools--trace "quit: %S" err)
-               (gptel-yatools--fail-request fsm err))
-         (error (gptel-yatools--trace "error: %S" err)
-                (gptel-yatools--fail-request fsm err)))))
-    nil))
-
+(defun gptel-yatools--deferred-call-p (fsm)
+  "Return non-nil when FSM already has a call waiting in the queue."
+  (seq-some (lambda (entry) (eq (nth 1 entry) fsm))
+            gptel-yatools--deferred-tool-calls))
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)
   "Run gptel's tool-use handler, but not from inside a process sentinel.
 
@@ -374,10 +428,14 @@ sentinel while a remote file's attributes are being read fails exactly
 that way, and the same call succeeds from a timer.
 
 So for a remote workspace the handler is deferred, then waits until the
-connection is free.  Waiting is a condition, not a sleep: the poll above
-re-arms while another call holds the connection, so any number of
-subagents can arrive at once and each takes its turn.  Emacs runs one
-timer at a time, which is what makes that safe.
+connection is free.  The connection's lock says when another operation
+is running; a flag says when another of this package's own calls is, since
+those can otherwise start inside one another.
+
+Nothing here schedules a timer.  See `gptel-yatools--deferred-tool-calls':
+a timer created at this point can be silently discarded, because this runs
+from gptel's process sentinel, which may be inside TRAMP's
+suspended-timer section.
 
 A local workspace is untouched: there is no connection to re-enter, and a
 tool call keeps running inline.
@@ -400,13 +458,21 @@ chat says what happened."
           (quit (gptel-yatools--fail-request fsm err))
           (error (gptel-yatools--fail-request fsm err)))
       (gptel-yatools--trace "defer: buffer=%S" buffer)
-      (gptel-yatools--run-tool-call-later function fsm args
-                                         gptel-yatools-remote-tool-tries))))
+      (condition-case err
+          (gptel-yatools--run-tool-call-later function fsm args
+                                             gptel-yatools-remote-tool-tries)
+        (quit (gptel-yatools--fail-request fsm err))
+        (error (gptel-yatools--fail-request fsm err))))))
 
 (unless (advice-member-p #'gptel-yatools--tool-calls-outside-the-sentinel
                          'gptel--handle-tool-use)
   (advice-add 'gptel--handle-tool-use :around
               #'gptel-yatools--tool-calls-outside-the-sentinel))
+
+;; Created here, at load time, and not from any request: a timer made
+;; inside TRAMP's suspended-timer section is silently discarded.  See
+;; `gptel-yatools--deferred-tool-calls'.
+(gptel-yatools--ensure-drain-timer)
 
 ;; `advice-add' is idempotent for an identical advice function, but the
 ;; guard makes the intent explicit and keeps the load path obviously safe

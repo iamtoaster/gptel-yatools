@@ -254,13 +254,22 @@ rm -f *.elc
   120-entry listing cost 125 round trips the obvious way and 4 the other
   way.
 - **Tool calls never overlap, and the connection's own lock is not
-  enough.**  TRAMP pumps output while it waits, which runs timers — so a
-  second deferred call can start *inside* the first one's file operation,
-  and two readers end up on one connection buffer: "End of file during
+  enough.**  TRAMP runs timers while it waits for output — so a second
+  deferred call can start *inside* the first one's file operation, and
+  two readers end up on one connection buffer: "End of file during
   parsing", results delivered to the wrong caller.  Measured: three
   calls, three concurrent.  `gptel-yatools--tool-call-running` is a plain
   variable, not a buffer-local one, because every subagent in a
   workspace shares the connection being protected.
+- **Never create a timer from inside a request.**  TRAMP wraps every
+  operation in `with-tramp-suspended-timers`, which binds `timer-list` to
+  nil and discards anything pushed onto it: a `run-at-time` made there is
+  silently lost — never cancelled, never fired, nothing reported.
+  Measured directly: a timer created inside such a section never fires;
+  one created outside survives one.  Since the tool-use handler runs from
+  a process sentinel, which can be inside exactly such a section,
+  deferred calls go on a queue worked by a single timer created at load
+  time (`gptel-yatools--deferred-tool-calls`).
 - **Nothing that runs on a timer may signal.**  A timer callback's error is
   logged by Emacs and nothing else: the work it was going to do simply
   does not happen, and whatever was waiting keeps waiting.  Every

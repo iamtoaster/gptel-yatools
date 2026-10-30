@@ -1146,6 +1146,44 @@ while its siblings finish."
         (should (string-match-p "Forbidden reentrant"
                                 (plist-get (gptel-fsm-info fsm) :error)))))))
 
+(ert-deftest gptel-yatools-test-a-deferred-call-survives-a-suspended-timer-section ()
+  "A call deferred from inside a TRAMP operation must still run.
+
+`with-tramp-suspended-timers' -- which wraps every TRAMP operation --
+binds `timer-list' to nil for the duration and throws away whatever was
+pushed onto it.  A timer created inside that section is therefore silently
+lost: never cancelled, never fired, nothing reported.  Measured directly:
+a timer made inside such a section never fires, while one made outside
+survives one.
+
+The tool-use handler runs from gptel's process sentinel, which is exactly
+where such a section can be open, so scheduling a timer there does not
+work.  This test defers a call from inside one and asserts it runs; it
+failed before the queue and the load-time drain timer existed.
+"
+  (require 'tramp)
+  (skip-unless (fboundp 'with-tramp-suspended-timers))
+  (let ((ran nil)
+        (gptel-yatools--deferred-tool-calls nil)
+        (gptel-yatools-remote-tool-delay 0.02)
+        (gptel-yatools-remote-tool-tries 100))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) nil)))
+      (with-temp-buffer
+        (let ((fsm (gptel-make-fsm :state 'TOOL
+                                   :info (list :buffer (current-buffer)))))
+          ;; Deferred from inside the section TRAMP opens for its work.
+          (with-tramp-suspended-timers
+            (gptel-yatools--tool-calls-outside-the-sentinel
+             (lambda (&rest _) (setq ran t)) fsm))
+          (should-not ran)
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (not ran) (< (float-time) deadline))
+              (accept-process-output nil 0.02)))
+          (should ran))))))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

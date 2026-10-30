@@ -2181,16 +2181,29 @@ begin mid-line."
                  "(execute_command\n\"echo one\necho two\" [runs in the background])\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-still-hides-invisible-characters ()
-  "Keeping the newline must not start showing the invisible characters.
+  "Keeping the newline and the tab must not start showing anything else.
 
-Everything the reader cannot see is still spelled out -- a tab and a
-carriage return among them, because neither says anything a person can
-read and a carriage return would move the cursor if it ever reached a
+Everything the reader cannot see is still spelled out -- a carriage
+return and an escape among them, because neither says anything a person
+can read and a carriage return would move the cursor if it ever reached a
 terminal."
   (should (equal (gptel-yatools-test--preview
                   "execute_command"
                   (list :command (concat "a\tb\rc" (string 27) "d")))
-                 "(execute_command \"a<U+0009>b<U+000D>c<U+001B>d\" [runs in the background])\n")))
+                 "(execute_command \"a\tb<U+000D>c<U+001B>d\" [runs in the background])\n")))
+
+(ert-deftest gptel-yatools-test-command-confirmation-keeps-its-indentation ()
+  "An indented inline script keeps its indentation.
+
+The tab is the other C0 character that means something to a reader: an
+inline python script whose body is tab-indented reads as the script it is,
+and as nothing at all once the tabs are spelled out."
+  (should (equal (gptel-yatools-test--preview
+                  "execute_command"
+                  (list :command "python3 - <<'EOF'\n\tif x:\n\t\tprint(x)\nEOF"))
+                 (concat "(execute_command\n"
+                         "\"python3 - <<'EOF'\n\tif x:\n\t\tprint(x)\nEOF\""
+                         " [runs in the background])\n"))))
 
 (ert-deftest gptel-yatools-test-command-confirmation-names-the-directory ()
   "The working directory is part of what is being approved."

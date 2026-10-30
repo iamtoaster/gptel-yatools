@@ -27,8 +27,8 @@ What you are shown is what will happen.  File names and file contents are
 displayed with anything invisible made visible, so a diff cannot describe
 itself as something other than what it is, and the confirmation for
 `execute_command` shows the whole command rather than its first few hundred
-characters — with its line breaks intact, so an inline script reads as the
-script it is.  A few files are off-limits to the agent entirely — your Emacs
+characters — with its line breaks and indentation intact, so an inline
+script reads as the script it is.  A few files are off-limits to the agent entirely — your Emacs
 startup files, `.dir-locals.el`, and the package's own source — because a
 change to one of those would run the next time Emacs starts.
 

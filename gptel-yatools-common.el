@@ -1014,16 +1014,16 @@ brief -- is shown through `gptel-yatools--block-char-regexp' instead,
 because a line break in a here-document is content, not an attack.")
 
 (defconst gptel-yatools--block-char-regexp
-  "[\x00-\x09\x0b-\x1f\x7f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
-  "Like `gptel-yatools--control-char-regexp', but newline is allowed.
+  "[\x00-\x08\x0b-\x1f\x7f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
+  "Like `gptel-yatools--control-char-regexp', but newline and tab are allowed.
 
-Escaping the newline was the mistake this exists to undo: it is the one
-C0 character that is legitimate in text meant to be read, and spelling it
-out turned a ten-line script into one unreadable wall of <U+000A> --
-which is not an audit of what will be approved.  Every other invisible
-character is still spelled out, and a carriage return still is: it says
-nothing a reader can see, and would move the cursor if it ever reached a
-terminal.")
+Escaping either was the mistake this exists to undo: they are the two C0
+characters that are legitimate in text meant to be read, and spelling them
+out turned a ten-line script -- or an indented one -- into one unreadable
+wall of <U+000A> and <U+0009>, which is not an audit of what will be
+approved.  Everything else invisible is still spelled out, and a carriage
+return still is: it says nothing a reader can see, and would move the
+cursor if it ever reached a terminal.")
 
 (defun gptel-yatools--escape-chars (string regexp)
   "Return STRING with every match of REGEXP written as <U+XXXX>.
@@ -1052,8 +1052,9 @@ meant to read line by line goes through
 
 For the text a model wrote to be read rather than to be compared: a
 multi-line shell command, the brief handed to a subagent.  Keeping the
-line breaks is the whole point -- the shape of a here-document is what
-the user is being asked to approve."
+line breaks and the tabs is the whole point -- the shape of a
+here-document, or the indentation of an inline script, is what the user is
+being asked to approve."
   (gptel-yatools--escape-chars string gptel-yatools--block-char-regexp))
 
 (defun gptel-yatools--display-path (path)

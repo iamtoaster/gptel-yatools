@@ -304,10 +304,10 @@ tool's own `:preview' declaration and its `:args', so the arguments are
 read by name in the positions the definition states.  It exists because
 gptel's default formatter truncates every string argument at 256
 characters: a command could otherwise be approved on a harmless prefix.
-Every value is quoted through the printable-text rule, with one
-exception: a line break survives, because a here-document's shape and a
-subagent's brief are what the user is judging.  Everything else
-invisible is still spelled out.
+Every value is quoted through the printable-text rule, with two
+exceptions: a line break and a tab survive, because a here-document's
+shape, a script's indentation and a subagent's brief are what the user is
+judging.  Everything else invisible is still spelled out.
 _Avoid_: Confirmation prompt, tool-call renderer
 
 ### Diagrams

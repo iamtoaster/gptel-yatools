@@ -476,12 +476,50 @@ because the two differ by the margin the job subtracts."
 ;;-------------------------------------------------------------------------
 ;; Taking a child over
 ;;-------------------------------------------------------------------------
+(ert-deftest gptel-yatools-test-subagent-finishing-does-not-detach-it ()
+  "gptel's own finishing insert must not count as the user taking over.
+
+gptel lays a reply down in two steps: the callback receives the text, then
+the DONE handler inserts a response separator and a prompt prefix.  The
+second step changes the buffer *after* the child has settled, so reading
+every change as a user edit detached every child the moment it answered,
+dropped it from the parent's list and offered a rename nobody asked for.
+"
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (child (gptel-yatools-subagent--record-buffer record))
+           (asked nil))
+      (gptel-yatools-agent-test--deliver "All good.")
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) (setq asked t) "")))
+        ;; What `gptel--handle-post-insert' does, unchanged: no user
+        ;; command ran in between, so it must be attributed to gptel.
+        (with-current-buffer child
+          (let ((tracking (plist-get (gptel-yatools-subagent--record-info record)
+                                     :tracking-marker)))
+            (unless tracking
+              (setq tracking (set-marker (make-marker) (point-max))))
+            (goto-char tracking)
+            (insert "\n\n"))
+          (insert "You: "))
+        (let ((deadline (+ (float-time) 1.0)))
+          (while (< (float-time) deadline)
+            (accept-process-output nil 0.05))))
+      (should-not (gptel-yatools-subagent--record-detached record))
+      (should (memq record gptel-yatools-subagent--records))
+      (should-not asked))))
+
 (ert-deftest gptel-yatools-test-subagent-edit-detaches-it ()
   "Editing a settled child's buffer takes it out of the parent's hands.
 
 The kill hook is the point: a buffer the user has adopted must not be
 destroyed when the chat that started it goes away.  A child that is still
-running cannot be edited at all, so this only ever fires after it settles."
+running cannot be edited at all, so this only ever fires after it settles.
+
+The edit is made the way a user makes one: `pre-command-hook' runs first,
+which is what tells the module that the change about to arrive is not
+gptel finishing its reply."
   (gptel-yatools-agent-test--with-parent
     (gptel-yatools-agent-test--start)
     (let* ((record (car gptel-yatools-subagent--records))
@@ -491,6 +529,8 @@ running cannot be edited at all, so this only ever fires after it settles."
       (cl-letf (((symbol-function 'read-string)
                  (lambda (&rest _) (setq asked t) "")))
         (with-current-buffer child
+          ;; A real command loop runs these; ERT has no command loop.
+          (run-hooks 'pre-command-hook)
           (goto-char (point-max))
           (insert "\nmy note"))
         ;; The rename question is asked from a timer, so run the timers.

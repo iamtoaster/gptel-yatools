@@ -95,23 +95,34 @@ filtered through the parent's `gptel-tools': a parent that never enabled
   :type '(repeat string)
   :group 'gptel-yatools-agents)
 
-(defcustom gptel-yatools-subagent-max-turns 50
+(defcustom gptel-yatools-subagent-max-turns 200
   "Most model responses one child may produce before it is stopped.
 
 Each response re-sends the child's whole conversation, so this is the
-budget that bounds what a child costs.  It is not the same number as
-`gptel-yatools-subagent-max-tool-calls': one response can carry several
+budget that bounds what a child costs -- but it is a loose bound on
+purpose.  A model that has few tools and does not batch tends to spend one
+response per tool call, so a cap that looks generous in tokens is a cap
+that stops a working child mid-investigation: the failure is the turn
+limit, not the work.
+
+The wall-clock deadline (`gptel-yatools-subagent-timeout') is the real
+guard against a child that runs away; this is a backstop for a loop, and a
+backstop set too low is just a smaller timeout.  It is not the same number
+as `gptel-yatools-subagent-max-tool-calls': one response can carry several
 tool calls, and a final answer is a response that carries none."
   :type 'integer
   :group 'gptel-yatools-agents)
 
-(defcustom gptel-yatools-subagent-max-tool-calls 150
+(defcustom gptel-yatools-subagent-max-tool-calls 500
   "Most tool calls one child may make before it is stopped.
 
-One turn can carry many calls, and a model that is short of tools tends to
-spend turns rather than batch them, so this is the bound on how much the
-child may read.  It is the only budget the child itself is told about,
-because it is the only one it can count."
+One turn can carry many calls, but a model short of tools tends to spend
+turns rather than batch them, so this bound -- not the turn count -- is
+what usually decides how much a child may read.  It is the only budget the
+child itself is told about, because it is the only one it can count.
+
+Set high enough that reaching it means the child was thrashing rather than
+working: reading a dozen files costs a dozen calls."
   :type 'integer
   :group 'gptel-yatools-agents)
 
@@ -316,6 +327,26 @@ jit-lock and gptel's own change functions keep working.  This flag is what
 tells the module's edit detector that a change was ours rather than the
 user taking the child over.")
 
+(defvar-local gptel-yatools-subagent--settling nil
+  "Non-nil from the moment a child settles until the next user command.
+
+gptel does not finish a reply when it hands the text over: its DONE
+handler then inserts a response separator and a fresh prompt prefix at the
+tracking marker.  That is a change in the child's buffer arriving after
+the child has settled, so the edit detector read it as the user taking
+the buffer over -- every child detached itself the moment it answered,
+left the parent's list, and offered a rename nobody asked for.
+
+A change that happens while no user command is running is not a user
+edit.  This flag is set when the child settles and cleared by
+`pre-command-hook', before the next command can insert anything, so the
+first real edit is still seen.")
+
+(defun gptel-yatools-subagent--note-command ()
+  "Clear the settling flag: from here on, a change is the user's."
+  (setq gptel-yatools-subagent--settling nil)
+  (remove-hook 'pre-command-hook #'gptel-yatools-subagent--note-command t))
+
 (defun gptel-yatools-subagent--insert (buffer string)
   "Insert STRING at the end of BUFFER without the user's edit hook firing.
 
@@ -425,11 +456,14 @@ flag is what tells the edit detector that a change was ours.")
 (defun gptel-yatools-subagent--buffer-changed (record beg end _before)
   "Detach RECORD's child if the user has just edited its buffer.
 
-Our own inserts bind `gptel-yatools-subagent--inserting', so anything that
-reaches here is the user's.  A child still running has a read-only buffer,
-so this only fires once it has settled -- which is also the only time the
-question makes sense."
+Two things make a change not the user's.  Our own inserts bind
+`gptel-yatools-subagent--inserting'; gptel's finishing touches -- the
+separator and prompt prefix it inserts after the reply -- arrive while
+`gptel-yatools-subagent--settling' is still set, because no user command
+has run since the child settled.  A child still running has a read-only
+buffer, so nothing else reaches here."
   (when (and (not gptel-yatools-subagent--inserting)
+             (not gptel-yatools-subagent--settling)
              (/= beg end)
              (not (gptel-yatools-subagent--record-detached record))
              (not (gptel-yatools-subagent--running-p record)))
@@ -596,6 +630,12 @@ boundary, which may not have attached its conclusion yet."
         (with-current-buffer buffer
           (read-only-mode -1)
           (setf (gptel-yatools-subagent--record-read-only record) nil)
+          ;; gptel has not finished with this buffer: its DONE handler
+          ;; inserts the separator and a prompt prefix next.  See
+          ;; `gptel-yatools-subagent--settling'.
+          (setq gptel-yatools-subagent--settling t)
+          (add-hook 'pre-command-hook
+                    #'gptel-yatools-subagent--note-command nil t)
           ;; Nothing is running any more, so `C-c C-k' has nothing to reach.
           (setq-local gptel-yatools--cancel-function nil))))
     (when-let* ((job (gptel-yatools-subagent--record-job record)))

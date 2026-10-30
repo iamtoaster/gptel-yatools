@@ -1822,37 +1822,64 @@ and it writes a line per step."
         (append-to-file (point-min) (point-max)
                         gptel-yatools-tool-trace-file)))))
 
+(defvar gptel-yatools--pending-quit nil
+  "Non-nil when a `C-g' arrived during a tool call and is owed to its caller.
+
+The call runs to completion -- it cannot do its work in halves -- but the
+quit is not the call's to swallow.  It is recorded here and re-signalled by
+the outermost layer once the answer has been delivered, so it reaches
+whatever the user actually meant to interrupt: a minibuffer, another
+command, anything above the tool call on the stack.")
+
 (defcustom gptel-yatools-ignore-quit t
-  "Whether a running tool call ignores `C-g'.
+  "Whether a running tool call lets a `C-g' pass through it.
 
 A tool call can be running when `C-g' is pressed for something else --
 closing the minibuffer, dismissing a prompt, cancelling an unrelated
-command.  The quit signal travels to whatever is on the stack, so a long
-remote read would be abandoned mid-way and its chat would report an error
-the user never asked for: \"DeepSeek error: (HTTP/2 200) Quit\".
+command.  The quit signal travels to whatever is on the stack, so the call
+was abandoned mid-way and its chat reported an error the user never asked
+for: \"DeepSeek error: (HTTP/2 200) Quit\".
 
-With this on, the body of a tool call runs with `inhibit-quit' set, so a
-`C-g' arriving during it is deferred and then dropped instead of
-abandoning the work.  A quit that was already pending when the call
-started is left alone, so a deliberate `C-g' still stops everything else.
+With this on, the call behaves as though it were not there: its body runs
+to completion, and the `C-g' is then re-signalled one layer out, so the
+minibuffer still closes and the command the user stopped still stops.  The
+call is not cancelled, and the keypress is not swallowed.
+
+A quit that was already pending when the call started is left alone, so a
+deliberate `C-g' outside a call is untouched.
 
 This does not make a call unkillable: the deadline in
-`gptel-yatools-timeout' is enforced by a timer that throws, which
-`inhibit-quit' does not affect."
+`gptel-yatools-timeout' is enforced by a timer that throws, which is
+unaffected."
   :type 'boolean
   :group 'gptel-yatools)
 
+(defun gptel-yatools--replay-pending-quit ()
+  "Re-signal a `C-g' that arrived during a tool call, if there was one.
+
+Called at the outermost boundary of a call, after its result has been
+delivered: by then the work is done and the quit belongs to whoever was
+waiting above.  The flag is cleared first, so the signal propagates once
+rather than being raised again at every later safe point."
+  (when gptel-yatools--pending-quit
+    (setq gptel-yatools--pending-quit nil
+          quit-flag nil)
+    (signal 'quit nil)))
+
 (defmacro gptel-yatools--without-quit (&rest body)
-  "Run BODY so that a `C-g' arriving during it does not abandon it.
+  "Run BODY to completion, and owe any `C-g' that arrives during it.
 
-Measured in this Emacs: with `inhibit-quit' bound, a `C-g' is deferred, and
-the deferred quit is signalled when the binding is unwound -- *after* BODY
-has finished, even when it finished normally.  Clearing `quit-flag' is
-therefore not enough; the signal has to be caught, and the value kept.
+Measured in this Emacs: with `inhibit-quit' bound, a `C-g' is deferred
+rather than signalled, and it is raised at the next safe point after the
+binding ends.  That is the shape wanted here -- the body finishes and the
+quit is not lost -- but that safe point falls inside this package's own
+caller, where a quit would abort the delivery of the result and strand the
+request.  So the deferred quit is taken here, and re-signalled only by
+`gptel-yatools--replay-pending-quit' at the boundary that has finished
+delivering.
 
-A quit that was already pending before BODY is left to propagate, so a
-deliberate `C-g' still stops everything else.  `throw' is unaffected, so a
-deadline timer can still end the call."
+A quit already pending before BODY propagates as usual.  `throw' is
+unaffected, so a deadline timer can still end the call."
   (declare (indent 0) (debug t))
   `(let ((already-pending quit-flag)
          (value nil)
@@ -1861,24 +1888,19 @@ deadline timer can still end the call."
          (let ((inhibit-quit t))
            (setq value (progn ,@body))
            (setq completed t)
-           ;; A deferred quit is signalled at the next safe point after
-           ;; the inhibition ends, so clear it while it is still ours to
-           ;; clear.
-           (unless already-pending (setq quit-flag nil)))
-       ;; If it did surface anyway, the flag has to be cleared too:
-       ;; catching the signal does not clear it, and the next safe point
-       ;; raises it again -- which is how a swallowed `C-g' came back one
-       ;; command later.
-       (quit (unless already-pending (setq quit-flag nil))))
+           ;; Taken inside the inhibition: outside it, the very next safe
+           ;; point would raise it in the caller, before the result has
+           ;; been handed over.
+           (when quit-flag
+             (setq quit-flag nil
+                   gptel-yatools--pending-quit t)))
+       (quit nil))
      (cond
-      ;; Somebody else's quit, still pending: not ours to swallow.
+      ;; Somebody else's quit, still pending: not ours to hold.
       (already-pending (signal 'quit nil))
       ;; The body was cut short despite the inhibition.
       ((not completed) (signal 'quit nil))
-      (t
-       (when quit-flag
-         (gptel-yatools--trace "swallowed a C-g during a tool call"))
-       value))))
+      (t value))))
 
 (defun gptel-yatools--call-with-timeout (function args &optional timeout name)
   "Call FUNCTION with positional ARGS, aborting after TIMEOUT seconds.

@@ -335,13 +335,17 @@ is exactly the case where nothing else would ever reconsider it."
                 (apply function fsm args)))
             (gptel-yatools--trace "ran: %s" buffer)))
         (quit
-         ;; A `C-g' that reached here was not aimed at this call: the tool
-         ;; body runs with quits inhibited, so this is a pending quit from
-         ;; something else -- the minibuffer, another command.  Leave the
-         ;; call queued and let the next tick try again rather than
-         ;; failing a request the user never asked to stop.
-         (gptel-yatools--trace "quit while deciding; still queued"))
-        (error (gptel-yatools--fail-request fsm err))))))
+         ;; A `C-g' that arrived while deciding.  It belongs to whatever the
+         ;; user was actually looking at, so it is passed on rather than
+         ;; swallowed; the call stays queued and the next tick picks it up.
+         (setq quit-flag nil)
+         (gptel-yatools--trace "quit while deciding; passing it on")
+         (signal 'quit nil))
+        (error (gptel-yatools--fail-request fsm err)))
+      ;; The call has run and its results are with gptel: a `C-g' that
+      ;; arrived during it is owed to the caller, and travels out of the
+      ;; timer from here -- up to the minibuffer it was aimed at.
+      (gptel-yatools--replay-pending-quit))))
 
 (defun gptel-yatools--ensure-drain-timer ()
   "Start the queue's timer, if it is not already running.
@@ -430,14 +434,14 @@ chat says what happened."
                           (gptel-fsm-state fsm))
     (if (not (gptel-yatools--remote-buffer-p buffer))
         (condition-case err
-            (apply function fsm args)
+            (prog1 (apply function fsm args)
+              (gptel-yatools--replay-pending-quit))
           (quit
            ;; Not aimed at this call: the body runs with quits inhibited,
-           ;; so this is somebody else's pending quit.  Defer the call
-           ;; rather than failing a request the user did not stop.
-           (gptel-yatools--trace "quit in local call; deferring")
-           (gptel-yatools--run-tool-call-later function fsm args
-                                              gptel-yatools-remote-tool-tries))
+           ;; so this is somebody else's pending quit.  Pass it on.
+           (setq quit-flag nil)
+           (gptel-yatools--trace "quit in local call; passing it on")
+           (signal 'quit nil))
           (error (gptel-yatools--fail-request fsm err)))
       (gptel-yatools--trace "defer: buffer=%S" buffer)
       (condition-case err

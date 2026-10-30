@@ -1184,40 +1184,60 @@ failed before the queue and the load-time drain timer existed.
               (accept-process-output nil 0.02)))
           (should ran))))))
 
-(ert-deftest gptel-yatools-test-a-tool-call-ignores-c-g ()
-  "A `C-g' pressed for something else must not abandon a tool call.
+(ert-deftest gptel-yatools-test-a-tool-call-lets-c-g-pass-through ()
+  "A `C-g' passes through a running tool call as if it were not there.
 
 Tool calls run synchronously on whatever is on the stack, so a `C-g' meant
-to close the minibuffer or dismiss a prompt lands inside them.  The tool
-was abandoned mid-way and its chat reported an error nobody asked for --
-\"DeepSeek error: (HTTP/2 200) Quit\" -- and the model saw a failed call
-where the work had actually been progressing.
+to close the minibuffer lands inside them.  Two wrong answers are easy
+here, and both were tried: letting the quit abort the call (an error the
+user never asked for), and swallowing it (the minibuffer never closes, and
+a keypress vanishes -- worse, because you cannot tell whether Emacs heard
+you).
 
-Measured in this Emacs: with `inhibit-quit' bound the quit is deferred and
-raised at the next safe point *after* the binding ends, so the call has to
-both inhibit and clear, and catch the signal if it surfaces anyway."
+The contract is a third thing: the call's work completes, and the quit is
+re-signalled by the outermost boundary once the result has been delivered,
+so it reaches what it was aimed at."
   (let ((gptel-yatools-ignore-quit t)
-        (finished nil)
-        (outcome nil))
-    ;; What a keypress does while the call is running.
-    (run-at-time 0.1 nil (lambda () (setq quit-flag t)))
-    (condition-case nil
-        (setq outcome
-              (gptel-yatools--call-with-timeout
-               (lambda ()
-                 (let ((deadline (+ (float-time) 0.4)))
-                   (while (< (float-time) deadline)
-                     (accept-process-output nil 0.02)))
-                 (setq finished t)
-                 "the answer")
-               nil 10 "probe"))
-      (quit (setq outcome 'aborted)))
-    (should finished)
-    (should (equal outcome "the answer"))
-    ;; And the quit does not surface later either.
-    (let ((deadline (+ (float-time) 0.1)))
-      (while (< (float-time) deadline)
-        (accept-process-output nil 0.02)))
+        (gptel-yatools--pending-quit nil)
+        ;; Fresh queue and guard: other tests in the suite leave both in
+        ;; whatever state their own scenarios ended in.
+        (gptel-yatools--deferred-tool-calls nil)
+        (gptel-yatools--tool-call-running nil)
+        (calls-done 0)
+        (outer-saw-quit nil))
+    (setq quit-flag nil)
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) nil)))
+      (with-temp-buffer
+        (setq-local gptel-mode t)
+        (let ((fsm (gptel-make-fsm :state 'TOOL
+                                   :info (list :buffer (current-buffer)))))
+          ;; What a keypress does while the call is running.
+          (run-at-time 0.1 nil (lambda () (setq quit-flag t)))
+          (condition-case nil
+              (progn
+                (gptel-yatools--tool-calls-outside-the-sentinel
+                 (lambda (&rest _)
+                   (dotimes (_ 3)
+                     (let ((deadline (+ (float-time) 0.1)))
+                       (while (< (float-time) deadline)
+                         (accept-process-output nil 0.02)))
+                     (setq calls-done (1+ calls-done))))
+                 fsm)
+                ;; Wait for the whole block, recording the quit if it
+                ;; arrives here rather than leaving the loop: the quit can
+                ;; come before the deferred call has run.
+                (let ((deadline (+ (float-time) 5)))
+                  (while (and (< calls-done 3) (< (float-time) deadline))
+                    (condition-case _q (accept-process-output nil 0.02)
+                      (quit (setq outer-saw-quit t))))))
+            (quit (setq outer-saw-quit t))))))
+    ;; The work was not abandoned...
+    (should (= calls-done 3))
+    ;; ...and the keypress still reached the caller.
+    (should outer-saw-quit)
     (should-not quit-flag)))
 
 (ert-deftest gptel-yatools-test-c-g-stops-work-when-asked-to ()

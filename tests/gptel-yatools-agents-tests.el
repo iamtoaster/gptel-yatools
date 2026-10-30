@@ -717,6 +717,67 @@ and says what happened."
                               (gptel-yatools-subagent--record-error record)))
       (should outcome))))
 
+(ert-deftest gptel-yatools-test-subagent-says-when-its-answer-was-cut-off ()
+  "A child whose reply hit its output limit must not read as finished.
+
+gptel records `:stop-reason' and never reads it, so a truncated reply is
+drawn exactly like a complete one.  For a parent model that is the worst
+case: it receives the answer as `:derived' and cannot tell a finding from
+half a sentence, so it acts on a report that looks whole."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (job (gptel-yatools-subagent--record-job record))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (gptel-yatools-agent-test--deliver
+       "The parser looks fine, but the tokenizer"
+       (list :buffer (gptel-yatools-subagent--record-buffer record)
+             :position (with-current-buffer
+                           (gptel-yatools-subagent--record-buffer record)
+                         (set-marker (make-marker) (point-max)))
+             :tools (gptel-yatools-subagent--tool-specs)
+             :stop-reason "length"
+             :status "200 OK"))
+      (should (eq (gptel-yatools-subagent--record-state record) 'done))
+      (should (gptel-yatools-subagent--truncated-p record))
+      (should (plist-get outcome :truncated))
+      (let ((body (gptel-yatools-result-body
+                   (gptel-yatools-subagent--result record outcome))))
+        (should (string-match-p "INCOMPLETE" body))
+        (should (string-match-p "length" body))
+        (should (string-match-p "tokenizer" body))))))
+
+(ert-deftest gptel-yatools-test-subagent-quiet-when-its-answer-finished ()
+  "A finished answer must not be marked incomplete.
+
+Every backend reports a normal stop differently -- `stop', `end_turn',
+`completed' -- so the check is a list of the failures, not of the
+successes: a new success value must not produce a false alarm."
+  (gptel-yatools-agent-test--with-parent
+    (dolist (reason '("stop" "end_turn" "completed" nil))
+      (let ((gptel-yatools-subagent--records nil))
+        (gptel-yatools-agent-test--start)
+        (let* ((record (car gptel-yatools-subagent--records))
+               (job (gptel-yatools-subagent--record-job record))
+               (outcome nil))
+          (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+          (gptel-yatools-agent-test--deliver
+           "All good."
+           (list :buffer (gptel-yatools-subagent--record-buffer record)
+                 :position (with-current-buffer
+                               (gptel-yatools-subagent--record-buffer record)
+                             (set-marker (make-marker) (point-max)))
+                 :tools (gptel-yatools-subagent--tool-specs)
+                 :stop-reason reason
+                 :status "200 OK"))
+          ;; The child's buffer stays live: the suite's kill hook aborts
+          ;; it, which is the behaviour tested elsewhere.
+          (let ((body (gptel-yatools-result-body
+                       (gptel-yatools-subagent--result record outcome))))
+            (should-not (gptel-yatools-subagent--truncated-p record))
+            (should-not (string-match-p "INCOMPLETE" body))))))))
+
 (ert-deftest gptel-yatools-test-subagent-label-counts-only-running ()
   "The label counts children that are still working, and says so when none are.
 

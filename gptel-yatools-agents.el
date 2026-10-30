@@ -185,11 +185,15 @@ ERROR      the sentence explaining a failure, when it failed.
 FSM        the child's request state machine.
 INFO       the plist gptel hands the callback, reused so that successive
            replies are inserted as one conversation.
+STOP-REASON why the provider says the child's reply ended -- `length' when
+           it hit its output limit, and so on.  Recorded because gptel
+           does not read it, and an answer cut off mid-sentence must not
+           look like a finished one.
 JOB        the job the parent's tool call is waiting on.
 READ-ONLY  non-nil while the child is running: its buffer is read-only.
 DETACHED   non-nil once the user has taken the child over."
   id parent buffer task state started finished turns calls paths
-  answer error fsm info job read-only detached last-text)
+  answer error fsm info job read-only detached last-text stop-reason)
 
 (defvar gptel-yatools-subagent--records nil
   "Every live child agent, newest first.
@@ -479,6 +483,45 @@ either way, which is what stops it dying with its parent."
           (error (message "Could not rename to %s" name)))))))
 
 ;;-------------------------------------------------------------------------
+;; A reply that was cut off
+;;
+;; Every backend records why it stopped in the request's `:stop-reason' --
+;; `finish_reason' for the OpenAI chat API, `stop_reason' for Anthropic,
+;; `status' for the Responses API -- and gptel never reads it.  So a reply
+;; that hit its output limit is drawn exactly like a finished one, and the
+;; status goes back to Ready.
+;;
+;; Inside a subagent that is worse than an annoyance: the parent model gets
+;; the answer as `:derived' and has no way to tell "here is the finding"
+;; from "here is half a sentence".  So the reason is carried into the
+;; report.  A truncated answer is still an answer, and is still `done';
+;; what changes is that it says so.
+;;-------------------------------------------------------------------------
+(defconst gptel-yatools-subagent--truncation-reasons
+  '("length" "max_tokens" "max_output_tokens" "max_tokens_reached"
+    "incomplete" "incomplete_max_output_tokens"
+    "max_output_tokens_exceeded")
+  "Stop reasons, lower-cased, that mean the reply was cut short.
+
+These are the values that are not a finish.  They are compared
+case-insensitively because the OpenAI Responses API reports
+`incomplete_max_output_tokens' while the chat API reports `length', and a
+backend is free to capitalise either.")
+
+(defun gptel-yatools-subagent--truncated-p (record)
+  "Return non-nil when RECORD's answer was cut off rather than finished."
+  (let ((reason (gptel-yatools-subagent--record-stop-reason record)))
+    (and (stringp reason)
+         (member (downcase reason) gptel-yatools-subagent--truncation-reasons)
+         t)))
+
+(defun gptel-yatools-subagent--truncation-note (record)
+  "Return a sentence saying RECORD's answer is incomplete, or nil."
+  (when (gptel-yatools-subagent--truncated-p record)
+    (format "NOTE: this answer is INCOMPLETE. The subagent's reply was cut off by its own output limit (%s), so it stops mid-thought. Treat anything after the last complete sentence as missing, and ask a narrower question if you need the rest.\n\n"
+            (gptel-yatools-subagent--record-stop-reason record))))
+
+;;-------------------------------------------------------------------------
 ;; Running
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-subagent--path-recorded-p (path)
@@ -661,6 +704,8 @@ truth and is recoverable."
        ;; gptel is about to run tools for this turn, so this text is a
        ;; preamble, not the answer: the child carries on.
        (unless (plist-get info :tool-use)
+         (setf (gptel-yatools-subagent--record-stop-reason record)
+               (plist-get info :stop-reason))
          (gptel-yatools-subagent--settle record 'done response))))
     ('nil
      (unless (gptel-yatools-subagent--record-finished record)
@@ -763,6 +808,8 @@ quoted rather than replaced."
           :turns (gptel-yatools-subagent--record-turns record)
           :calls (gptel-yatools-subagent--record-calls record)
           :paths (gptel-yatools-subagent--record-paths record)
+          :stop-reason (gptel-yatools-subagent--record-stop-reason record)
+          :truncated (and (gptel-yatools-subagent--truncated-p record) t)
           :elapsed (and (gptel-yatools-subagent--record-finished record)
                         (- (gptel-yatools-subagent--record-finished record)
                            (gptel-yatools-subagent--record-started record))))))
@@ -812,6 +859,7 @@ sentinel.  See `gptel-yatools-subagent--path-recorded-p'."
                             paths ", "))
        "Files read: none\n")
      "\n"
+     (or (gptel-yatools-subagent--truncation-note record) "")
      (or (plist-get outcome :output) ""))))
 
 ;;-------------------------------------------------------------------------

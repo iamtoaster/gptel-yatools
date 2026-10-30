@@ -457,7 +457,10 @@ The parent's tool result says more than the answer: the state, how long it
 took, how many turns and tool calls, and **the files the child read**.  That
 last list is what turns "no problems found" into something you can judge,
 and the reply is marked `:derived` — another model's conclusion, not a
-description of disk.
+description of disk.  If the child's reply was cut off by its own output
+limit, the result says so at the top and calls itself incomplete: gptel
+records `:stop-reason` and never reads it, so without that a half-sentence
+would arrive looking like a finding.
 
 While children run, the chatbot's header line shows how many and clicking
 the label — or <kbd>C-c C-s</kbd> (`M-x gptel-yatools-subagents`) — lists

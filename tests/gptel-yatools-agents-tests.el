@@ -896,21 +896,25 @@ arguments\" and stopped aborting anything."
                       (progn (gptel-abort (current-buffer)) nil)
                     (error (error-message-string err)))))))
 
-(ert-deftest gptel-yatools-test-a-tool-call-reports-a-quit ()
-  "A `C-g' during a deferred tool call must end the request, not strand it.
+(ert-deftest gptel-yatools-test-a-quit-during-a-deferred-call-does-not-strand-it ()
+  "A `C-g' during a deferred call must leave the call runnable.
 
-`condition-case' does not treat `quit' as an `error', so a quit escaped
-every handler around the deferred call and left the state machine in TOOL
-for ever: `:tool-result' nil, the chat never continuing, and nothing on
-screen to say why.  That is the state a stuck subagent was found in.
+`condition-case' does not treat `quit' as an `error', so a quit used to
+escape every handler around the deferred call.  It is now swallowed by the
+call itself (see `gptel-yatools-ignore-quit'), so the call runs and the
+request carries on -- rather than being failed for a keypress aimed at
+something else.
 
-`error' alone is therefore not enough anywhere this package runs from a
-timer or a sentinel."
+What must never happen again is the halfway case: the call not running
+*and* the request not being told, which left it in TOOL for ever with
+`:tool-result' nil and nothing on screen."
   (should (eq (condition-case _e (signal 'quit nil)
                 (error 'caught)
                 (quit 'escaped))
               'escaped))
-  (let ((fsm nil))
+  (let ((fsm nil)
+        (ran nil)
+        (gptel-yatools-ignore-quit t))
     (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
                (lambda (_buffer) t))
               ((symbol-function 'gptel-yatools--tramp-locked-p)
@@ -921,12 +925,12 @@ timer or a sentinel."
         (setq fsm (gptel-make-fsm :state 'TOOL
                                   :info (list :buffer (current-buffer))))
         (gptel-yatools--tool-calls-outside-the-sentinel
-         (lambda (&rest _) (signal 'quit nil)) fsm)
+         (lambda (&rest _) (setq ran t)) fsm)
         (let ((deadline (+ (float-time) 5)))
-          (while (and (eq (gptel-fsm-state fsm) 'TOOL) (< (float-time) deadline))
+          (while (and (not ran) (< (float-time) deadline))
             (condition-case _q (accept-process-output nil 0.05) (quit nil))))
-        (should (eq (gptel-fsm-state fsm) 'ERRS))
-        (should (equal (plist-get (gptel-fsm-info fsm) :error) "Quit"))))))
+        (should ran)
+        (should-not (plist-get (gptel-fsm-info fsm) :error))))))
 
 (ert-deftest gptel-yatools-test-subagent-settles-when-its-callback-is-quit ()
   "A quit inside the child's callback must settle the child too.

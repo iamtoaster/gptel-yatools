@@ -1792,6 +1792,94 @@ the call has stopped being current."
              (gptel-yatools--detect-workspace-root))
      :deadline (or timeout (gptel-yatools--resolve-timeout nil)))))
 
+(defcustom gptel-yatools-tool-trace nil
+  "Whether to record what happens to each deferred tool call.
+
+When non-nil every step is appended to `gptel-yatools-tool-trace-file':
+the call arriving, whether it ran inline or was deferred, each timer
+firing with the state it found, and every reason a call was dropped.
+
+It exists because a request that stops in TOOL leaves nothing behind --
+no error, no timer, no result -- so the only way to find out where the
+chain broke is to record the chain.  Leave it off: it is a diagnostic,
+and it writes a line per step."
+  :type 'boolean
+  :group 'gptel-yatools)
+
+(defcustom gptel-yatools-tool-trace-file "/tmp/gptel-yatools-trace.log"
+  "Where `gptel-yatools-tool-trace' writes."
+  :type 'file
+  :group 'gptel-yatools)
+
+(defun gptel-yatools--trace (format-string &rest arguments)
+  "Append FORMAT-STRING and ARGUMENTS to the trace file, if tracing is on."
+  (when gptel-yatools-tool-trace
+    (ignore-errors
+      (with-temp-buffer
+        (insert (format-time-string "%H:%M:%S.%3N ")
+                (apply #'format format-string arguments)
+                "\n")
+        (append-to-file (point-min) (point-max)
+                        gptel-yatools-tool-trace-file)))))
+
+(defcustom gptel-yatools-ignore-quit t
+  "Whether a running tool call ignores `C-g'.
+
+A tool call can be running when `C-g' is pressed for something else --
+closing the minibuffer, dismissing a prompt, cancelling an unrelated
+command.  The quit signal travels to whatever is on the stack, so a long
+remote read would be abandoned mid-way and its chat would report an error
+the user never asked for: \"DeepSeek error: (HTTP/2 200) Quit\".
+
+With this on, the body of a tool call runs with `inhibit-quit' set, so a
+`C-g' arriving during it is deferred and then dropped instead of
+abandoning the work.  A quit that was already pending when the call
+started is left alone, so a deliberate `C-g' still stops everything else.
+
+This does not make a call unkillable: the deadline in
+`gptel-yatools-timeout' is enforced by a timer that throws, which
+`inhibit-quit' does not affect."
+  :type 'boolean
+  :group 'gptel-yatools)
+
+(defmacro gptel-yatools--without-quit (&rest body)
+  "Run BODY so that a `C-g' arriving during it does not abandon it.
+
+Measured in this Emacs: with `inhibit-quit' bound, a `C-g' is deferred, and
+the deferred quit is signalled when the binding is unwound -- *after* BODY
+has finished, even when it finished normally.  Clearing `quit-flag' is
+therefore not enough; the signal has to be caught, and the value kept.
+
+A quit that was already pending before BODY is left to propagate, so a
+deliberate `C-g' still stops everything else.  `throw' is unaffected, so a
+deadline timer can still end the call."
+  (declare (indent 0) (debug t))
+  `(let ((already-pending quit-flag)
+         (value nil)
+         (completed nil))
+     (condition-case nil
+         (let ((inhibit-quit t))
+           (setq value (progn ,@body))
+           (setq completed t)
+           ;; A deferred quit is signalled at the next safe point after
+           ;; the inhibition ends, so clear it while it is still ours to
+           ;; clear.
+           (unless already-pending (setq quit-flag nil)))
+       ;; If it did surface anyway, the flag has to be cleared too:
+       ;; catching the signal does not clear it, and the next safe point
+       ;; raises it again -- which is how a swallowed `C-g' came back one
+       ;; command later.
+       (quit (unless already-pending (setq quit-flag nil))))
+     (cond
+      ;; Somebody else's quit, still pending: not ours to swallow.
+      (already-pending (signal 'quit nil))
+      ;; The body was cut short despite the inhibition.
+      ((not completed) (signal 'quit nil))
+      (t
+       (when quit-flag
+         (gptel-yatools--trace "swallowed a C-g during a tool call"))
+       value))))
+
 (defun gptel-yatools--call-with-timeout (function args &optional timeout name)
   "Call FUNCTION with positional ARGS, aborting after TIMEOUT seconds.
 
@@ -1840,7 +1928,11 @@ condition the boundary renders."
         ;; FUNCTION runs, so that everything inside it -- including a
         ;; helper asking for the deadline -- sees the same call.
         (let* ((gptel-yatools--call call)
-               (value (catch tag (apply function args))))
+               (value (catch tag
+                        (if gptel-yatools-ignore-quit
+                            (gptel-yatools--without-quit
+                              (apply function args))
+                          (apply function args)))))
           (if (eq value expired)
               (signal 'gptel-yatools-timeout-error
                       (list :seconds timeout :tool name))
@@ -1976,7 +2068,10 @@ every time it runs."
          (call (gptel-yatools--new-call timeout))
          (owner (current-buffer))
          (gptel-yatools--call call)
-         (value (apply function checked)))
+         (value (if gptel-yatools-ignore-quit
+                    (gptel-yatools--without-quit
+                      (apply function checked))
+                  (apply function checked))))
     (if (gptel-yatools-job-p value)
         (progn
           (gptel-yatools--job-conclude-with

@@ -1184,6 +1184,82 @@ failed before the queue and the load-time drain timer existed.
               (accept-process-output nil 0.02)))
           (should ran))))))
 
+(ert-deftest gptel-yatools-test-a-tool-call-ignores-c-g ()
+  "A `C-g' pressed for something else must not abandon a tool call.
+
+Tool calls run synchronously on whatever is on the stack, so a `C-g' meant
+to close the minibuffer or dismiss a prompt lands inside them.  The tool
+was abandoned mid-way and its chat reported an error nobody asked for --
+\"DeepSeek error: (HTTP/2 200) Quit\" -- and the model saw a failed call
+where the work had actually been progressing.
+
+Measured in this Emacs: with `inhibit-quit' bound the quit is deferred and
+raised at the next safe point *after* the binding ends, so the call has to
+both inhibit and clear, and catch the signal if it surfaces anyway."
+  (let ((gptel-yatools-ignore-quit t)
+        (finished nil)
+        (outcome nil))
+    ;; What a keypress does while the call is running.
+    (run-at-time 0.1 nil (lambda () (setq quit-flag t)))
+    (condition-case nil
+        (setq outcome
+              (gptel-yatools--call-with-timeout
+               (lambda ()
+                 (let ((deadline (+ (float-time) 0.4)))
+                   (while (< (float-time) deadline)
+                     (accept-process-output nil 0.02)))
+                 (setq finished t)
+                 "the answer")
+               nil 10 "probe"))
+      (quit (setq outcome 'aborted)))
+    (should finished)
+    (should (equal outcome "the answer"))
+    ;; And the quit does not surface later either.
+    (let ((deadline (+ (float-time) 0.1)))
+      (while (< (float-time) deadline)
+        (accept-process-output nil 0.02)))
+    (should-not quit-flag)))
+
+(ert-deftest gptel-yatools-test-c-g-stops-work-when-asked-to ()
+  "Turning the tolerance off must restore ordinary `C-g' behaviour."
+  (let ((gptel-yatools-ignore-quit nil)
+        (finished nil)
+        (outcome nil))
+    (run-at-time 0.1 nil (lambda () (setq quit-flag t)))
+    (condition-case nil
+        (setq outcome
+              (gptel-yatools--call-with-timeout
+               (lambda ()
+                 (let ((deadline (+ (float-time) 0.4)))
+                   (while (< (float-time) deadline)
+                     (accept-process-output nil 0.02)))
+                 (setq finished t)
+                 "the answer")
+               nil 10 "probe"))
+      (quit (setq outcome 'aborted)))
+    (should-not finished)
+    (should (eq outcome 'aborted))
+    (setq quit-flag nil)))
+
+(ert-deftest gptel-yatools-test-a-pending-c-g-is-not-swallowed ()
+  "A quit that was already pending belongs to the user, not to the tool.
+
+Swallowing it would make `C-g' unreliable: pressed before a call started,
+it must still stop things, and only a quit arriving *during* the call is
+treated as somebody else's."
+  (let ((gptel-yatools-ignore-quit t)
+        (finished nil)
+        (outcome nil))
+    (setq quit-flag t)                  ; already pending on entry
+    (condition-case nil
+        (setq outcome
+              (gptel-yatools--call-with-timeout
+               (lambda () (setq finished t) "the answer")
+               nil 10 "probe"))
+      (quit (setq outcome 'aborted)))
+    (should (eq outcome 'aborted))
+    (setq quit-flag nil)))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

@@ -283,6 +283,16 @@ rm -f *.elc
   TOOL for ever — no result, no error, a chat that could never continue.
   Anywhere this package runs from a timer or a sentinel, `quit` is caught
   and reported as an outcome.
+- **A tool call does not react to `C-g`.**  Tool calls run synchronously on
+  whatever is on the stack, so a `C-g` meant to close the minibuffer lands
+  inside them; the call was abandoned and its chat reported a failure
+  nobody asked for.  Both tool boundaries run the body under
+  `gptel-yatools--without-quit`, which inhibits the quit and clears the
+  flag — and that is not one line of `let`: measured, `inhibit-quit`
+  defers the quit to the next safe point *after* the binding ends, and
+  catching the signal does not clear the flag, so it has to be inhibited,
+  cleared and caught.  A quit already pending before the call still
+  propagates; the deadline timer still throws.
 - **A child agent is a reader.**  `gptel-yatools-subagent-tools` lists only
   read-only tools, and that is what every other decision in the agent module
   rests on: nothing it does can be lost, so there is no VFS policy, no merge

@@ -246,36 +246,6 @@ as an error instead."
   :type 'number
   :group 'gptel-yatools)
 
-(defcustom gptel-yatools-tool-trace nil
-  "Whether to record what happens to each deferred tool call.
-
-When non-nil every step is appended to `gptel-yatools-tool-trace-file':
-the call arriving, whether it ran inline or was deferred, each timer
-firing with the state it found, and every reason a call was dropped.
-
-It exists because a request that stops in TOOL leaves nothing behind --
-no error, no timer, no result -- so the only way to find out where the
-chain broke is to record the chain.  Leave it off: it is a diagnostic,
-and it writes a line per step."
-  :type 'boolean
-  :group 'gptel-yatools)
-
-(defcustom gptel-yatools-tool-trace-file "/tmp/gptel-yatools-trace.log"
-  "Where `gptel-yatools-tool-trace' writes."
-  :type 'file
-  :group 'gptel-yatools)
-
-(defun gptel-yatools--trace (format-string &rest arguments)
-  "Append FORMAT-STRING and ARGUMENTS to the trace file, if tracing is on."
-  (when gptel-yatools-tool-trace
-    (ignore-errors
-      (with-temp-buffer
-        (insert (format-time-string "%H:%M:%S.%3N ")
-                (apply #'format format-string arguments)
-                "\n")
-        (append-to-file (point-min) (point-max)
-                        gptel-yatools-tool-trace-file)))))
-
 (defvar gptel-yatools--deferred-tool-calls nil
   "Tool calls waiting their turn at the remote filesystem.
 
@@ -364,7 +334,13 @@ is exactly the case where nothing else would ever reconsider it."
               (let ((gptel-yatools--tool-call-running t))
                 (apply function fsm args)))
             (gptel-yatools--trace "ran: %s" buffer)))
-        (quit (gptel-yatools--fail-request fsm err))
+        (quit
+         ;; A `C-g' that reached here was not aimed at this call: the tool
+         ;; body runs with quits inhibited, so this is a pending quit from
+         ;; something else -- the minibuffer, another command.  Leave the
+         ;; call queued and let the next tick try again rather than
+         ;; failing a request the user never asked to stop.
+         (gptel-yatools--trace "quit while deciding; still queued"))
         (error (gptel-yatools--fail-request fsm err))))))
 
 (defun gptel-yatools--ensure-drain-timer ()
@@ -455,13 +431,19 @@ chat says what happened."
     (if (not (gptel-yatools--remote-buffer-p buffer))
         (condition-case err
             (apply function fsm args)
-          (quit (gptel-yatools--fail-request fsm err))
+          (quit
+           ;; Not aimed at this call: the body runs with quits inhibited,
+           ;; so this is somebody else's pending quit.  Defer the call
+           ;; rather than failing a request the user did not stop.
+           (gptel-yatools--trace "quit in local call; deferring")
+           (gptel-yatools--run-tool-call-later function fsm args
+                                              gptel-yatools-remote-tool-tries))
           (error (gptel-yatools--fail-request fsm err)))
       (gptel-yatools--trace "defer: buffer=%S" buffer)
       (condition-case err
           (gptel-yatools--run-tool-call-later function fsm args
                                              gptel-yatools-remote-tool-tries)
-        (quit (gptel-yatools--fail-request fsm err))
+        (quit (gptel-yatools--trace "quit while queueing; retrying next tick"))
         (error (gptel-yatools--fail-request fsm err))))))
 
 (unless (advice-member-p #'gptel-yatools--tool-calls-outside-the-sentinel

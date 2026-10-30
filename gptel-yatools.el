@@ -279,36 +279,43 @@ reported as `Quit' so the request ends somewhere the user can see."
     (run-at-time
      gptel-yatools-remote-tool-delay nil
      (lambda ()
-       (when (and (buffer-live-p buffer)
-                  (eq (gptel-fsm-state fsm) 'TOOL))
-         (cond
-          ;; Another of this package's calls is on the stack.  Wait for it
-          ;; without spending a try: it is bounded by that call finishing,
-          ;; and running now would re-enter the connection the flag exists
-          ;; to protect.
-          (gptel-yatools--tool-call-running
-           (if (> (float-time) deadline)
-               (gptel-yatools--fail-request
-                fsm
-                (list 'error (format "waited %gs for another tool call to finish"
-                                     gptel-yatools-remote-tool-wait-limit)))
-             (gptel-yatools--run-tool-call-later
-              function fsm args tries deadline)))
-          ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
-           (if (> (float-time) deadline)
-               (gptel-yatools--fail-request
-                fsm
-                (list 'error (format "waited %gs for the connection to be free"
-                                     gptel-yatools-remote-tool-wait-limit)))
-             (gptel-yatools--run-tool-call-later
-              function fsm args (1- tries) deadline)))
-          (t
-           (with-current-buffer buffer
-             (let ((gptel-yatools--tool-call-running t))
-               (condition-case err
-                   (apply function fsm args)
-                 (quit (gptel-yatools--fail-request fsm err))
-                 (error (gptel-yatools--fail-request fsm err))))))))))
+       ;; The whole body is guarded, not just the tool call.  Deciding
+       ;; whether to wait -- asking TRAMP for a connection property,
+       ;; asking the state machine for its state -- can signal too, and a
+       ;; signal from a timer is only logged: the call would neither run
+       ;; nor be re-armed, leaving the request in TOOL for ever with no
+       ;; result and no error.  That is the shape of a subagent that
+       ;; silently never finishes.
+       (condition-case err
+           (when (and (buffer-live-p buffer)
+                      (eq (gptel-fsm-state fsm) 'TOOL))
+             (cond
+              ;; Another of this package's calls is on the stack.  Wait for
+              ;; it without spending a try: it is bounded by that call
+              ;; finishing, and running now would re-enter the connection
+              ;; the flag exists to protect.
+              (gptel-yatools--tool-call-running
+               (if (> (float-time) deadline)
+                   (gptel-yatools--fail-request
+                    fsm
+                    (list 'error (format "waited %gs for another tool call to finish"
+                                         gptel-yatools-remote-tool-wait-limit)))
+                 (gptel-yatools--run-tool-call-later
+                  function fsm args tries deadline)))
+              ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
+               (if (> (float-time) deadline)
+                   (gptel-yatools--fail-request
+                    fsm
+                    (list 'error (format "waited %gs for the connection to be free"
+                                         gptel-yatools-remote-tool-wait-limit)))
+                 (gptel-yatools--run-tool-call-later
+                  function fsm args (1- tries) deadline)))
+              (t
+               (with-current-buffer buffer
+                 (let ((gptel-yatools--tool-call-running t))
+                   (apply function fsm args))))))
+         (quit (gptel-yatools--fail-request fsm err))
+         (error (gptel-yatools--fail-request fsm err)))))
     nil))
 
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)

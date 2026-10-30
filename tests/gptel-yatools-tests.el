@@ -1118,6 +1118,34 @@ The limit is what turns that into an error the request can act on."
         (should (string-match-p "waited"
                                 (plist-get (gptel-fsm-info fsm) :error)))))))
 
+(ert-deftest gptel-yatools-test-a-signal-while-deciding-is-reported ()
+  "A signal while deciding whether to run must reach the request.
+
+The whole timer body is guarded, not just the tool call: asking TRAMP for
+a connection property, or asking the state machine for its state, can
+signal too.  A signal from a timer is only logged by Emacs, so the call
+would neither run nor be re-armed -- the request sits in TOOL for ever
+with no result and no error, which is how a subagent goes quietly missing
+while its siblings finish."
+  (let ((fsm nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) (error "Forbidden reentrant call of Tramp")))
+              ((symbol-function 'gptel--fsm-transition)
+               (lambda (machine state) (setf (gptel-fsm-state machine) state))))
+      (with-temp-buffer
+        (setq fsm (gptel-make-fsm :state 'TOOL
+                                  :info (list :buffer (current-buffer))))
+        (gptel-yatools--tool-calls-outside-the-sentinel
+         (lambda (&rest _) nil) fsm)
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (eq (gptel-fsm-state fsm) 'TOOL) (< (float-time) deadline))
+            (accept-process-output nil 0.05)))
+        (should (eq (gptel-fsm-state fsm) 'ERRS))
+        (should (string-match-p "Forbidden reentrant"
+                                (plist-get (gptel-fsm-info fsm) :error)))))))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

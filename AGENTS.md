@@ -245,6 +245,13 @@ rm -f *.elc
   defers such calls until the connection is free — a condition, not a
   sleep, so concurrent subagents take turns.  Any new entry point that
   calls tools directly must go through it.
+- **Nothing that runs on a timer may signal.**  A timer callback's error is
+  logged by Emacs and nothing else: the work it was going to do simply
+  does not happen, and whatever was waiting keeps waiting.  Every
+  timer-driven path here — a job's deadline, a subagent's expiration, a
+  deferred tool call — settles what it owns even when stopping the work
+  itself fails, and reports the failure as the outcome it was, not as
+  silence.
 - **A child agent is a reader.**  `gptel-yatools-subagent-tools` lists only
   read-only tools, and that is what every other decision in the agent module
   rests on: nothing it does can be lost, so there is no VFS policy, no merge

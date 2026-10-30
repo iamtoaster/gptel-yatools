@@ -648,23 +648,18 @@ CAUSE is `by-hand', `buffer-killed' or `parent-cancelled', and it is named
 in the sentence the parent reads, because \"aborted\" alone leaves the
 parent model guessing whether it did something wrong."
   (when (gptel-yatools-subagent--running-p record)
-    (let ((fsm (gptel-yatools-subagent--record-fsm record))
-          (buffer (gptel-yatools-subagent--record-buffer record)))
-      ;; Transition the child's own request first: gptel's abort looks the
-      ;; request up by network process, which has finished by the time a
-      ;; tool call is running, so it cannot find this one.
-      (when (and (buffer-live-p buffer) (gptel-fsm-p fsm))
-        (with-current-buffer buffer
-          (ignore-errors (gptel--fsm-transition fsm 'ABRT))))
-      (gptel-yatools-subagent--settle
-       record 'aborted
-       (format "Error: the subagent was %s before it finished, after %d tool call%s. Its partial output is not an answer."
-               (pcase cause
-                 ('buffer-killed "killed")
-                 ('parent-cancelled "cancelled with its parent request")
-                 (_ "aborted"))
-               (gptel-yatools-subagent--record-calls record)
-               (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))))
+    ;; First, so that gptel's own state machine stops asking the model for
+    ;; more: the abort looks the request up harmlessly if it cannot.
+    (gptel-yatools-subagent--stop-request record)
+    (gptel-yatools-subagent--settle
+     record 'aborted
+     (format "Error: the subagent was %s before it finished, after %d tool call%s. Its partial output is not an answer."
+             (pcase cause
+               ('buffer-killed "killed")
+               ('parent-cancelled "cancelled with its parent request")
+               (_ "aborted"))
+             (gptel-yatools-subagent--record-calls record)
+             (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s")))))
 
 ;;-------------------------------------------------------------------------
 ;; Drawing the transcript
@@ -692,7 +687,14 @@ RESPONSE is one of the shapes gptel's inserter understands: a reply, a
 reasoning block, or a `(tool-result . RESULTS)' turn.  INFO is the request
 plist, whose `:callback' is redirected for the duration -- see the
 commentary above -- and whose `:tracking-marker' is updated in place, so
-the next insertion continues where this one stopped."
+the next insertion continues where this one stopped.
+
+A failure here is swallowed on purpose.  gptel's drawing code can signal
+\(`gptel--display-tool-results' has been seen to raise \"Args out of
+range\" for an ordinary short tool result), and this function runs inside
+the child's callback, where an escaping error would end the run.  Losing a
+rendering of the transcript is a nuisance; losing the child's answer,
+because its display was broken, is not."
   (let ((buffer (gptel-yatools-subagent--record-buffer record)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -700,9 +702,15 @@ the next insertion continues where this one stopped."
               (gptel-yatools-subagent--inserting t)
               (saved (plist-get info :callback)))
           (unwind-protect
-              (progn
-                (plist-put info :callback #'gptel--insert-response)
-                (gptel--insert-response response info))
+              (condition-case err
+                  (progn
+                    (plist-put info :callback #'gptel--insert-response)
+                    (gptel--insert-response response info))
+                (error
+                 (message "gptel-yatools: could not draw the child's transcript: %s"
+                          (error-message-string err))))
+            ;; Restored whatever happened: gptel keeps this very plist and
+            ;; delivers every later turn through it.
             (plist-put info :callback saved)))))))
 
 (defun gptel-yatools-subagent--callback (record response info)
@@ -797,12 +805,8 @@ boundary's work, and this module must not reach into that machinery."
 
 (defun gptel-yatools-subagent--abort-for-cap (record cap sentence)
   "Stop RECORD's child because of CAP, settling it with SENTENCE."
-  (let ((fsm (gptel-yatools-subagent--record-fsm record))
-        (buffer (gptel-yatools-subagent--record-buffer record)))
-    (when (and (buffer-live-p buffer) (gptel-fsm-p fsm))
-      (with-current-buffer buffer
-        (ignore-errors (gptel--fsm-transition fsm 'ABRT))))
-    (gptel-yatools-subagent--settle record cap sentence)))
+  (gptel-yatools-subagent--stop-request record)
+  (gptel-yatools-subagent--settle record cap sentence))
 
 (defun gptel-yatools-subagent--failure-sentence (info)
   "Return the sentence describing why gptel's request produced no answer.
@@ -905,23 +909,44 @@ sentinel.  See `gptel-yatools-subagent--path-recorded-p'."
 ;;-------------------------------------------------------------------------
 ;; The deadline
 ;;-------------------------------------------------------------------------
+(defun gptel-yatools-subagent--stop-request (record)
+  "Move RECORD's child request to gptel's abort state, tolerating anything.
+
+Called from timers and from inside sentinels, where a signal has nowhere
+to go: a dead remote host makes even this fail, and a failure here must
+not stop the record from being settled."
+  (let ((fsm (gptel-yatools-subagent--record-fsm record))
+        (buffer (gptel-yatools-subagent--record-buffer record)))
+    (when (and (buffer-live-p buffer) (gptel-fsm-p fsm))
+      (with-current-buffer buffer
+        (ignore-errors (gptel--fsm-transition fsm 'ABRT))))))
+
 (defun gptel-yatools-subagent--expire (job)
-  "Stop JOB's child because its deadline has passed."
+  "Stop JOB's child because its deadline has passed.
+
+This runs on a timer, where a signal is caught by Emacs's timer loop and
+merely logged -- so the child would be left running, holding its buffer
+read-only, with the parent's tool call waiting.  Anything that goes wrong
+while stopping it still settles the child: a host that has gone away is
+reported as the timeout it was, not as silence."
   (let ((record (gptel-yatools-job-data job)))
     (when (gptel-yatools-subagent--running-p record)
-      (let ((fsm (gptel-yatools-subagent--record-fsm record))
-            (buffer (gptel-yatools-subagent--record-buffer record)))
-        (when (and (buffer-live-p buffer) (gptel-fsm-p fsm))
-          (with-current-buffer buffer
-            (ignore-errors (gptel--fsm-transition fsm 'ABRT)))))
-      (gptel-yatools-subagent--settle
-       record 'timed-out
-       (format "Error: the subagent timed out after %d seconds and was stopped, after %d tool call%s."
-               (round (- (gptel-yatools-job-deadline job)
-                         (gptel-yatools-job-started job)))
-               (gptel-yatools-subagent--record-calls record)
-               (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))
-    (gptel-yatools--job-settle job)))
+      (condition-case err
+          (progn
+            (gptel-yatools-subagent--stop-request record)
+            (gptel-yatools-subagent--settle
+             record 'timed-out
+             (format "Error: the subagent timed out after %d seconds and was stopped, after %d tool call%s."
+                     (round (- (gptel-yatools-job-deadline job)
+                               (gptel-yatools-job-started job)))
+                     (gptel-yatools-subagent--record-calls record)
+                     (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))
+        (error
+         (gptel-yatools-subagent--settle
+          record 'timed-out
+          (format "Error: the subagent timed out and could not be stopped cleanly: %s"
+                  (error-message-string err))))))
+    (ignore-errors (gptel-yatools--job-settle job))))
 
 ;;-------------------------------------------------------------------------
 ;; Starting one
@@ -1008,16 +1033,22 @@ the boundary waits for -- or does not, when the tool is asynchronous.
 ;;-------------------------------------------------------------------------
 ;; Aborting the children of an aborted request
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools--cancel-subagents-in (buffer)
+(defun gptel-yatools--cancel-subagents-in (&optional buffer)
   "Abort every child BUFFER started, because BUFFER's request is stopping.
+
+BUFFER defaults to the current buffer.  It is optional because this is
+advice on `gptel-abort', and an advice whose arity is narrower than the
+function it guards turns a working abort into
+\"Wrong number of arguments\" the moment anything calls it with fewer.
 
 A child whose answer has nowhere to go must not keep spending tokens, and
 `gptel-yatools--cancel-jobs' reaches them through the job registry already
 -- this exists so that `gptel-abort' does too, whatever order the two run
 in."
-  (when (buffer-live-p buffer)
-    (dolist (record (gptel-yatools-subagent--records-for buffer))
-      (gptel-yatools-subagent--abort record 'parent-cancelled))))
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (dolist (record (gptel-yatools-subagent--records-for buffer))
+        (gptel-yatools-subagent--abort record 'parent-cancelled)))))
 
 (unless (advice-member-p #'gptel-yatools--cancel-subagents-in 'gptel-abort)
   (advice-add 'gptel-abort :before #'gptel-yatools--cancel-subagents-in))

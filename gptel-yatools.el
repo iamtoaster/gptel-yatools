@@ -294,13 +294,33 @@ tool call keeps running inline."
 ;; command, a key in `gptel-mode-map', and advice so that gptel's own abort
 ;; does what its name promises when the thing running is a tool.
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools--abort-cancels-tools (buffer)
+(defun gptel-yatools--abort-cancels-tools (&optional buffer)
   "Kill this package's running tool jobs when gptel aborts BUFFER.
+
+BUFFER defaults to the current buffer, and is optional because this is
+advice on `gptel-abort': an advice narrower than the function it guards
+turns a working abort into \"Wrong number of arguments\".
 
 Aborting a request should stop the command it started, not leave it
 running on the host with its output going nowhere."
-  (when (buffer-live-p buffer)
-    (gptel-yatools--cancel-jobs buffer)))
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (gptel-yatools--cancel-jobs buffer))))
+
+(defun gptel-yatools--abort-accepts-no-argument (function &rest args)
+  "Call FUNCTION, supplying the current buffer when it is given no argument.
+
+`gptel-abort' declares BUF as a required argument, but its docstring says
+it \"defaults to the current buffer\" and a key bound to it usually passes
+nothing.  Following the docstring produced \"Wrong number of arguments\"
+from `gptel-abort' itself, so the promise is kept here rather than left to
+be discovered."
+  (apply function (or args (list (current-buffer)))))
+
+(unless (advice-member-p #'gptel-yatools--abort-accepts-no-argument
+                         'gptel-abort)
+  (advice-add 'gptel-abort :around
+              #'gptel-yatools--abort-accepts-no-argument))
 
 (unless (advice-member-p #'gptel-yatools--abort-cancels-tools 'gptel-abort)
   (advice-add 'gptel-abort :before #'gptel-yatools--abort-cancels-tools))

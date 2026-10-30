@@ -818,6 +818,84 @@ successes: a new success value must not produce a false alarm."
             (should-not (gptel-yatools-subagent--truncated-p record))
             (should-not (string-match-p "INCOMPLETE" body))))))))
 
+(ert-deftest gptel-yatools-test-subagent-survives-a-display-failure ()
+  "A failure drawing the transcript must not end the child.
+
+gptel's tool-result rendering has been seen to raise \"Args out of range\"
+for an ordinary short result.  That is a display bug, and it used to cost
+the child its answer: the error escaped the callback, which settles the
+child as failed.  The transcript is worth less than the answer it was
+describing."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (read-tool (cl-find "read_path" gptel-yatools--tools
+                               :key #'gptel-tool-name :test #'equal)))
+      (cl-letf (((symbol-function 'gptel--insert-response)
+                 (lambda (&rest _) (error "Args out of range"))))
+        (gptel-yatools-agent-test--deliver
+         (cons 'tool-result
+               (list (list read-tool '(:path "/etc/apk/world") "x")))))
+      (should (gptel-yatools-subagent--running-p record))
+      (should (= (gptel-yatools-subagent--record-calls record) 1))
+      (should-not (gptel-yatools-subagent--record-error record))
+      ;; And the answer still lands and still settles the child.
+      (gptel-yatools-agent-test--deliver "All good.")
+      (should (eq (gptel-yatools-subagent--record-state record) 'done)))))
+
+(ert-deftest gptel-yatools-test-subagent-expire-survives-a-broken-host ()
+  "A deadline that cannot stop its child cleanly must still settle it.
+
+The expire runs on a timer, where a signal is only logged: a dead remote
+host left the child `running' for ever, its buffer read-only and the
+parent's tool call waiting.  It is reported as the timeout it was."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (job (gptel-yatools-subagent--record-job record))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (cl-letf (((symbol-function 'gptel-yatools-subagent--stop-request)
+                 (lambda (&rest _) (error "Tramp failed to connect"))))
+        (gptel-yatools-subagent--expire job))
+      (should (eq (gptel-yatools-subagent--record-state record) 'timed-out))
+      (should (string-match-p "timed out"
+                              (gptel-yatools-subagent--record-error record)))
+      (should outcome)
+      (should-not (gptel-yatools-subagent--running-p record)))))
+
+(ert-deftest gptel-yatools-test-abort-advice-takes-optional-arguments ()
+  "Advice on `gptel-abort' must not be narrower than `gptel-abort'.
+
+Both advices were written with a required BUFFER, and anything that
+called `gptel-abort' with fewer arguments got \"Wrong number of
+arguments\" from the advice instead of an abort."
+  (should (equal (func-arity #'gptel-yatools--cancel-subagents-in)
+                 '(0 . 1)))
+  (should (equal (func-arity #'gptel-yatools--abort-cancels-tools)
+                 '(0 . 1)))
+  ;; And calling it with none uses the current buffer.
+  (with-temp-buffer
+    (let ((gptel-yatools-subagent--records nil))
+      (should-not (gptel-yatools--cancel-subagents-in)))))
+
+(ert-deftest gptel-yatools-test-abort-works-without-an-argument ()
+  "`gptel-abort' promises a default the function itself does not provide.
+
+Its docstring says BUF defaults to the current buffer while the argument
+is required, so a key bound to it with nothing to pass -- which is the
+natural reading of that docstring -- failed with \"Wrong number of
+arguments\" and stopped aborting anything."
+  (with-temp-buffer
+    (setq-local gptel-mode t)
+    (let ((gptel-yatools-subagent--records nil))
+      (should-not (condition-case err
+                      (progn (gptel-abort) nil)
+                    (error (error-message-string err))))
+      (should-not (condition-case err
+                      (progn (gptel-abort (current-buffer)) nil)
+                    (error (error-message-string err)))))))
+
 (ert-deftest gptel-yatools-test-subagent-label-counts-only-running ()
   "The label counts children that are still working, and says so when none are.
 

@@ -221,12 +221,30 @@ instead, which is the only outcome a waiting chat can act on."
                  (error-message-string err))))
   (ignore-errors (gptel--fsm-transition fsm 'ERRS)))
 
+(defvar gptel-yatools--tool-call-running nil
+  "Non-nil while a tool call is inside the remote filesystem.
+
+TRAMP waits for its command's reply by pumping output, which runs
+timers.  A deferred tool call whose timer fires then would start inside
+another call's TRAMP operation and re-enter the connection -- corrupting
+its buffer (\"End of file during parsing\"), or having its own reply read
+by the wrong waiter.  Measured: three calls, three concurrent.
+
+Emacs is single-threaded, so this flag is enough: nothing else can begin
+while a call is on the stack, and a call that finds it set waits its
+turn.")
+
 (defun gptel-yatools--run-tool-call-later (function fsm args tries)
   "Run FUNCTION on FSM and ARGS once the TRAMP connection is free.
 
 TRIES counts down; at zero the call is made anyway, so a connection that
 never reports itself free produces TRAMP's own error rather than a
 request that waits for ever.
+
+Two things are waited for, and both were measured to matter.  The
+connection's own lock covers another operation's command; the flag above
+covers this package's own calls, which can otherwise start inside one
+another because TRAMP runs timers while it waits for output.
 
 The state is checked first: an abort between the sentinel and this timer
 leaves nothing to run, and a state machine that has already moved on must
@@ -244,14 +262,21 @@ reported as `Quit' so the request ends somewhere the user can see."
        (when (and (buffer-live-p buffer)
                   (eq (gptel-fsm-state fsm) 'TOOL))
          (cond
+          ;; Another of this package's calls is on the stack.  Wait for it
+          ;; without spending a try: it is bounded by that call finishing,
+          ;; and running now would re-enter the connection the flag exists
+          ;; to protect.
+          (gptel-yatools--tool-call-running
+           (gptel-yatools--run-tool-call-later function fsm args tries))
           ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
            (gptel-yatools--run-tool-call-later function fsm args (1- tries)))
           (t
            (with-current-buffer buffer
-             (condition-case err
-                 (apply function fsm args)
-               (quit (gptel-yatools--fail-request fsm err))
-               (error (gptel-yatools--fail-request fsm err)))))))))
+             (let ((gptel-yatools--tool-call-running t))
+               (condition-case err
+                   (apply function fsm args)
+                 (quit (gptel-yatools--fail-request fsm err))
+                 (error (gptel-yatools--fail-request fsm err))))))))))
     nil))
 
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)

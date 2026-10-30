@@ -253,6 +253,14 @@ rm -f *.elc
   rather than a predicate per entry or per property.  Measured, cold: a
   120-entry listing cost 125 round trips the obvious way and 4 the other
   way.
+- **Tool calls never overlap, and the connection's own lock is not
+  enough.**  TRAMP pumps output while it waits, which runs timers — so a
+  second deferred call can start *inside* the first one's file operation,
+  and two readers end up on one connection buffer: "End of file during
+  parsing", results delivered to the wrong caller.  Measured: three
+  calls, three concurrent.  `gptel-yatools--tool-call-running` is a plain
+  variable, not a buffer-local one, because every subagent in a
+  workspace shares the connection being protected.
 - **Nothing that runs on a timer may signal.**  A timer callback's error is
   logged by Emacs and nothing else: the work it was going to do simply
   does not happen, and whatever was waiting keeps waiting.  Every

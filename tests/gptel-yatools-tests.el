@@ -1041,6 +1041,46 @@ grow with the directory."
           (setq files nil))
       (dolist (file files) (ignore-errors (delete-file file))))))
 
+(ert-deftest gptel-yatools-test-tool-calls-never-overlap ()
+  "Two deferred tool calls must not run inside one another.
+
+TRAMP waits for each command's reply with `accept-process-output', which
+runs timers.  A deferred tool call whose timer fires then would start
+inside another call's TRAMP operation, re-entering a connection that is
+already reading a reply: the connection buffer gets two readers and one
+of them sees a partial answer -- \"End of file during parsing\" -- while
+the other gets a result belonging to neither.
+
+Measured before the fix: three calls, three concurrent.  The guard is a
+plain variable rather than a buffer-local one, because every subagent in
+a workspace shares the connection that is being protected."
+  (let ((in-flight 0)
+        (peak 0)
+        (done 0))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) nil)))
+      (with-temp-buffer
+        (dotimes (_ 3)
+          (gptel-yatools--tool-calls-outside-the-sentinel
+           (lambda (&rest _)
+             (setq in-flight (1+ in-flight))
+             (setq peak (max peak in-flight))
+             ;; What TRAMP does while waiting: let timers and sentinels run.
+             (let ((deadline (+ (float-time) 0.3)))
+               (while (< (float-time) deadline)
+                 (accept-process-output nil 0.02)))
+             (setq in-flight (1- in-flight))
+             (setq done (1+ done)))
+           (gptel-make-fsm :state 'TOOL
+                           :info (list :buffer (current-buffer)))))
+        (let ((deadline (+ (float-time) 10)))
+          (while (and (< done 3) (< (float-time) deadline))
+            (accept-process-output nil 0.02)))
+        (should (= done 3))
+        (should (= peak 1))))))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

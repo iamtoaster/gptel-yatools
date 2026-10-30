@@ -147,6 +147,18 @@ conflict baselines, `vfs_diff`, the sync review, skills and the project
 root are all performed by TRAMP on that host.  Nothing needs configuring;
 TRAMP is not a dependency and is used only when a name already is remote.
 
+A tool call in a remote workspace waits for the connection to be free.
+gptel runs tool calls from its response loop, which can land inside
+another TRAMP file operation, and TRAMP refuses a second call into a
+connection it is already using (`Forbidden reentrant call of Tramp`) —
+which gptel then reports as a *missing file*, so the model is told the
+file is not there when the connection was merely busy.  That is what a
+fan-out of subagents produced.  The wait is a condition rather than a
+sleep, so any number of calls take their turn;
+`gptel-yatools-remote-tool-delay` is the interval and
+`gptel-yatools-remote-tool-tries` the bound.  Local workspaces are
+unaffected.
+
 The workspace is one machine, and a path never leaves it.  A relative path
 is resolved against the root; an absolute one — `/etc/hostname`,
 `~/notes` — is resolved against the root's *host*, so `read_path

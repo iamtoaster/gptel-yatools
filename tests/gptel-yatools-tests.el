@@ -906,6 +906,97 @@ going through a."
                  "/ssh:host:"))
   (should-not (gptel-yatools--remote-prefix "/etc/")))
 
+(ert-deftest gptel-yatools-test-a-tool-call-waits-for-a-free-connection ()
+  "In a remote workspace a tool call waits instead of being refused.
+
+gptel runs a tool call from the response process's sentinel.  In a remote
+workspace that can be inside another TRAMP file operation, and TRAMP
+refuses a second call into a connection it is already using --
+\"Forbidden reentrant call of Tramp\".  gptel's `-display-tool-results'
+then reports it as a missing file, so the model is told the file is not
+there when the connection was merely busy.  That is what made a fan-out of
+subagents describe the wrong machine.
+
+The wait is a condition and not a sleep: the call re-arms while another
+holder has the connection, so any number of concurrent calls take their
+turn."
+  (let ((claims 0)
+        (ran nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               ;; Busy for the first two checks, free on the third.
+               (lambda (_buffer) (setq claims (1+ claims)) (< claims 3))))
+      (with-temp-buffer
+        (let ((fsm (gptel-make-fsm :state 'TOOL
+                                   :info (list :buffer (current-buffer)))))
+          (should-not (gptel-yatools--tool-calls-outside-the-sentinel
+                       (lambda (&rest _) (setq ran t)) fsm))
+          (should-not ran)
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (null ran) (< (float-time) deadline))
+              (accept-process-output nil 0.05)))
+          (should ran)
+          ;; It waited: more than one check, and it did not run on the
+          ;; first timer tick.
+          (should (>= claims 3)))))))
+
+(ert-deftest gptel-yatools-test-a-tool-call-runs-inline-when-local ()
+  "A local workspace is untouched: no connection, so no waiting."
+  (let ((ran nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) nil)))
+      (with-temp-buffer
+        (gptel-yatools--tool-calls-outside-the-sentinel
+         (lambda (&rest _) (setq ran t))
+         (gptel-make-fsm :state 'TOOL :info (list :buffer (current-buffer))))
+        (should ran)))))
+
+(ert-deftest gptel-yatools-test-a-waiting-tool-call-is-dropped-on-abort ()
+  "A request aborted while its call waits must not run it afterwards.
+
+The timer outlives the request, so the state is the only thing that says
+whether there is still a request to answer."
+  (let ((ran nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) t)))
+      (with-temp-buffer
+        (let ((fsm (gptel-make-fsm :state 'TOOL
+                                   :info (list :buffer (current-buffer)))))
+          (gptel-yatools--tool-calls-outside-the-sentinel
+           (lambda (&rest _) (setq ran t)) fsm)
+          (gptel--fsm-transition fsm 'ABRT)
+          (let ((deadline (+ (float-time) 1.0)))
+            (while (< (float-time) deadline)
+              (accept-process-output nil 0.05)))
+          (should-not ran))))))
+
+(ert-deftest gptel-yatools-test-a-waiting-tool-call-reports-its-error ()
+  "An error in a deferred call must reach the request, not a timer.
+
+A signal escaping a timer is swallowed by Emacs's timer loop, and the
+request would sit in TOOL for ever with no result and no way to see why."
+  (let ((fsm nil))
+    (cl-letf (((symbol-function 'gptel-yatools--remote-buffer-p)
+               (lambda (_buffer) t))
+              ((symbol-function 'gptel-yatools--tramp-locked-p)
+               (lambda (_buffer) nil))
+              ((symbol-function 'gptel--fsm-transition)
+               (lambda (machine state) (setf (gptel-fsm-state machine) state))))
+      (with-temp-buffer
+        (setq fsm (gptel-make-fsm :state 'TOOL
+                                  :info (list :buffer (current-buffer))))
+        (gptel-yatools--tool-calls-outside-the-sentinel
+         (lambda (&rest _) (error "boom")) fsm)
+        (let ((deadline (+ (float-time) 5)))
+          (while (and (not (plist-get (gptel-fsm-info fsm) :error))
+                      (< (float-time) deadline))
+            (accept-process-output nil 0.05)))
+        (should (equal (plist-get (gptel-fsm-info fsm) :error) "boom"))
+        (should (eq (gptel-fsm-state fsm) 'ERRS))))))
+
 (ert-deftest gptel-yatools-test-execute-command-accepts-the-same-host ()
   "A DIRECTORY on the workspace's own host is what the tool is for."
   (gptel-yatools-test--with-remote

@@ -238,6 +238,13 @@ rm -f *.elc
   path that decides *where* to act must name the same connection as the
   workspace (`gptel-yatools--connection`), not merely look remote.  See
   ADR 0004.
+- **A tool call never re-enters a busy TRAMP connection.**  gptel runs
+  tools from its response loop, which in a remote workspace can be inside
+  another file operation; TRAMP then refuses the call and gptel reports it
+  as a missing file.  `gptel-yatools--tool-calls-outside-the-sentinel`
+  defers such calls until the connection is free — a condition, not a
+  sleep, so concurrent subagents take turns.  Any new entry point that
+  calls tools directly must go through it.
 - **A child agent is a reader.**  `gptel-yatools-subagent-tools` lists only
   read-only tools, and that is what every other decision in the agent module
   rests on: nothing it does can be lost, so there is no VFS policy, no merge

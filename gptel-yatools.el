@@ -46,6 +46,10 @@
 (require 'gptel-yatools-common)
 (require 'gptel)
 
+(declare-function tramp-dissect-file-name "tramp" (file &optional nested))
+(declare-function tramp-get-connection-process "tramp" (vec))
+(declare-function tramp-get-connection-property "tramp" (vec-or-proc key &optional default))
+
 ;;-------------------------------------------------------------------------
 ;; A tool call must run in the buffer that owns the request
 ;;
@@ -156,6 +160,114 @@ more."
   (when (get-buffer "*gptel-tool-calls*")
     (with-current-buffer (get-buffer "*gptel-tool-calls*")
       (gptel-yatools-vfs-reset-buffer-state))))
+
+(defcustom gptel-yatools-remote-tool-delay 0.2
+  "Seconds between checks for a free TRAMP connection.
+
+A tool call in a remote workspace waits for the connection to be free
+rather than assuming it is, so this is a poll interval and not a guess at
+how long the work takes.  A tool that runs while the connection is busy
+is refused by TRAMP (\"Forbidden reentrant call\"), which is what a
+subagent fan-out produced: several calls arriving within one another's
+file operations."
+  :type 'number
+  :group 'gptel-yatools)
+
+(defcustom gptel-yatools-remote-tool-tries 100
+  "Most times to check for a free TRAMP connection before giving up.
+
+At the default poll interval this is twenty seconds.  A tool that has
+waited that long is reported as an error rather than started anyway: a
+refused remote call is not a file that is missing, and pretending
+otherwise is what made a subagent describe the wrong machine in the first
+place."
+  :type 'integer
+  :group 'gptel-yatools)
+
+(defun gptel-yatools--remote-buffer-p (buffer)
+  "Return non-nil when BUFFER works in a remote workspace."
+  (and (buffer-live-p buffer)
+       (file-remote-p (buffer-local-value 'default-directory buffer))))
+
+(defun gptel-yatools--tramp-locked-p (buffer)
+  "Return non-nil when BUFFER's TRAMP connection is in use.
+
+The lock is a property of the connection *process*, which is why it is
+read there and not from the file name: `with-tramp-locked-connection'
+sets it on the process for the whole of a file operation, and TRAMP
+refuses any second call into that connection until it is cleared.
+
+Nothing here opens a connection: dissecting a name is parsing, and
+looking up the process is a name lookup in `process-list'."
+  (when (and (buffer-live-p buffer)
+             (fboundp 'tramp-dissect-file-name))
+    (when-let* ((vec (ignore-errors
+                       (tramp-dissect-file-name
+                        (buffer-local-value 'default-directory buffer))))
+                (proc (ignore-errors (tramp-get-connection-process vec))))
+      (tramp-get-connection-property proc "locked"))))
+
+(defun gptel-yatools--run-tool-call-later (function fsm args tries)
+  "Run FUNCTION on FSM and ARGS once the TRAMP connection is free.
+
+TRIES counts down; at zero the call is made anyway, so a connection that
+never reports itself free produces TRAMP's own error rather than a
+request that waits for ever.
+
+The state is checked first: an abort between the sentinel and this timer
+leaves nothing to run, and a state machine that has already moved on must
+not be handed another tool call."
+  (let ((buffer (plist-get (gptel-fsm-info fsm) :buffer)))
+    (run-at-time
+     gptel-yatools-remote-tool-delay nil
+     (lambda ()
+       (when (and (buffer-live-p buffer)
+                  (eq (gptel-fsm-state fsm) 'TOOL))
+         (cond
+          ((and (> tries 0) (gptel-yatools--tramp-locked-p buffer))
+           (gptel-yatools--run-tool-call-later function fsm args (1- tries)))
+          (t
+           (with-current-buffer buffer
+             (condition-case err
+                 (apply function fsm args)
+               (error
+                ;; A signal escaping a timer is swallowed and the request
+                ;; would sit in TOOL for ever, so it is reported instead.
+                (plist-put (gptel-fsm-info fsm) :error
+                           (error-message-string err))
+                (ignore-errors (gptel--fsm-transition fsm 'ERRS))))))))))
+    nil))
+
+(defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)
+  "Run gptel's tool-use handler, but not from inside a process sentinel.
+
+gptel runs a tool call from the response process's sentinel: when curl
+finishes, the sentinel moves the state machine through TYPE and into TOOL,
+whose handler applies the tools.  In a remote workspace that is a TRAMP
+call nested inside whatever else Emacs was doing, and TRAMP refuses a
+second call into a connection it is already using -- \"Forbidden reentrant
+call of Tramp\".  Measured both ways: a tool called from a process
+sentinel while a remote file's attributes are being read fails exactly
+that way, and the same call succeeds from a timer.
+
+So for a remote workspace the handler is deferred, then waits until the
+connection is free.  Waiting is a condition, not a sleep: the poll above
+re-arms while another call holds the connection, so any number of
+subagents can arrive at once and each takes its turn.  Emacs runs one
+timer at a time, which is what makes that safe.
+
+A local workspace is untouched: there is no connection to re-enter, and a
+tool call keeps running inline."
+  (let ((buffer (plist-get (gptel-fsm-info fsm) :buffer)))
+    (if (not (gptel-yatools--remote-buffer-p buffer))
+        (apply function fsm args)
+      (gptel-yatools--run-tool-call-later function fsm args
+                                         gptel-yatools-remote-tool-tries))))
+
+(unless (advice-member-p #'gptel-yatools--tool-calls-outside-the-sentinel
+                         'gptel--handle-tool-use)
+  (advice-add 'gptel--handle-tool-use :around
+              #'gptel-yatools--tool-calls-outside-the-sentinel))
 
 ;; `advice-add' is idempotent for an identical advice function, but the
 ;; guard makes the intent explicit and keeps the load path obviously safe

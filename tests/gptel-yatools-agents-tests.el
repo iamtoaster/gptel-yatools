@@ -657,6 +657,66 @@ paragraphs.  Escaping the line breaks turned it into one dense line of
     (should (string-match-p "file:line evidence" text))
     (should-not (string-match-p "U+000A" text))))
 
+(ert-deftest gptel-yatools-test-subagent-callback-touches-no-filesystem ()
+  "The child's callback must not resolve paths or consult the project.
+
+gptel calls the callback from a process sentinel, and Tramp may have
+started that sentinel from inside its own locked connection -- where any
+further remote call is refused as a reentrant one.  A `file-directory-p'
+in the path bookkeeping, or a `project-current' reached through
+`--resolve-path', was enough to break every subagent in a remote
+workspace, and the failures looked like a broken model rather than a
+broken callback.
+
+What is asserted is the property that fails when either creeps back: the
+paths are recorded exactly as the child wrote them, never made absolute.
+`project-current' is trapped too, because it is an ordinary function and
+cl-letf can safely replace it; the filesystem primitives are not trapped
+here, because rebinding a subr makes native-comp stat its own cache,
+which would trip the trap on the compiler's behalf."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (read-tool (cl-find "read_path" gptel-yatools--tools
+                               :key #'gptel-tool-name :test #'equal)))
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&rest _) (error "callback consulted the project")))
+                ((symbol-function 'gptel-yatools--resolve-path)
+                 (lambda (&rest _) (error "callback resolved a path"))))
+        (gptel-yatools-agent-test--deliver
+         (cons 'tool-result
+               (list (list read-tool '(:path "src/parser.el") "one")
+                     (list read-tool '(:path "src/other.el") "two")
+                     (list read-tool '(:path "etc") "a directory, as it happens")))))
+      (should (= (gptel-yatools-subagent--record-calls record) 3))
+      ;; As written, not expanded against any root, and not dropped for
+      ;; being a directory.
+      (should (equal (gptel-yatools-subagent--record-paths record)
+                     '("src/parser.el" "src/other.el" "etc")))
+      (should (gptel-yatools-subagent--running-p record))
+      (should-not (gptel-yatools-subagent--record-error record)))))
+
+(ert-deftest gptel-yatools-test-subagent-reports-an-internal-error ()
+  "An error in the callback settles the child instead of escaping.
+
+Nothing catches a callback error in gptel's request loop, so one escaping
+here breaks the state machine and leaves the child running with nothing
+watching it.  It becomes the child failing instead, which is recoverable
+and says what happened."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (job (gptel-yatools-subagent--record-job record))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (cl-letf (((symbol-function 'gptel-yatools-subagent--dispatch)
+                 (lambda (&rest _) (error "boom"))))
+        (gptel-yatools-agent-test--deliver "an answer"))
+      (should (eq (gptel-yatools-subagent--record-state record) 'failed))
+      (should (string-match-p "internal error: boom"
+                              (gptel-yatools-subagent--record-error record)))
+      (should outcome))))
+
 (ert-deftest gptel-yatools-test-subagent-label-counts-only-running ()
   "The label counts children that are still working, and says so when none are.
 

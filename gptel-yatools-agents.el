@@ -175,8 +175,9 @@ STARTED    `float-time' at which the child started.
 FINISHED   `float-time' at which it settled, or nil.
 TURNS      model responses received so far.
 CALLS      tool calls made so far.
-PATHS      workspace-relative paths the child read, deduplicated, in the
-           order it first read them.
+PATHS      paths the child read, deduplicated, in the order it first named
+           them -- as it wrote them, never resolved (see
+           `gptel-yatools-subagent--path-recorded-p').
 ANSWER     the child's last message, when it settled with one.
 LAST-TEXT  the most recent message the child sent, whatever state it is in;
            what a cap message quotes.
@@ -483,13 +484,16 @@ either way, which is what stops it dying with its parent."
 (defun gptel-yatools-subagent--path-recorded-p (path)
   "Return non-nil when PATH is worth listing as read by the child.
 
-A path is recorded so the parent can tell whether an answer was grounded.
-Directories are not: listing a directory reads its entries, but reporting
-it as a file the child \"read\" would mislead more than inform."
+Nothing is stat'ed here, and that is the point: this runs in the child's
+callback, which gptel calls from a process sentinel -- and Tramp may have
+started that sentinel from inside its own locked connection, where any
+further remote call is refused as a reentrant one.  A `file-directory-p'
+here was enough to break every subagent in a remote workspace.
+
+So the path is recorded as the model wrote it.  Whether it named a
+directory is not something this can afford to find out."
   (and (stringp path)
-       (not (string-empty-p path))
-       (not (file-directory-p
-             (gptel-yatools--resolve-path path)))))
+       (not (string-empty-p path))))
 
 (defun gptel-yatools-subagent--note-call (record results)
   "Record the tool calls in RESULTS as work RECORD's child did.
@@ -497,7 +501,11 @@ it as a file the child \"read\" would mislead more than inform."
 RESULTS is the `(tool-result . RESULTS)' payload: a list of
 \(TOOL ARGS RESULT) triples for the calls that just finished.  gptel clears
 `:tool-result' when it starts the next request, so this list holds one
-turn's calls and its length is the count to add."
+turn's calls and its length is the count to add.
+
+Paths are taken from the arguments and nothing else -- no resolving, no
+`project-current', no stat.  See `gptel-yatools-subagent--path-recorded-p'
+for why the callback must stay off the filesystem."
   (setf (gptel-yatools-subagent--record-calls record)
         (+ (gptel-yatools-subagent--record-calls record) (length results)))
   (dolist (triple results)
@@ -510,11 +518,10 @@ turn's calls and its length is the count to add."
                                 "read_file_from_offset"
                                 "fetch_lines_from_file_using_regex"))
                  (gptel-yatools-subagent--path-recorded-p path))
-        (let ((resolved (gptel-yatools--resolve-path path)))
-          (unless (member resolved (gptel-yatools-subagent--record-paths record))
-            (setf (gptel-yatools-subagent--record-paths record)
-                  (append (gptel-yatools-subagent--record-paths record)
-                          (list resolved)))))))))
+        (unless (member path (gptel-yatools-subagent--record-paths record))
+          (setf (gptel-yatools-subagent--record-paths record)
+                (append (gptel-yatools-subagent--record-paths record)
+                        (list path))))))))
 
 (defun gptel-yatools-subagent--tool-call-refusal (calls)
   "Refuse the confirmations in CALLS, releasing the child to continue.
@@ -625,8 +632,25 @@ when the turn made no calls (`:tool-use' is empty).  A nil response is a
 failure, and gptel only sends one for a failed request: a successful 200
 with no body is a pure tool-call turn and is not reported at all.  `abort'
 is the user stopping it, and `(tool-call . CALLS)' is a confirmation
-nobody here can answer."
+nobody here can answer.
+
+Everything is wrapped, because gptel calls this from a process sentinel:
+an error escaping here does not become a tool result, it breaks the
+request's state machine and the child is left running with nothing
+watching it.  A failure is reported as the child failing, which is the
+truth and is recoverable."
   (setf (gptel-yatools-subagent--record-info record) info)
+  (condition-case err
+      (gptel-yatools-subagent--dispatch record response info)
+    (error
+     (unless (gptel-yatools-subagent--record-finished record)
+       (gptel-yatools-subagent--settle
+        record 'failed
+        (format "Error: the subagent stopped on an internal error: %s"
+                (error-message-string err)))))))
+
+(defun gptel-yatools-subagent--dispatch (record response info)
+  "Dispatch one RESPONSE of RECORD's child request, as gptel shapes it."
   (pcase response
     ((pred stringp)
      (unless (gptel-yatools-subagent--record-finished record)
@@ -765,7 +789,12 @@ half-finished investigation for a negative result."
 
 The metadata is not decoration: without the paths, \"no problems found\"
 cannot be told apart from \"did not look\", and the parent has no way to
-decide whether to trust the answer."
+decide whether to trust the answer.
+
+The paths are printed as the child named them -- no resolving, no
+`project-current', no display-path lookup -- because this runs while the
+child's job is being delivered, which is still inside gptel's process
+sentinel.  See `gptel-yatools-subagent--path-recorded-p'."
   (let ((paths (plist-get outcome :paths))
         (elapsed (plist-get outcome :elapsed)))
     (concat
@@ -779,7 +808,7 @@ decide whether to trust the answer."
      (if paths
          (format "Files read: %s\n"
                  (mapconcat (lambda (path)
-                              (gptel-yatools--display-path path))
+                              (gptel-yatools--printable-string path))
                             paths ", "))
        "Files read: none\n")
      "\n"

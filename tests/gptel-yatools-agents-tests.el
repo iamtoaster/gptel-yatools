@@ -644,6 +644,19 @@ would arrive as a turn -- and, worse, could settle a child mid-request."
       (should (eq (plist-get info :callback)
                   gptel-yatools-agent-test--callback)))))
 
+(ert-deftest gptel-yatools-test-subagent-preview-shows-the-whole-brief ()
+  "The task the user approves is the task the child receives, line for line.
+
+A subagent is approved on its brief, and a brief is written in
+paragraphs.  Escaping the line breaks turned it into one dense line of
+<U+000A> that described nothing anyone could judge."
+  (let ((text (gptel-yatools-test--preview
+               "subagent"
+               (list :task "Review the parser change.\n\nReturn findings with file:line evidence."))))
+    (should (string-match-p "Review the parser change\\.\n\n" text))
+    (should (string-match-p "file:line evidence" text))
+    (should-not (string-match-p "U+000A" text))))
+
 (ert-deftest gptel-yatools-test-subagent-label-counts-only-running ()
   "The label counts children that are still working, and says so when none are.
 

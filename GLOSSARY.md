@@ -299,14 +299,15 @@ _Avoid_: Sync summary, sync result (that is the outcome, not its
 composition)
 
 **Preview**:
-The one-line confirmation gptel shows for a pending tool call, built
-from the tool's own `:preview' declaration and its `:args', so the
-arguments are read by name in the positions the definition states.  It
-exists because gptel's default formatter truncates every string argument
-at 256 characters: a command could otherwise be approved on a harmless
-prefix.  Every value is printed through the printable-text rule, so a
-command spanning lines cannot add lines that read like the rest of the
-prompt.
+The confirmation gptel shows for a pending tool call, built from the
+tool's own `:preview' declaration and its `:args', so the arguments are
+read by name in the positions the definition states.  It exists because
+gptel's default formatter truncates every string argument at 256
+characters: a command could otherwise be approved on a harmless prefix.
+Every value is quoted through the printable-text rule, with one
+exception: a line break survives, because a here-document's shape and a
+subagent's brief are what the user is judging.  Everything else
+invisible is still spelled out.
 _Avoid_: Confirmation prompt, tool-call renderer
 
 ### Diagrams

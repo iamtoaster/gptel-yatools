@@ -246,7 +246,9 @@ a command that never started says why."
 ;; gptel renders a pending tool call with `gptel--format-tool-call', which
 ;; truncates every string argument at 256 characters.  For `execute_command'
 ;; that is the wrong failure: a command is approved on its text, so a long
-;; one could be approved on a harmless prefix.
+;; one could be approved on a harmless prefix.  It also escapes a newline,
+;; which matters just as much here, because an inline script arrives as
+;; one -- see `gptel-yatools--printable-block'.
 ;;
 ;; The fix used to live here, as a renderer written by hand and registered
 ;; against `gptel--tool-preview-alist'.  It is now the `:preview' line of

@@ -1005,25 +1005,56 @@ are legitimate in text and mean what they look like.")
   "Regexp matching every character that may not be displayed verbatim.
 
 That is `gptel-yatools--invisible-char-regexp' plus the C0 controls and
-DEL.  A path or a command is inserted into a buffer as one line of
-output; a newline in it would add lines of its own, which is how a
-file name can forge a review heading the user will read as another
-file's.")
+DEL, newline included.  A path is inserted into a buffer as one line of
+output; a newline in it would add lines of its own, which is how a file
+name can forge a review heading the user will read as another file's.
 
-(defun gptel-yatools--printable-string (string)
-  "Return STRING with every character in
-`gptel-yatools--control-char-regexp' written as <U+XXXX>.
+Text a model wrote for a human to read -- a shell command, a subagent's
+brief -- is shown through `gptel-yatools--block-char-regexp' instead,
+because a line break in a here-document is content, not an attack.")
 
-Text that holds none of them is returned unchanged, which is every
-reply that matters for speed.  `gptel-yatools--display-path' uses this
-for paths; a tool that shows any other model-written string on a line
-of its own -- a shell command in a confirmation, say -- should too."
-  (if (null (string-match-p gptel-yatools--control-char-regexp string))
+(defconst gptel-yatools--block-char-regexp
+  "[\x00-\x09\x0b-\x1f\x7f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
+  "Like `gptel-yatools--control-char-regexp', but newline is allowed.
+
+Escaping the newline was the mistake this exists to undo: it is the one
+C0 character that is legitimate in text meant to be read, and spelling it
+out turned a ten-line script into one unreadable wall of <U+000A> --
+which is not an audit of what will be approved.  Every other invisible
+character is still spelled out, and a carriage return still is: it says
+nothing a reader can see, and would move the cursor if it ever reached a
+terminal.")
+
+(defun gptel-yatools--escape-chars (string regexp)
+  "Return STRING with every match of REGEXP written as <U+XXXX>.
+
+Text that holds none of them is returned unchanged, which is every reply
+that matters for speed."
+  (if (null (string-match-p regexp string))
       string
     (replace-regexp-in-string
-     gptel-yatools--control-char-regexp
+     regexp
      (lambda (m) (format "<U+%04X>" (string-to-char m)))
      string t t)))
+
+(defun gptel-yatools--printable-string (string)
+  "Return STRING with every invisible character written as <U+XXXX>.
+
+Newline is included, so the result is always one line:
+`gptel-yatools--display-path' uses this for paths, where a line break
+would let a name compose the review it appears in.  Text that a human is
+meant to read line by line goes through
+`gptel-yatools--printable-block' instead."
+  (gptel-yatools--escape-chars string gptel-yatools--control-char-regexp))
+
+(defun gptel-yatools--printable-block (string)
+  "Return STRING with its invisible characters spelled out, newlines kept.
+
+For the text a model wrote to be read rather than to be compared: a
+multi-line shell command, the brief handed to a subagent.  Keeping the
+line breaks is the whole point -- the shape of a here-document is what
+the user is being asked to approve."
+  (gptel-yatools--escape-chars string gptel-yatools--block-char-regexp))
 
 (defun gptel-yatools--display-path (path)
   "Return PATH relative to the workspace root, escaped for display.
@@ -2050,15 +2081,39 @@ line) and :partial (the page is not the whole of TEXT)."
 ;; a test noticing.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--preview-value (value)
-  "Return VALUE as it is written into a confirmation line.
+  "Return VALUE as it is written into a confirmation.
 
-A string is printed with `prin1-to-string' after
-`gptel-yatools--printable-string', so it arrives quoted and with its
-control characters spelled out -- a command spanning lines stays one
-line.  Anything else is printed as it prints itself."
+A string is quoted with `prin1-to-string' after
+`gptel-yatools--printable-block': quoting is what keeps a `\"' or a `\\'
+in the value from being read as the end of it, and the printable pass is
+what spells out the invisible characters.  Newlines survive both.
+
+They have to.  A shell command holding a here-document, or a subagent's
+brief, is text a person is meant to read line by line; escaping the line
+breaks turned either into one dense line of <U+000A> that could only be
+approved on trust.  A value that spans lines is put on a line of its own
+so the block does not begin mid-line.  Anything that is not a string is
+printed as it prints itself."
   (if (stringp value)
-      (prin1-to-string (gptel-yatools--printable-string value))
+      (let ((printed (prin1-to-string (gptel-yatools--printable-block value))))
+        (if (string-match-p "\n" printed)
+            (concat "\n" printed)
+          printed))
     (format "%s" value)))
+
+(defun gptel-yatools--preview-join (parts)
+  "Join PARTS with a space, except where a part starts a new line.
+
+A multi-line value already begins with a newline; adding a space before
+it would leave one trailing at the end of the line above."
+  (let ((result ""))
+    (dolist (part parts result)
+      (setq result (concat result
+                           (if (or (string-empty-p result)
+                                   (string-prefix-p "\n" part))
+                               ""
+                             " ")
+                           part)))))
 
 (defun gptel-yatools--preview-shows-p (value)
   "Return non-nil when VALUE is worth naming on a confirmation line.
@@ -2071,7 +2126,7 @@ naming it would suggest it is."
 
 (defun gptel-yatools--preview-line (name display arg-specs values
                                          &optional async)
-  "Return the one-line confirmation for a call to NAME.
+  "Return the confirmation text for a call to NAME.
 
 DISPLAY is the tool's `:preview' list: the arguments to show, in the
 order to show them.  ARG-SPECS is the tool's `:args' declaration, which
@@ -2086,7 +2141,11 @@ way the call reads -- and an optional one as NAME=VALUE, so the two
 kinds stay tellable apart.  `timeout' is named explicitly because it is
 not part of the command but does bound how long the call runs; it is
 also the one value printed as the number it will be used as, rather
-than as the model wrote it, since \"5\" and 5 mean the same seconds."
+than as the model wrote it, since \"5\" and 5 mean the same seconds.
+
+The result is one line only when every value is one line.  A command
+holding a here-document is shown as the block it is, because a
+confirmation the user cannot read is not a confirmation."
   (let* ((names (append (mapcar (lambda (arg) (plist-get arg :name)) arg-specs)
                         (list "timeout")))
          (required (mapcar (lambda (arg) (plist-get arg :name))
@@ -2114,7 +2173,10 @@ than as the model wrote it, since \"5\" and 5 mean the same seconds."
           (push (format "%s=%s" shown (gptel-yatools--preview-value value))
                 parts)))))
     (concat "(" name
-            (if parts (concat " " (mapconcat #'identity (nreverse parts) " ")) "")
+            (if parts
+                (let ((body (gptel-yatools--preview-join (nreverse parts))))
+                  (concat (if (string-prefix-p "\n" body) "" " ") body))
+              "")
             (if async " [runs in the background]" "")
             ")\n")))
 

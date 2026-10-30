@@ -2169,15 +2169,28 @@ nothing."
                                               (list :command "echo hi"))
                  "(execute_command \"echo hi\" [runs in the background])\n")))
 
-(ert-deftest gptel-yatools-test-command-confirmation-escapes-a-newline ()
-  "A command may span lines; the confirmation must still be one heading.
+(ert-deftest gptel-yatools-test-command-confirmation-keeps-a-newline ()
+  "A command that spans lines is shown as the block it is.
 
-A newline in the approved text would let a command add lines that read
-like the rest of gptel's prompt.
-"
+A here-document approved on one dense line is approved on trust: the
+shape of the script is what the user has to read.  The line break is
+kept, and the value starts on a line of its own so the block does not
+begin mid-line."
   (should (equal (gptel-yatools-test--preview
                   "execute_command" (list :command "echo one\necho two"))
-                 "(execute_command \"echo one<U+000A>echo two\" [runs in the background])\n")))
+                 "(execute_command\n\"echo one\necho two\" [runs in the background])\n")))
+
+(ert-deftest gptel-yatools-test-command-confirmation-still-hides-invisible-characters ()
+  "Keeping the newline must not start showing the invisible characters.
+
+Everything the reader cannot see is still spelled out -- a tab and a
+carriage return among them, because neither says anything a person can
+read and a carriage return would move the cursor if it ever reached a
+terminal."
+  (should (equal (gptel-yatools-test--preview
+                  "execute_command"
+                  (list :command (concat "a\tb\rc" (string 27) "d")))
+                 "(execute_command \"a<U+0009>b<U+000D>c<U+001B>d\" [runs in the background])\n")))
 
 (ert-deftest gptel-yatools-test-command-confirmation-names-the-directory ()
   "The working directory is part of what is being approved."

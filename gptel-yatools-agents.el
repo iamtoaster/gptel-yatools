@@ -62,6 +62,9 @@
 (declare-function gptel--insert-response "gptel" (response info &optional raw))
 (declare-function gptel--fsm-transition "gptel-request" (machine &optional new-state))
 (declare-function gptel-abort "gptel-request" (buf))
+(declare-function gptel--update-tool-call "gptel" (fsm))
+(defvar gptel-send--handlers)
+(defvar gptel-send--transitions)
 
 (defgroup gptel-yatools-agents nil
   "Child agents the model can delegate to."
@@ -353,7 +356,10 @@ read-only tool list and the same system prompt."
       (setq-local gptel-context nil)
       (setq-local gptel-use-context nil)
       (setq-local gptel-stream nil)
-      (setq-local gptel-include-reasoning nil)
+      ;; `ignore' draws the reasoning in the transcript but keeps it out of
+      ;; what the child sends next: the parent gets a report, not a
+      ;; transcript of thinking, and re-sending it would pay for it twice.
+      (setq-local gptel-include-reasoning 'ignore)
       ;; A read-only tool set cannot need confirming, and a confirmation in
       ;; a hidden buffer would hang the child with nothing on screen to
       ;; answer.  The child's own buffer-local value is restored when it is
@@ -570,6 +576,45 @@ parent model guessing whether it did something wrong."
                (gptel-yatools-subagent--record-calls record)
                (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))))
 
+;;-------------------------------------------------------------------------
+;; Drawing the transcript
+;;
+;; gptel's own inserter knows how to draw all four things a turn can be: a
+;; reply, a reasoning block, a tool call, and a tool call with its result.
+;; A request that supplies a callback is telling gptel "I will draw it",
+;; and the display branches of `gptel--insert-response' are then only
+;; reached if the callback forwards to it -- which is why a child used to
+;; show its prose and nothing else.
+;;
+;; The forwarding needs one more step than it looks.  `gptel--display-tool-results'
+;; inserts each tool block by calling `(plist-get info :callback)' *itself*,
+;; with a raw string -- it assumes the callback is `gptel--insert-response'.
+;; Left alone, that nested call would land in this module's callback and be
+;; counted as a turn (and, for a tool result, could settle the child).  So
+;; the callback is pointed at `gptel--insert-response' for the duration and
+;; put back afterwards: gptel keeps this very plist and delivers every later
+;; turn through it, so restoring it is not tidiness, it is correctness.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-subagent--insert-response (record response info)
+  "Insert RESPONSE into RECORD's child buffer as gptel would draw it.
+
+RESPONSE is one of the shapes gptel's inserter understands: a reply, a
+reasoning block, or a `(tool-result . RESULTS)' turn.  INFO is the request
+plist, whose `:callback' is redirected for the duration -- see the
+commentary above -- and whose `:tracking-marker' is updated in place, so
+the next insertion continues where this one stopped."
+  (let ((buffer (gptel-yatools-subagent--record-buffer record)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t)
+              (gptel-yatools-subagent--inserting t)
+              (saved (plist-get info :callback)))
+          (unwind-protect
+              (progn
+                (plist-put info :callback #'gptel--insert-response)
+                (gptel--insert-response response info))
+            (plist-put info :callback saved)))))))
+
 (defun gptel-yatools-subagent--callback (record response info)
   "Handle RESPONSE, one event of RECORD's child request.
 
@@ -586,12 +631,7 @@ nobody here can answer."
     ((pred stringp)
      (unless (gptel-yatools-subagent--record-finished record)
        (setf (gptel-yatools-subagent--record-last-text record) response)
-       (let ((buffer (gptel-yatools-subagent--record-buffer record)))
-         (when (buffer-live-p buffer)
-           (with-current-buffer buffer
-             (let ((inhibit-read-only t)
-                   (gptel-yatools-subagent--inserting t))
-               (gptel--insert-response response info)))))
+       (gptel-yatools-subagent--insert-response record response info)
        (setf (gptel-yatools-subagent--record-turns record)
              (1+ (gptel-yatools-subagent--record-turns record)))
        ;; gptel is about to run tools for this turn, so this text is a
@@ -607,8 +647,13 @@ nobody here can answer."
      (gptel-yatools-subagent--abort record 'by-hand))
     (`(tool-call . ,calls)
      (gptel-yatools-subagent--tool-call-refusal calls))
+    (`(reasoning . ,_text)
+     (gptel-yatools-subagent--insert-response record response info))
     (`(tool-result . ,results)
      (unless (gptel-yatools-subagent--record-finished record)
+       ;; Drawn first: the block shows the call and what it returned, which
+       ;; is the only visible trace a read leaves.
+       (gptel-yatools-subagent--insert-response record response info)
        (gptel-yatools-subagent--note-call record results)
        (setf (gptel-yatools-subagent--record-turns record)
              (1+ (gptel-yatools-subagent--record-turns record)))
@@ -803,7 +848,19 @@ the boundary waits for -- or does not, when the tool is asynchronous.
                        nil #'gptel-yatools-subagent--expire job))
     (condition-case err
         (with-current-buffer buffer
-          (let* ((fsm (gptel-make-fsm))
+          (let* ((fsm (if (and (boundp 'gptel-send--handlers)
+                               (boundp 'gptel-send--transitions))
+                          ;; The table `gptel-send' uses, and for the same
+                          ;; reason: the bare `gptel-make-fsm' default has
+                          ;; no UI handlers at all.  Without it a child
+                          ;; never sets `gptel--fsm-last' -- so its status
+                          ;; indicator is not even clickable -- never
+                          ;; updates its status line, and never draws a
+                          ;; tool call.  It runs the whole request, and
+                          ;; every symptom of that is invisible progress.
+                          (gptel-make-fsm :table gptel-send--transitions
+                                          :handlers gptel-send--handlers)
+                        (gptel-make-fsm)))
                  (gptel-backend gptel-backend)
                  (gptel-model gptel-model)
                  (gptel-use-tools t)

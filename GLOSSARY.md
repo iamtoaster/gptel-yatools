@@ -374,6 +374,9 @@ with the `subagent` tool and whose answer arrives as that tool's result.
 It is a reader: `gptel-yatools-subagent-tools` offers read-only tools and
 no `subagent`, so nothing it does can be lost and it cannot recurse.  It
 sees the task and nothing else — no conversation, no attached context.
+Its buffer runs gptel's own `gptel-send` state machine, so the status
+line, the request inspector and the drawn transcript work there exactly
+as in a chat you started yourself.
 _Avoid_: Child agent, worker, assistant, helper, delegate
 
 **Child record**:

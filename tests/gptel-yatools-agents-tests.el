@@ -98,10 +98,11 @@ loop forever instead of testing anything."
 (defun gptel-yatools-agent-test--deliver (response &optional info)
   "Deliver RESPONSE to the fake child request, as gptel would.
 
-gptel hands the callback an info plist carrying at least `:buffer' and a
-`:position' marker into that buffer, and `gptel--insert-response' needs
-both -- which is also what production provides, so building it here is
-copying gptel's contract rather than papering over the module."
+gptel hands the callback an info plist carrying the buffer, a `:position'
+marker into it, the tool list the request was sent with, and a status.
+`gptel--insert-response' and `gptel--display-tool-results' read all four,
+so building them here is copying gptel's contract rather than papering
+over the module."
   (let* ((record (car gptel-yatools-subagent--records))
          (buffer (gptel-yatools-subagent--record-buffer record)))
     (funcall gptel-yatools-agent-test--callback
@@ -110,6 +111,7 @@ copying gptel's contract rather than papering over the module."
                  (list :buffer buffer
                        :position (with-current-buffer buffer
                                    (set-marker (make-marker) (point-max)))
+                       :tools (gptel-yatools-subagent--tool-specs)
                        :status "200 OK")))))
 
 ;;-------------------------------------------------------------------------
@@ -541,6 +543,106 @@ session changes what the model is told."
                      (plist-get (car (last (gptel-tool-args tool)))
                                 :description))))
         (customize-set-variable 'gptel-yatools-subagent-timeout original)))))
+
+(ert-deftest gptel-yatools-test-subagent-draws-its-tool-calls ()
+  "A child's transcript shows the tool calls it made, and what they returned.
+
+A request that supplies a callback takes over drawing, and gptel's display
+branches are then only reached if the callback forwards to them.  A child
+that did not forward showed its prose and nothing else, so the buffer
+looked like a model that announced a read and then stopped."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (child (gptel-yatools-subagent--record-buffer record))
+           (read-tool (cl-find "read_path" gptel-yatools--tools
+                               :key #'gptel-tool-name :test #'equal)))
+      (gptel-yatools-agent-test--deliver
+       "Let me check the parser."
+       (list :buffer child
+             :position (with-current-buffer child
+                         (set-marker (make-marker) (point-max)))
+             :tools (gptel-yatools-subagent--tool-specs)
+             :tool-use (list (list :name "read_path" :args '(:path "src/parser.el")))
+             :status "200 OK"))
+      (gptel-yatools-agent-test--deliver
+       (cons 'tool-result
+             (list (list read-tool '(:path "src/parser.el") "line one\nline two"))))
+      (with-current-buffer child
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "Let me check the parser" text))
+          (should (string-match-p "read_path" text))
+          (should (string-match-p "line one" text)))))))
+
+(ert-deftest gptel-yatools-test-subagent-draws-its-reasoning ()
+  "A child's transcript shows its reasoning, without resending it.
+
+`gptel-include-reasoning' is `ignore' in a child buffer: the block is
+drawn, and the next request does not pay for it again."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (child (gptel-yatools-subagent--record-buffer record)))
+      (with-current-buffer child
+        (should (eq gptel-include-reasoning 'ignore)))
+      (gptel-yatools-agent-test--deliver
+       (cons 'reasoning "The parser is probably in src/")
+       (list :buffer child
+             :position (with-current-buffer child
+                         (set-marker (make-marker) (point-max)))
+             :tools (gptel-yatools-subagent--tool-specs)
+             :include-reasoning 'ignore
+             :status "200 OK"))
+      (with-current-buffer child
+        (should (string-match-p "probably in src/"
+                                (buffer-substring-no-properties
+                                 (point-min) (point-max))))))))
+
+(ert-deftest gptel-yatools-test-subagent-uses-gptels-send-state-machine ()
+  "A child request runs gptel's `gptel-send' handlers, not the bare default.
+
+The bare `gptel-make-fsm' default has no UI handlers: it never sets
+`gptel--fsm-last' -- so the child's status indicator is not even
+clickable -- never updates the status line, and never reports a request
+error.  A child that ran on it looked finished while it was still working,
+and a failed one showed nothing at all."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (fsm (gptel-yatools-subagent--record-fsm record)))
+      (should (gptel-fsm-p fsm))
+      (should (eq (gptel-fsm-handlers fsm) gptel-send--handlers))
+      (should (eq (gptel-fsm-table fsm) gptel-send--transitions))
+      ;; And the handler that makes the indicator clickable is one of them.
+      (should (memq #'gptel--update-tool-call
+                    (alist-get 'TOOL (gptel-fsm-handlers fsm)))))))
+
+(ert-deftest gptel-yatools-test-subagent-does-not-count-displayed-blocks-as-turns ()
+  "Forwarding a tool result for display must not re-enter the callback.
+
+`gptel--display-tool-results' inserts each block by calling the request
+callback itself.  Left pointed at this module's callback, that nested call
+would arrive as a turn -- and, worse, could settle a child mid-request."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (read-tool (cl-find "read_path" gptel-yatools--tools
+                               :key #'gptel-tool-name :test #'equal))
+           (info (list :buffer (gptel-yatools-subagent--record-buffer record)
+                       :position (with-current-buffer
+                                     (gptel-yatools-subagent--record-buffer record)
+                                   (set-marker (make-marker) (point-max)))
+                       :tools (gptel-yatools-subagent--tool-specs)
+                       :callback gptel-yatools-agent-test--callback
+                       :status "200 OK")))
+      (gptel-yatools-agent-test--deliver
+       (cons 'tool-result (list (list read-tool '(:path "a.el") "one"))) info)
+      (should (= (gptel-yatools-subagent--record-turns record) 1))
+      (should (gptel-yatools-subagent--running-p record))
+      ;; The request's own callback is put back, so gptel can deliver the
+      ;; next turn through it.
+      (should (eq (plist-get info :callback)
+                  gptel-yatools-agent-test--callback)))))
 
 (ert-deftest gptel-yatools-test-subagent-label-counts-only-running ()
   "The label counts children that are still working, and says so when none are.

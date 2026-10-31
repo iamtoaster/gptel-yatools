@@ -75,12 +75,13 @@ Facts established from gptel's source and from measurement:
    struct and send the printed struct to the model, which is corrupt rather
    than merely useless.
 7. **Cancellation is provided here**, because gptel cannot: a buffer-local
-   registry of live jobs, `gptel-yatools-cancel-tool-calls` on `C-c C-k` in
-   `gptel-mode-map`, advice so that `gptel-abort` kills the jobs too, and a
-   `kill-buffer-hook` so a killed chat does not leave a command running.
-   Cancelling kills the jobs first and then moves the request to `ABRT`;
-   delivering a "cancelled" result instead would invite the model to retry,
-   turning one cancel into a loop of them.
+   registry of live jobs that every job enters through
+   `gptel-yatools--make-job-live`, `gptel-yatools-cancel-tool-calls` on
+   `C-c C-k` in `gptel-mode-map`, advice so that `gptel-abort` kills the
+   jobs too, and a `kill-buffer-hook` so a killed chat does not leave work
+   running.  Cancelling kills the jobs first and then moves the request to
+   `ABRT`; delivering a "cancelled" result instead would invite the model
+   to retry, turning one cancel into a loop of them.
 8. **Two budgets.** `gptel-yatools-timeout` (120 s) bounds a synchronous
    call, where the number is about how long the editor is unavailable.
    `gptel-yatools-async-timeout` (600 s) bounds an asynchronous one, where
@@ -90,6 +91,50 @@ Facts established from gptel's source and from measurement:
    and says so, because the envelope is capped at 64 kB anyway and a
    ten-minute budget spent on a command that loops would otherwise hold
    everything it printed.
+
+## Amendment — one registrar makes a job live
+
+The subagent is the second long-running tool, and it is not a process: its
+work is another gptel request. Item 1 says a body returns a job and the kit
+owns the rest, and items 4 and 7 promise that the deadline and the
+cancellation come with it. They did not. Becoming live — registration into
+the buffer's job registry, the kill-buffer hook, the deadline timer and the
+status-line count — was written inside `gptel-yatools--spawn-process`, so
+the subagent rebuilt each of the four beside it, kept a second
+`gptel-abort` advice of its own, and never reached the status line. The
+declared interface was false for the one tool that most needed it.
+
+The four steps were never about processes. They are what "live" means, and
+they now have a name:
+
+- live: `gptel-yatools--make-job-live` (a job in, the same job made
+  cancellable, countable, timed and attached to its buffer's kill hook).
+
+`gptel-yatools--spawn-process` calls it once the process exists, and
+`gptel-yatools-subagent--start` calls it once the child's record exists.
+The two call at different moments for one reason, and it is the invariant
+worth keeping: **a job is registered at the moment it can be stopped, and
+not before.** A process job registered before `make-process` returned
+could be cancelled while TRAMP was still opening the connection and leave
+a live process nothing tracks; a child can be stopped as soon as its
+record exists, so it registers first.
+
+Two consequences follow, and both are deletes:
+
+- The subagent's own timer, its `gptel-abort` advice and
+  `gptel-yatools--cancel-subagents-in` are gone. `C-c C-k`, `M-x
+  gptel-abort`, the deadline and killing the chat all reach a child the
+  same way they reach a command — through the registry, one cancel path.
+  What the child supplies is what stopping *it* means.
+- The reason a job is stopped is part of the interface. A signal has no
+  words, but a child request has to say in its answer what stopped it, so
+  CANCEL takes `(JOB REASON)` and the kit supplies `cancelled` or
+  `timed-out`. That replaces a second slot for the deadline: work whose
+  timeout needs its own wording writes it when it is told the reason.
+
+A job that could not be started is not registered. There is nothing to
+stop and nothing to count, and the boundary delivers its `START-ERROR`
+either way.
 
 ## Consequences
 
@@ -121,3 +166,13 @@ Facts established from gptel's source and from measurement:
   `:file-handler`, a helper drives real callbacks with a hard deadline so a
   broken implementation fails instead of hanging, and the synchronous tools
   exercise the shared machinery on every run.
+- A subagent now shows in the header line (`Running 1 subagent...`) and
+  dies with the chat that started it, which is what the README promised
+  before the code did.  `C-c C-k` and `gptel-abort` in the parent stop the
+  children it started.  A child the user has detached is no longer the
+  parent's job, so the parent does not stop it — that is the detached
+  child's definition, not an oversight.
+- A seam test now pins the registrar the way one already pins the process
+  runner: no module outside `gptel-yatools-common.el` may mention the job
+  registry or a job's timer, so "return a job" cannot quietly become
+  "return a job and register it yourself".

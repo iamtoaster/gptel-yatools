@@ -58,7 +58,7 @@ dependency declaration, and ERT is the test harness.
 
 | File | Owns | Start at |
 | --- | --- | --- |
-| `gptel-yatools-common.el` | The tool kit: `Result`, size limits, envelope, provenance rendering, deadline/call context, `gptel-yatools-define-tool`, previews, enabling tools, and the process runner both subprocess tools share. | `gptel-yatools-define-tool`, `gptel-yatools-ok`, `gptel-yatools--respond`, `gptel-yatools-page`, `gptel-yatools--run-process`, `gptel-yatools--remote-shell` |
+| `gptel-yatools-common.el` | The tool kit: `Result`, size limits, envelope, provenance rendering, deadline/call context, `gptel-yatools-define-tool`, previews, enabling tools, and the job registrar and process runner both subprocess tools share. | `gptel-yatools-define-tool`, `gptel-yatools-ok`, `gptel-yatools--respond`, `gptel-yatools-page`, `gptel-yatools--make-job-live`, `gptel-yatools--run-process`, `gptel-yatools--remote-shell` |
 | `gptel-yatools-vfs.el` | The buffer-local VFS: entries and baselines, conflict/refusal logic, pending changes, encoding, diffing, sync review UI, and the filesystem tools. | `gptel-yatools-vfs-entry`, `-pending`, `-read`, `-write`, `-edit`, `-refusal`, `-sync`; `gptel-yatools-write-diff-mode` |
 | `gptel-yatools-shell.el` | `read_workspace_root` and `execute_command`: the command's own wording and its VFS-pending warning, over the shared process runner. | `gptel-yatools-execute-command`, `gptel-yatools-shell--run-command` |
 | `gptel-yatools-skills.el` | Skill discovery, frontmatter validation, content-keyed parse cache, skill handles/resolution, the `skill` tool, attaching skills by hand, the skill browser. | `gptel-yatools-skills-resolve`, `-handle`, `-add`, `gptel-yatools-skills` |
@@ -182,7 +182,11 @@ rm -f *.elc
   runs, so it cannot stop one.  The buffer-local job registry,
   `gptel-yatools-cancel-tool-calls`, the `gptel-abort` advice and the
   kill-buffer hook are what make a running command stoppable; a new
-  long-running tool inherits all of it by returning a job.
+  long-running tool inherits all of it by returning a job and handing it to
+  `gptel-yatools--make-job-live`.  That registrar is the only place a job
+  becomes live; a module that pushes into the registry, arms its own timer
+  or adds its own abort advice has left the machinery behind, and a test
+  says so.
 - **The response seam is narrow.**  A tool module may call
   `gptel-yatools--respond` and `gptel-yatools-page`; sizing, truncation,
   escaping and the XML envelope stay in `gptel-yatools-common.el`.
@@ -307,10 +311,16 @@ rm -f *.elc
   through the parent's `gptel-tools`: a parent that never enabled
   `read_path` must not hand the model a child that cannot read.
 - **A subagent is a job, not a special case.**  It is a
-  `gptel-yatools-job` whose work is a request instead of a process, so the
-  deadline, the status line, `C-c C-k` and the exactly-once delivery rule
-  come from the kit.  A new long-running tool of any kind should conclude
-  through the same object.
+  `gptel-yatools-job` whose work is a request instead of a process, and it
+  is made live by `gptel-yatools--make-job-live`, the same registrar a
+  command uses.  So the deadline, the status line, `C-c C-k`, the
+  kill-buffer hook and the exactly-once delivery rule come from the kit,
+  and this module owns none of them: no registry, no timer, no abort
+  advice.  What it supplies is only what stopping a child means
+  (`:cancel`, which is handed `cancelled` or `timed-out`), how to read its
+  outcome (`:outcome-function`) and the sentence a timeout produces.  A
+  new long-running tool of any kind should conclude through the same
+  object.
 - **Tests are not part of the package.**  They are loaded on demand and
   must not run in a user's normal Emacs startup.
 

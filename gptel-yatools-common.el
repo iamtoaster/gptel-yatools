@@ -329,6 +329,19 @@ the shell it tried."
 ;; sentinel can both fire, and gptel counts a tool result every time its
 ;; callback runs, so a second delivery would inject the result twice and
 ;; could advance the request twice.
+;;
+;; A job becomes live in exactly one place, `gptel-yatools--make-job-live':
+;; that is what puts it in the owning buffer's registry, installs the kill
+;; hook, arms the deadline and starts the status line counting.  The
+;; registrar starts nothing -- the work is already running when it is
+;; called -- and a job is registered at the moment it can be stopped, and
+;; not before.  `gptel-yatools--spawn-process' calls it once the process
+;; exists; a module whose work is not a process, such as the subagent,
+;; calls it as soon as it has something to stop.  So a new long-running
+;; tool gets the deadline, cancellation, the status line and the
+;; kill-buffer hook by returning a job: it never re-implements
+;; registration, and nothing outside this section knows what a live job is
+;; (ADR 0005).
 ;;-------------------------------------------------------------------------
 
 (defconst gptel-yatools--job-output-limit 1000000
@@ -347,9 +360,10 @@ truncation is unaffected.")
 Not every job is a process.  `execute_command' runs one, and a subagent
 is a whole request in another buffer; what they share is everything the
 boundary does with them -- the deadline, the status line, cancellation,
-and the rule that the answer is delivered exactly once.  The three
-function slots are where the difference lives, and a job that leaves them
-nil is a process job.
+and the rule that the answer is delivered exactly once.  The function
+slots are where the difference lives: a job that leaves them nil is a
+process job, and every job, either kind, is made live by
+`gptel-yatools--make-job-live'.
 
 KIND       a symbol naming the work in the status line: `command' for a
            process, `subagent' for a child request.  Anything else is
@@ -379,8 +393,13 @@ DATA       whatever the job's own functions need: for a subagent, the
            record whose state is what the outcome describes.
 OUTCOME-FUNCTION a function of JOB returning the outcome plist, for work
            that is not a process.  Nil means read a process's.
-CANCEL     a function of JOB stopping the work without concluding it, for
-           work that is not a process.  Nil means kill the process."
+CANCEL     a function of JOB and a reason, stopping the work without
+           concluding it, for work that is not a process.  Nil means kill
+           the process.  The reason says why the work is being stopped --
+           `cancelled' when the chat is going away or the user asked,
+           `timed-out' when the deadline passed -- so work that has to
+           explain itself can, instead of the kit inventing a second
+           vocabulary beside this one."
   (process nil)
   (buffer nil)
   (output nil)
@@ -650,16 +669,53 @@ eventually reap it; this makes it immediate."
   (dolist (job (gptel-yatools--jobs-live))
     (gptel-yatools--job-abandon job)))
 
-(defun gptel-yatools--job-stop (job)
-  "Stop JOB's work, without concluding it.
+(defun gptel-yatools--make-job-live (job)
+  "Make JOB live in the buffer that owns it, and return JOB.
+
+Every job comes through here, whatever its work is.  Registering it in
+its buffer's job list is what makes it cancellable and countable;
+installing the buffer's kill hook is what stops it when the chat goes
+away; arming the deadline timer is what bounds it; and noting the change
+starts the status line ticking.  What the job's own function slots add is
+only what stopping *this* work means and how its outcome is read, so a new
+long-running tool inherits the rest by returning a job (ADR 0005).
+
+The registrar starts nothing: the caller's work is already running.  That
+is why `gptel-yatools--spawn-process' calls it after `make-process'
+returns rather than before -- `make-process' can block for seconds while
+TRAMP opens a connection, and TRAMP runs timers while it waits, so a job
+registered earlier could be cancelled while it had no process to kill.
+
+JOB must already carry its BUFFER, STARTED and DEADLINE.  A nil deadline
+arms no timer.  A job that could not be started at all is not registered
+here: nothing could stop it, and the boundary delivers its START-ERROR
+without the registry."
+  (let ((buffer (gptel-yatools-job-buffer job)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (push job gptel-yatools--jobs)
+        ;; Idempotent for an identical function: a buffer that starts a
+        ;; second job must not stack the hook.
+        (add-hook 'kill-buffer-hook #'gptel-yatools--kill-buffer-jobs nil t)
+        (gptel-yatools--jobs-note-change))))
+  (let ((deadline (gptel-yatools-job-deadline job)))
+    (when deadline
+      (setf (gptel-yatools-job-timer job)
+            (run-at-time (max 0.01 (- deadline (float-time)))
+                         nil #'gptel-yatools--job-expire job))))
+  job)
+
+(defun gptel-yatools--job-stop (job reason)
+  "Stop JOB's work, without concluding it, because of REASON.
 
 A process job is killed, with the rules `gptel-yatools--kill-process'
-states.  Anything else is stopped by the function its body supplied: a
-child request is aborted, which is the only way to stop spending tokens
-on an answer nobody will read."
+states, and REASON means nothing to it: a signal has no words.  Anything
+else is stopped by the function its body supplied, which is told the
+reason -- `cancelled' or `timed-out' -- because a child request has to say
+in its answer what stopped it."
   (let ((cancel (gptel-yatools-job-cancel job)))
     (if cancel
-        (funcall cancel job)
+        (funcall cancel job reason)
       (gptel-yatools--kill-process (gptel-yatools-job-process job)
                                    (gptel-yatools-job-remote job)))))
 
@@ -722,15 +778,21 @@ for the same reason."
   (unless (or (null job) (gptel-yatools-job-delivered job))
     (setf (gptel-yatools-job-settled job) t
           (gptel-yatools-job-delivered job) t)
-    (gptel-yatools--job-stop job)
+    (gptel-yatools--job-stop job 'cancelled)
     (gptel-yatools--job-release job)))
 
 (defun gptel-yatools--job-expire (job)
-  "Stop JOB because its deadline has passed, and conclude it as timed out."
+  "Stop JOB because its deadline has passed, and conclude it as timed out.
+
+This runs on a timer, where a signal is caught by Emacs's timer loop and
+merely logged -- so a command that could not be stopped cleanly would be
+left running with its job still counted as live.  The stop is therefore
+attempted and its failure ignored: concluding the job is what has to
+happen, and an outcome that says it timed out is the truth either way."
   (unless (or (gptel-yatools-job-delivered job)
               (gptel-yatools-job-settled job))
     (setf (gptel-yatools-job-timed-out job) t)
-    (gptel-yatools--job-stop job)
+    (ignore-errors (gptel-yatools--job-stop job 'timed-out))
     (gptel-yatools--job-settle job)))
 
 (defun gptel-yatools--job-sentinel (process _event)
@@ -826,19 +888,16 @@ job itself or leaves the boundary to."
           (setf (gptel-yatools-job-process job) process)
           (process-put process 'gptel-yatools-job job)
           (ignore-errors (process-send-eof process))
-          (push job gptel-yatools--jobs)
-          (add-hook 'kill-buffer-hook #'gptel-yatools--kill-buffer-jobs nil t)
-          (setf (gptel-yatools-job-timer job)
-                (run-at-time (max 0.01 (- (gptel-yatools-job-deadline job)
-                                          (float-time)))
-                             nil #'gptel-yatools--job-expire job))
-          (gptel-yatools--jobs-note-change)
+          ;; Registered only now, with a process to kill: see
+          ;; `gptel-yatools--make-job-live'.
+          (gptel-yatools--make-job-live job)
           job)
       (error
        (setf (gptel-yatools-job-start-error job) (error-message-string err))
        (kill-buffer output)
        (setf (gptel-yatools-job-output job) nil)
-       (push job gptel-yatools--jobs)
+       ;; Not registered: there is no work to stop, and the boundary
+       ;; delivers the start error from START-ERROR alone.
        job))))
 
 (defun gptel-yatools--await-job (job)

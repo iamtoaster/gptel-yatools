@@ -446,32 +446,76 @@ arrive."
                               (gptel-yatools-subagent--record-error record))))))
 
 (ert-deftest gptel-yatools-test-subagent-aborts-with-its-parent ()
-  "Aborting the parent aborts its children.
+  "Aborting the parent aborts every child it started, and only children.
 
-A child whose answer has nowhere to go must not keep spending tokens."
+The parent reaches its children the way it reaches a command: through the
+job registry, with no advice of the agent module's own and no second list
+of things to stop.  A child whose answer has nowhere to go must not keep
+spending tokens, and `gptel-abort' is the key the user has."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start "First")
+    (let ((first (car gptel-yatools-subagent--records)))
+      (gptel-yatools-agent-test--start "Second")
+      (let ((second (car gptel-yatools-subagent--records)))
+        (should-not (eq first second))
+        (gptel-abort (current-buffer))
+        (dolist (record (list first second))
+          (should (eq (gptel-yatools-subagent--record-state record) 'aborted))
+          (should-not (gptel-yatools-subagent--running-p record)))
+        (should-not (gptel-yatools--jobs-live))))))
+
+(ert-deftest gptel-yatools-test-subagent-joins-the-job-registry ()
+  "A child's job is live in its parent's registry, like a command's.
+
+That is what gives a child the status line, `C-c C-k', the kill-buffer
+hook and the deadline without the agent module writing any of them: the
+registrar owns them, and this asserts the module went through it."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records)))
+      (should (memq job gptel-yatools--jobs))
+      (should (memq job (gptel-yatools--jobs-live)))
+      (should (timerp (gptel-yatools-job-timer job)))
+      (should (memq #'gptel-yatools--kill-buffer-jobs kill-buffer-hook))
+      (should (eq record (gptel-yatools-job-data job)))
+      (should (string-match-p "subagent"
+                              (gptel-yatools--jobs-status-text
+                               (gptel-yatools--jobs-live)))))))
+
+(ert-deftest gptel-yatools-test-subagent-dies-with-the-chat-that-started-it ()
+  "Killing the parent abandons its children, because they are its jobs.
+
+Without this a child would keep calling the model with its answer going
+into a buffer nobody can see, and the tokens would be spent for nothing."
   (gptel-yatools-agent-test--with-parent
     (gptel-yatools-agent-test--start)
     (let ((record (car gptel-yatools-subagent--records)))
-      (gptel-yatools--cancel-subagents-in (current-buffer))
+      (should (memq #'gptel-yatools--kill-buffer-jobs kill-buffer-hook))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer (current-buffer)))
       (should (eq (gptel-yatools-subagent--record-state record) 'aborted))
       (should-not (gptel-yatools-subagent--running-p record)))))
 
 (ert-deftest gptel-yatools-test-subagent-expires-on-its-deadline ()
   "A child that outlives its deadline is stopped and reported as timed out.
 
-The message quotes the deadline rather than the call's own timeout,
-because the two differ by the margin the job subtracts."
+The child has no deadline code of its own: the job's CANCEL function is
+told `timed-out', and the record settles in the child's own words.  The
+number it quotes is the call's whole budget, with no margin subtracted --
+a subagent is always asynchronous, so no caller above it is counting down
+and its kill has no reason to land early."
   (gptel-yatools-agent-test--with-parent
     (gptel-yatools-agent-test--start)
     (let* ((record (car gptel-yatools-subagent--records))
            (job (gptel-yatools-subagent--record-job record))
            (outcome nil))
       (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
-      (gptel-yatools-subagent--expire job)
+      (gptel-yatools--job-expire job)
       (should (eq (gptel-yatools-subagent--record-state record) 'timed-out))
       (should (plist-get outcome :timed-out))
-      (should (string-match-p "timed out"
-                              (gptel-yatools-subagent--record-error record))))))
+      (should (string-match-p "timed out after 60 seconds"
+                              (gptel-yatools-subagent--record-error record)))
+      (should-not (memq job (gptel-yatools--jobs-live))))))
 
 ;;-------------------------------------------------------------------------
 ;; Taking a child over
@@ -857,9 +901,11 @@ parent's tool call waiting.  It is reported as the timeout it was."
       (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
       (cl-letf (((symbol-function 'gptel-yatools-subagent--stop-request)
                  (lambda (&rest _) (error "Tramp failed to connect"))))
-        (gptel-yatools-subagent--expire job))
+        (gptel-yatools--job-expire job))
       (should (eq (gptel-yatools-subagent--record-state record) 'timed-out))
       (should (string-match-p "timed out"
+                              (gptel-yatools-subagent--record-error record)))
+      (should (string-match-p "could not be stopped cleanly"
                               (gptel-yatools-subagent--record-error record)))
       (should outcome)
       (should-not (gptel-yatools-subagent--running-p record)))))
@@ -867,17 +913,14 @@ parent's tool call waiting.  It is reported as the timeout it was."
 (ert-deftest gptel-yatools-test-abort-advice-takes-optional-arguments ()
   "Advice on `gptel-abort' must not be narrower than `gptel-abort'.
 
-Both advices were written with a required BUFFER, and anything that
-called `gptel-abort' with fewer arguments got \"Wrong number of
+The package adds one, and a required BUFFER in it would make anything
+that called `gptel-abort' with fewer arguments get \"Wrong number of
 arguments\" from the advice instead of an abort."
-  (should (equal (func-arity #'gptel-yatools--cancel-subagents-in)
-                 '(0 . 1)))
   (should (equal (func-arity #'gptel-yatools--abort-cancels-tools)
                  '(0 . 1)))
   ;; And calling it with none uses the current buffer.
   (with-temp-buffer
-    (let ((gptel-yatools-subagent--records nil))
-      (should-not (gptel-yatools--cancel-subagents-in)))))
+    (should (= 0 (gptel-yatools--abort-cancels-tools)))))
 
 (ert-deftest gptel-yatools-test-abort-works-without-an-argument ()
   "`gptel-abort' promises a default the function itself does not provide.

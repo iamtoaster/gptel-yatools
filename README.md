@@ -118,12 +118,12 @@ last one finishes.  A model that needs one step to finish before the next
 starts has to use separate calls, and the tool's description says so.
 
 <kbd>C-c C-k</kbd> in a `gptel-mode` buffer (`M-x
-gptel-yatools-cancel-tool-calls`) kills every command that buffer started
-and stops the request.  `M-x gptel-abort` does the same, because gptel's
-own abort cannot see a tool call: it looks the request up by its network
-process, which has finished by the time a tool is running.  Rebind `C-c
-C-k` in your config if it is in your way — this package sets it in
-`gptel-mode-map`, so a later binding wins.
+gptel-yatools-cancel-tool-calls`) kills every command and subagent that
+buffer started and stops the request.  `M-x gptel-abort` does the same,
+because gptel's own abort cannot see a tool call: it looks the request up
+by its network process, which has finished by the time a tool is running.
+Rebind `C-c C-k` in your config if it is in your way — this package sets it
+in `gptel-mode-map`, so a later binding wins.
 
 `execute_command` and `subagent` are the asynchronous tools.  Everything
 else answers from memory or from a quick disk read, and waiting for it is

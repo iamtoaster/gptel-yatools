@@ -697,6 +697,79 @@ the only way to fail the start itself is for the shell to be missing."
       ;; sentence to print rather than an empty buffer.
       (should-not (string-empty-p (plist-get outcome :output))))))
 
+(ert-deftest gptel-yatools-test-start-job-makes-any-job-live ()
+  "The registrar is the one place a job becomes live, whatever its work.
+
+Registration is what makes a job cancellable, countable and bounded, so a
+job that skipped it would look running and be unreachable.  A job with no
+process and no CANCEL of its own is enough to prove the registrar does not
+care what the work is -- which is the whole point: a tool that is not a
+process returns a job and inherits the rest."
+  (with-temp-buffer
+    (let ((gptel-yatools--jobs nil)
+          (kill-buffer-hook nil)
+          (job (gptel-yatools--make-job
+                :buffer (current-buffer)
+                :started (float-time)
+                :deadline (+ (float-time) 60))))
+      (should-not (memq job gptel-yatools--jobs))
+      (gptel-yatools--make-job-live job)
+      (should (memq job gptel-yatools--jobs))
+      (should (memq #'gptel-yatools--kill-buffer-jobs kill-buffer-hook))
+      (should (timerp (gptel-yatools-job-timer job)))
+      ;; Arming is idempotent in the sense that matters: one job, one
+      ;; ticker, however many jobs the buffer starts.
+      (let ((second (gptel-yatools--make-job
+                     :buffer (current-buffer)
+                     :started (float-time)
+                     :deadline (+ (float-time) 60))))
+        (gptel-yatools--make-job-live second)
+        (should (= 1 (length (cl-remove-if-not
+                              (lambda (f)
+                                (eq f #'gptel-yatools--kill-buffer-jobs))
+                              kill-buffer-hook))))
+        (gptel-yatools--job-abandon second)
+        (should-not (memq second gptel-yatools--jobs)))
+      (gptel-yatools--job-abandon job)
+      (should-not (memq job gptel-yatools--jobs))
+      (should-not (gptel-yatools-job-timer job)))))
+
+(ert-deftest gptel-yatools-test-a-failed-start-is-not-registered ()
+  "A job whose work could not start is returned, not registered.
+
+There is nothing to stop and nothing to count: the boundary reads
+START-ERROR and delivers it, and the registry stays an inventory of work
+that is actually running."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (let* ((shell-file-name "/nonexistent/sh")
+             (job (gptel-yatools--spawn-process (list "true")))
+             (outcome (gptel-yatools--await-job job)))
+        (should (gptel-yatools-job-start-error job))
+        (should (eq (plist-get outcome :status) 'start-error))
+        (should-not (memq job gptel-yatools--jobs))
+        (should-not (gptel-yatools--jobs-live))))))
+
+(ert-deftest gptel-yatools-test-cancel-carries-a-reason ()
+  "Stopping a job tells its own function why, in the kit's two words.
+
+A command's cancel is a signal, and a signal has no words.  Work that is
+not a process has to explain itself to whoever waited for it, so the
+reason is part of the interface rather than something each module guesses
+from a flag."
+  (with-temp-buffer
+    (let* ((reasons nil)
+           (job (gptel-yatools--make-job
+                 :buffer (current-buffer)
+                 :started (float-time)
+                 :cancel (lambda (_job reason) (push reason reasons)))))
+      (gptel-yatools--job-stop job 'timed-out)
+      (should (equal reasons '(timed-out)))
+      (gptel-yatools--make-job-live job)
+      (gptel-yatools--job-abandon job)
+      (should (equal reasons '(cancelled timed-out)))
+      (should-not (memq job gptel-yatools--jobs)))))
+
 (ert-deftest gptel-yatools-test-run-process-honours-the-directory ()
   "The directory the caller names is where the process runs."
   (gptel-yatools-test--in-dir
@@ -1343,6 +1416,37 @@ A module that calls `make-process' itself has reached past that seam."
             (goto-char (point-min))
             (while (re-search-forward
                     "\\(make-process\\|accept-process-output\\|process-live-p\\|signal-process\\)"
+                    nil t)
+              (push (format "%s:%d"
+                            file
+                            (line-number-at-pos (match-beginning 0)))
+                    offenders))))))
+    (should (null offenders))))
+
+(ert-deftest gptel-yatools-test-only-the-registrar-registers-a-job ()
+  "No module may put a job in the registry, or time it, by itself.
+
+Becoming live is one act -- registered, hooked, timed and counted -- and
+`gptel-yatools--make-job-live' is the only place that knows what it
+consists of.  A module that pushes into the registry itself gets a job the
+status line counts but `C-c C-k' cannot reach, or the reverse, which is
+exactly the bug this seam exists to make impossible.  The registrar lives
+in `gptel-yatools-common.el', so that is the only file allowed to mention
+the registry, a job's timer or the kill hook at all."
+  (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
+                                        "")))
+         (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
+                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
+         (offenders nil))
+    (dolist (file files)
+      (let ((path (expand-file-name file root)))
+        (when (file-readable-p path)
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (while (re-search-forward
+                    "\\(gptel-yatools--jobs\\|gptel-yatools-job-timer\\)"
                     nil t)
               (push (format "%s:%d"
                             file

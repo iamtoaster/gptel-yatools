@@ -27,9 +27,12 @@
 ;;
 ;; The parent's tool call is a job, the same object `execute_command' hands
 ;; the boundary: the deadline, the header-line count, `C-c C-k' and the
-;; exactly-once rule all come from the kit rather than from here.  That is
-;; what `gptel-yatools-common.el' was generalized for -- see
-;; `gptel-yatools--job-stop' and friends.
+;; exactly-once rule all come from the kit rather than from here.  It is
+;; made live by `gptel-yatools--make-job-live', the same registrar a
+;; process job uses, so this module owns no registry, no deadline timer,
+;; no kill-buffer hook on the parent and no abort advice of its own -- only
+;; what stopping a child means (`:cancel'), how its outcome is read
+;; (`:outcome-function') and what to say when the deadline stops it.
 ;;
 ;; Three things are worth knowing before changing this file.
 ;;
@@ -642,24 +645,54 @@ boundary, which may not have attached its conclusion yet."
       (gptel-yatools--job-settle job))))
 
 (defun gptel-yatools-subagent--abort (record cause)
-  "Stop RECORD's child because of CAUSE, and settle it as aborted.
+  "Stop RECORD's child because of CAUSE, and settle it.
 
-CAUSE is `by-hand', `buffer-killed' or `parent-cancelled', and it is named
-in the sentence the parent reads, because \"aborted\" alone leaves the
-parent model guessing whether it did something wrong."
+CAUSE comes from two places and is named in the sentence the parent reads,
+because \"aborted\" alone leaves the parent model guessing whether it did
+something wrong.  From the child's own buffer come `by-hand' (`C-c C-k'
+there) and `buffer-killed'; from the job's CANCEL function come the kit's
+two reasons, `cancelled' (the chat is going away, or the user cancelled the
+call) and `timed-out' (the deadline passed).  A timeout is settled as
+`timed-out' rather than as an abort, and says how long the child had.
+
+A failure while stopping the request does not stop the child being
+settled: the timing-out path reaches here from a timer, where a signal is
+only logged, and a child left running with nothing watching it is worse
+than an answer that says the host had gone."
   (when (gptel-yatools-subagent--running-p record)
     ;; First, so that gptel's own state machine stops asking the model for
     ;; more: the abort looks the request up harmlessly if it cannot.
-    (gptel-yatools-subagent--stop-request record)
-    (gptel-yatools-subagent--settle
-     record 'aborted
-     (format "Error: the subagent was %s before it finished, after %d tool call%s. Its partial output is not an answer."
-             (pcase cause
-               ('buffer-killed "killed")
-               ('parent-cancelled "cancelled with its parent request")
-               (_ "aborted"))
-             (gptel-yatools-subagent--record-calls record)
-             (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s")))))
+    (let ((stop-error nil))
+      (condition-case err
+          (gptel-yatools-subagent--stop-request record)
+        (quit nil)
+        (error (setq stop-error err)))
+      (pcase cause
+        ('timed-out
+         (let ((job (gptel-yatools-subagent--record-job record)))
+           (gptel-yatools-subagent--settle
+            record 'timed-out
+            (format "Error: the subagent timed out after %d seconds and was stopped, after %d tool call%s.%s"
+                    (if job
+                        (round (- (gptel-yatools-job-deadline job)
+                                  (gptel-yatools-job-started job)))
+                      0)
+                    (gptel-yatools-subagent--record-calls record)
+                    (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s")
+                    (if stop-error
+                        (format " It could not be stopped cleanly: %s"
+                                (error-message-string stop-error))
+                      "")))))
+        (_
+         (gptel-yatools-subagent--settle
+          record 'aborted
+          (format "Error: the subagent was %s before it finished, after %d tool call%s. Its partial output is not an answer."
+                  (pcase cause
+                    ('buffer-killed "killed")
+                    ('cancelled "cancelled with its parent request")
+                    (_ "aborted"))
+                  (gptel-yatools-subagent--record-calls record)
+                  (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))))))
 
 ;;-------------------------------------------------------------------------
 ;; Drawing the transcript
@@ -917,7 +950,7 @@ sentinel.  See `gptel-yatools-subagent--path-recorded-p'."
      (or (plist-get outcome :output) ""))))
 
 ;;-------------------------------------------------------------------------
-;; The deadline
+;; Stopping one
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-subagent--stop-request (record)
   "Move RECORD's child request to gptel's abort state, tolerating anything.
@@ -931,39 +964,12 @@ not stop the record from being settled."
       (with-current-buffer buffer
         (ignore-errors (gptel--fsm-transition fsm 'ABRT))))))
 
-(defun gptel-yatools-subagent--expire (job)
-  "Stop JOB's child because its deadline has passed.
-
-This runs on a timer, where a signal is caught by Emacs's timer loop and
-merely logged -- so the child would be left running, holding its buffer
-read-only, with the parent's tool call waiting.  Anything that goes wrong
-while stopping it still settles the child: a host that has gone away is
-reported as the timeout it was, not as silence."
-  (let ((record (gptel-yatools-job-data job)))
-    (when (gptel-yatools-subagent--running-p record)
-      (condition-case err
-          (progn
-            (gptel-yatools-subagent--stop-request record)
-            (gptel-yatools-subagent--settle
-             record 'timed-out
-             (format "Error: the subagent timed out after %d seconds and was stopped, after %d tool call%s."
-                     (round (- (gptel-yatools-job-deadline job)
-                               (gptel-yatools-job-started job)))
-                     (gptel-yatools-subagent--record-calls record)
-                     (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))
-        (quit
-         ;; `condition-case' does not treat a quit as an error, and a
-         ;; `C-g' during a deadline is normal: the user is stopping
-         ;; something.  The child is settled all the same.
-         (gptel-yatools-subagent--settle
-          record 'timed-out
-          "Error: the subagent timed out and was interrupted while being stopped."))
-        (error
-         (gptel-yatools-subagent--settle
-          record 'timed-out
-          (format "Error: the subagent timed out and could not be stopped cleanly: %s"
-                  (error-message-string err))))))
-    (ignore-errors (gptel-yatools--job-settle job))))
+;; A child's deadline needs no function of its own: the job's CANCEL is
+;; called with `timed-out' and settles the record in the child's own words,
+;; so the kit's timer, the kit's deadline sentence and the child's timeout
+;; message are one path.  The budget it quotes is the call's whole TIMEOUT,
+;; with no margin subtracted -- a subagent is always `:async t', so nothing
+;; above it is counting down and no kill has to land early.
 
 ;;-------------------------------------------------------------------------
 ;; Starting one
@@ -995,16 +1001,20 @@ the boundary waits for -- or does not, when the tool is asynchronous.
                :description (format "subagent %d" (gptel-yatools-subagent--record-id record))
                :data record
                :outcome-function #'gptel-yatools-subagent--outcome
-               :cancel (lambda (j)
+               :cancel (lambda (j reason)
                          (gptel-yatools-subagent--abort
-                          (gptel-yatools-job-data j) 'parent-cancelled))
+                          (gptel-yatools-job-data j) reason))
                :result (lambda (outcome)
                          (gptel-yatools-subagent--result record outcome)))))
     (setf (gptel-yatools-subagent--record-job record) job)
     (push record gptel-yatools-subagent--records)
-    (setf (gptel-yatools-job-timer job)
-          (run-at-time (max 0.01 (- deadline (float-time)))
-                       nil #'gptel-yatools-subagent--expire job))
+    ;; The same registrar every process job uses: from here the child is in
+    ;; its parent's job registry, has a deadline timer, dies with the parent
+    ;; buffer, and is counted in the status line.  Nothing about that
+    ;; belongs to this module.  Its request is not issued yet, but that is
+    ;; not what registration waits for -- a child can be stopped from the
+    ;; moment its record exists.
+    (gptel-yatools--make-job-live job)
     (condition-case err
         (with-current-buffer buffer
           (let* ((fsm (if (and (boundp 'gptel-send--handlers)
@@ -1053,26 +1063,14 @@ the boundary waits for -- or does not, when the tool is asynchronous.
 
 ;;-------------------------------------------------------------------------
 ;; Aborting the children of an aborted request
+;;
+;; Nothing here.  A child is a job in its parent's registry, so the
+;; package's one `gptel-abort' advice (`gptel-yatools--abort-cancels-tools',
+;; in gptel-yatools.el) reaches it through `gptel-yatools--cancel-jobs',
+;; which calls the job's CANCEL function with the reason `cancelled'.
+;; `C-c C-k' in the parent, `M-x gptel-abort' there, and killing the parent
+;; buffer all arrive the same way: one registry, one cancel path.
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools--cancel-subagents-in (&optional buffer)
-  "Abort every child BUFFER started, because BUFFER's request is stopping.
-
-BUFFER defaults to the current buffer.  It is optional because this is
-advice on `gptel-abort', and an advice whose arity is narrower than the
-function it guards turns a working abort into
-\"Wrong number of arguments\" the moment anything calls it with fewer.
-
-A child whose answer has nowhere to go must not keep spending tokens, and
-`gptel-yatools--cancel-jobs' reaches them through the job registry already
--- this exists so that `gptel-abort' does too, whatever order the two run
-in."
-  (let ((buffer (or buffer (current-buffer))))
-    (when (buffer-live-p buffer)
-      (dolist (record (gptel-yatools-subagent--records-for buffer))
-        (gptel-yatools-subagent--abort record 'parent-cancelled)))))
-
-(unless (advice-member-p #'gptel-yatools--cancel-subagents-in 'gptel-abort)
-  (advice-add 'gptel-abort :before #'gptel-yatools--cancel-subagents-in))
 
 ;;-------------------------------------------------------------------------
 ;; The indicator

@@ -129,7 +129,21 @@ plist returning the Result to report.  A body that has real work to wait
 for returns a job instead of a Result; the boundary decides whether to
 wait for it or hand it to gptel's callback.  A job concludes exactly
 once, because gptel counts a tool result every time the callback runs.
+A job does nothing until it is made live by the job registrar.
 _Avoid_: Task, future, promise, handle
+
+**Job registrar**:
+The one place that makes a job live: `gptel-yatools--make-job-live` puts
+it in its buffer's job registry, installs that buffer's kill hook, arms
+its deadline timer and starts the status line counting it.  Everything a
+running job has in common comes from here, so a tool whose work is not a
+process -- a subagent, whose work is a request -- inherits the same
+cancellation, deadline and status by handing its job to the registrar,
+instead of setting up the four steps of its own.  The job's own function
+slots say only what stopping *its* work means and how its outcome is read.
+A job is registered at the moment it can be stopped, and not before.
+_Avoid_: Job setup, job factory (it does not make the job; it makes it
+live), registration point
 
 **Asynchronous tool**:
 A tool whose `:async` key is set, so gptel calls its boundary with a
@@ -146,7 +160,9 @@ abort state.  It exists because nothing else can do it: `gptel-abort`
 finds a request by its network process, which has finished by the time a
 tool is running, and `C-g` has no stack to interrupt once the call has
 returned.  It kills first and aborts second — delivering a "cancelled"
-result instead would invite the model to retry.
+result instead would invite the model to retry.  A subagent is one of
+those jobs, in its parent's registry, so `C-c C-k` there stops the
+children the buffer started as well as the commands.
 _Avoid_: Abort (that is gptel's, and it cannot see a tool call), stop,
 interrupt
 

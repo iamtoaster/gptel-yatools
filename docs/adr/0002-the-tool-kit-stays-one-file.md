@@ -88,6 +88,17 @@ executables), it can earn a file then. Until it does, a file boundary would
 again be a boundary between two halves of one idea — `common.el` loads
 before either tool module, and the `require` edge would run the wrong way.
 
+**The prompt has since been met, and answered here rather than by
+splitting.** The tool kit now owns live state: a buffer-local registry of
+jobs (`gptel-yatools--jobs`), the per-buffer timer that repaints the status
+line, and the cache of remote shell names. The decision is still one file —
+what those things belong to is *a job*, and a job is the kit's idea from
+its first line to its last; a file boundary would put the registrar on one
+side and the object it registers on the other. What the amendment does
+change is where the state may live: a tool module may not keep its own
+registry, timer or kill hook beside this one, and a test enforces it. See
+ADR 0005's amendment for the registrar that makes that possible.
+
 One consequence for the seam test: `--run-process` is a stated interface, so
 it is exempt from the "no tool module reaches past respond" list, exactly as
 `gptel-yatools-page` is.

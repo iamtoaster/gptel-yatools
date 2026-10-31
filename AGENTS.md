@@ -288,7 +288,11 @@ rm -f *.elc
   timer-driven path here — a job's deadline, a subagent's expiration, a
   deferred tool call — settles what it owns even when stopping the work
   itself fails, and reports the failure as the outcome it was, not as
-  silence.
+  silence.  The same holds one level in for delivery: a job's conclusion
+  runs from a sentinel after the job has been delisted, so
+  `gptel-yatools--job-conclusion` turns a RESULT function that signals
+  into the failure envelope.  A conclusion that cannot be rendered is
+  still a conclusion.
 - **`quit` is not an `error`.**  `condition-case` does not catch `quit`
   under an `error` handler, so a `C-g` during a deferred tool call or a
   child's callback escaped every handler and left the state machine in

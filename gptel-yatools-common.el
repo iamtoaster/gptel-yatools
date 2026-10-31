@@ -1752,6 +1752,34 @@ re-appended on every reload to stay in step with this one."
                   ""))
         :optional t))
 
+(defun gptel-yatools--timeout-envelope (&optional seconds name)
+  "Return the envelope for a call that outlived its deadline.
+
+SECONDS and NAME are what the model is told: how long the call had, and
+which tool ran out of time.  Both are optional because a conclusion built
+from a sentinel knows the call's budget but not always its name, and a
+sentence with a gap is worse than one without the clause.
+
+This and `gptel-yatools--failure-envelope' are the only two places a
+failure is turned into something a model reads.  Three entry points used
+to build the same two envelopes each, in the same words, so a change to
+either sentence had to be made in five places and the fifth was always
+the one that got forgotten."
+  (gptel-yatools--envelope
+   :disk "Tool call timed out."
+   (gptel-yatools--timeout-message seconds name)))
+
+(defun gptel-yatools--failure-envelope (err)
+  "Return the envelope for a call that reported ERR.
+
+ERR is the `condition-case' value, `(SYMBOL . DATA)'.  `quit' arrives
+here too: it is not an `error', so a handler written for errors alone
+lets it through, and from a sentinel or a timer nothing above catches it
+-- which is the same silence as a crash, with the request still waiting."
+  (gptel-yatools--envelope
+   :disk "The tool reported an error."
+   (format "Error: %s" (gptel-yatools--error-text err))))
+
 (define-error 'gptel-yatools-timeout-error
   "Tool call did not finish within its timeout")
 
@@ -2120,14 +2148,10 @@ debug: `condition-case-unless-debug' leaves the signal alone while
              ;; That is a definition bug, and it is said so.
              (error "Error: internal error: the %s tool returned a job but is not declared :async. Nothing was changed." name)))))
       (gptel-yatools-timeout-error
-       (gptel-yatools--envelope
-        :disk "Tool call timed out."
-        (gptel-yatools--timeout-message (plist-get (cdr err) :seconds)
-                                        (or (plist-get (cdr err) :tool) name))))
+       (gptel-yatools--timeout-envelope (plist-get (cdr err) :seconds)
+                                        (or (plist-get (cdr err) :tool) name)))
       (error
-       (gptel-yatools--envelope
-        :disk "The tool reported an error."
-        (format "Error: %s" (gptel-yatools--error-text err)))))))
+       (gptel-yatools--failure-envelope err)))))
 
 (defun gptel-yatools--start-async (name function callback args arg-specs &optional default)
   "Run FUNCTION for an asynchronous tool call and deliver its envelope.
@@ -2161,17 +2185,41 @@ every time it runs."
              (when (buffer-live-p owner)
                (with-current-buffer owner
                  (let ((gptel-yatools--call call))
+                   ;; `--job-conclusion' is what keeps a failure to render
+                   ;; from becoming a callback that is never called.
                    (funcall callback
-                            (if (gptel-yatools--job-timed-out-p value outcome)
-                                (gptel-yatools--envelope
-                                 :disk "Tool call timed out."
-                                 (gptel-yatools--timeout-message timeout name))
-                              (gptel-yatools--respond
-                               (gptel-yatools--job-report value outcome)))))))))
+                            (gptel-yatools--job-conclusion
+                             value outcome timeout name)))))))
           ;; The answer is coming: there is nothing to return.
           nil)
       (funcall callback (gptel-yatools--respond value))
       nil)))
+
+(defun gptel-yatools--job-conclusion (job outcome &optional timeout name)
+  "Return the envelope that reports JOB's OUTCOME, or one saying it failed.
+
+Rendering a conclusion runs the body's own RESULT function over the
+outcome plist, and either can be wrong in a way nobody planned for: a
+record read off a nil slot, a formatter tripping over output it did not
+expect.  This is the last point at which the answer can still be
+delivered -- by the time it runs the job is marked delivered and has left
+its buffer's registry, so there is nothing left to retry -- and it often
+runs from a process sentinel, where a signal is logged and nothing else.
+Silence there is a tool call that never reports, and gptel waits for ever
+for a callback that is never going to come.
+
+So a failure to render is reported as the tool failing.  That is true,
+and it is an answer.
+
+TIMEOUT and NAME are the call's budget and tool name, for the sentence
+used when the deadline is what ended the work; a job whose body said how
+to read its own timeout is rendered by that body instead."
+  (condition-case err
+      (if (gptel-yatools--job-timed-out-p job outcome)
+          (gptel-yatools--timeout-envelope timeout name)
+        (gptel-yatools--respond (gptel-yatools--job-report job outcome)))
+    (quit (gptel-yatools--failure-envelope '(quit)))
+    (error (gptel-yatools--failure-envelope err))))
 
 (defun gptel-yatools--job-report (job outcome)
   "Return JOB's Result, read from OUTCOME by the function its body gave."
@@ -2212,17 +2260,12 @@ would leave gptel waiting for a callback that is never going to come."
         (gptel-yatools--start-async name function first args arg-specs default)
       (gptel-yatools-timeout-error
        (funcall first
-                (gptel-yatools--envelope
-                 :disk "Tool call timed out."
-                 (gptel-yatools--timeout-message
-                  (plist-get (cdr err) :seconds)
-                  (or (plist-get (cdr err) :tool) name))))
+                (gptel-yatools--timeout-envelope
+                 (plist-get (cdr err) :seconds)
+                 (or (plist-get (cdr err) :tool) name)))
        nil)
       (error
-       (funcall first
-                (gptel-yatools--envelope
-                 :disk "The tool reported an error."
-                 (format "Error: %s" (gptel-yatools--error-text err))))
+       (funcall first (gptel-yatools--failure-envelope err))
        nil))))
 
 (defun gptel-yatools-page (text offset lines &optional reserve)

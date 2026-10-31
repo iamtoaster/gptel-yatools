@@ -136,6 +136,40 @@ A job that could not be started is not registered. There is nothing to
 stop and nothing to count, and the boundary delivers its `START-ERROR`
 either way.
 
+## Amendment — a failure is still an answer
+
+Every failure the model reads is built in one of two shapes: the call ran
+out of time, or the call failed. Three entry points -- the synchronous
+boundary, the asynchronous start, and the asynchronous boundary's own
+error path -- each built both shapes, in the same words, five places in
+all. Two constructors now exist, `gptel-yatools--timeout-envelope` and
+`gptel-yatools--failure-envelope`, and the entry points call them. A
+change to either sentence is a change in one place, and a fourth entry
+point has nothing left to copy.
+
+Rendering a conclusion needed the same treatment for a different reason.
+A job's RESULT function runs *inside* delivery, and by then the job has
+been marked delivered and has left its buffer's registry. If that function
+signals -- a nil slot read, a formatter tripping over unexpected output --
+there is nothing left to retry and, in a sentinel, nobody to see the
+error: the callback is never called, gptel waits for a tool result that
+never comes, and the chat cannot continue. So
+`gptel-yatools--job-conclusion` renders a job's outcome and turns a
+failure to render into the failure envelope. Item 4 says a conclusion
+happens exactly once; this says it always happens at all.
+
+`quit` is caught there with the errors, for the usual reason:
+`condition-case` does not treat it as one, so a handler written for errors
+alone lets it through, and from a timer or a sentinel nothing above
+catches it either.
+
+The constructors do not merge a body's own wording with the boundary's.
+Bodies still write their own sentences, and many of them -- nine in the
+agent module alone -- reach the model as a Result body rather than as a
+signal, along a path the boundary's prefix never touches. Giving those a
+constructor of their own changes the Result contract, not this one, and is
+not done here.
+
 ## Amendment — a child's failure can be claimed
 
 A child fails for reasons that have nothing to do with its task: a dropped

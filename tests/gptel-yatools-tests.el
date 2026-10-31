@@ -1635,6 +1635,104 @@ rushing or waiting for no reason."
                  "runs in the background"
                  (plist-get sync-arg :description)))))
 
+(ert-deftest gptel-yatools-test-a-result-that-cannot-be-rendered-still-answers ()
+  "A failure inside delivery must become an answer, not a silence.
+
+Delivery marks the job delivered and drops it from the registry *before*
+the conclusion runs, and gptel advances a request only when every tool
+call has reported.  So a body whose `:result' function signals -- a
+record read that is nil, a formatter that trips over unexpected output --
+left the job recorded as delivered with nothing left to retry, the
+callback never called, and a chat that could never continue.  From a
+sentinel the error is not even visible: Emacs logs it and moves on.
+
+The conclusion is the last chance to answer, so it is where the answer is
+guaranteed."
+  (let ((answers '())
+        (job nil))
+    (gptel-yatools--call-tool-async
+     "probe"
+     (lambda ()
+       (setq job (gptel-yatools--make-job
+                  :kind 'command
+                  :buffer (current-buffer)
+                  :started (float-time)
+                  :result (lambda (_outcome) (error "the renderer broke")))))
+     (lambda (text) (push text answers))
+     nil nil nil)
+    (should job)
+    (should-not answers)
+    ;; What a sentinel does when the work finishes.  It must not signal:
+    ;; nothing above it can turn an error into a tool result.
+    (should-not (condition-case _err
+                    (progn (gptel-yatools--job-settle
+                            job (list :status 'exited :exit 0 :output "hi"))
+                           nil)
+                  (error t)))
+    (should (= 1 (length answers)))
+    (should (string-match-p "Error:" (car answers)))
+    (should (string-match-p "the renderer broke" (car answers)))
+    (gptel-yatools-test--should-be-enveloped (car answers))))
+
+(ert-deftest gptel-yatools-test-the-same-render-failure-answers-a-sync-call ()
+  "The other delivery mode must answer too, so neither can quietly rot.
+
+The asynchronous path was the one that lost the answer, because its
+conclusion runs from a sentinel after the job has left the registry.  Here
+the caller holds the stack instead: `gptel-yatools--call-tool-async' sees
+no callback, so it answers through `--call-tool', whose `condition-case'
+turns the same broken renderer into an envelope.  That guard is worth
+asserting rather than trusting -- it is the only thing standing between a
+bad `:result' and a signal, and nothing else would notice if a refactor
+moved the render outside it."
+  (let ((job (gptel-yatools--make-job
+              :kind 'command
+              :buffer (current-buffer)
+              :started (float-time)
+              :result (lambda (_outcome) (error "the renderer broke")))))
+    (let ((out (gptel-yatools--call-tool-async
+                "probe"
+                (lambda ()
+                  (gptel-yatools--job-settle
+                   job (list :status 'exited :exit 0 :output "hi"))
+                  job)
+                nil nil nil)))
+      (should (string-match-p "the renderer broke" out))
+      (should (string-match-p "Error:" out))
+      (gptel-yatools-test--should-be-enveloped out))))
+
+(ert-deftest gptel-yatools-test-a-broken-conclusion-returns-an-envelope ()
+  "The guarantee lives at the seam that runs the body's renderer.
+
+`gptel-yatools--job-conclusion' is the one place that reads a job's
+outcome into text, so it is where \"a broken renderer is still an answer\"
+has to hold for every caller, present and future, rather than being
+restated by each boundary that happens to wrap it.  Asserted directly as
+well as through the two delivery modes, because a boundary is exactly what
+would silently stop calling it."
+  (let ((job (gptel-yatools--make-job
+              :kind 'command
+              :buffer (current-buffer)
+              :started (float-time)
+              :result (lambda (_outcome) (error "the renderer broke")))))
+    (let ((out (gptel-yatools--job-conclusion
+                job (list :status 'exited :exit 0 :output "hi"))))
+      (should (string-match-p "Error:" out))
+      (should (string-match-p "the renderer broke" out))
+      (gptel-yatools-test--should-be-enveloped out)))
+  ;; A `quit' must not escape either: it is not an `error', so a handler
+  ;; written for errors alone lets it through, and from a sentinel nothing
+  ;; above catches it.
+  (let* ((quitting (gptel-yatools--make-job
+                    :kind 'command
+                    :buffer (current-buffer)
+                    :started (float-time)
+                    :result (lambda (_outcome) (signal 'quit nil))))
+         (out (gptel-yatools--job-conclusion
+               quitting (list :status 'exited :exit 0 :output "hi"))))
+    (should (stringp out))
+    (gptel-yatools-test--should-be-enveloped out)))
+
 (ert-deftest gptel-yatools-test-synchronous-tool-may-not-return-a-job ()
   "A job from a non-async tool is a definition bug, and is said so.
 

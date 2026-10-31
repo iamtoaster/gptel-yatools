@@ -46,6 +46,18 @@ VFS flag, since the output itself always describes the disk."
                  (mapconcat #'gptel-yatools--display-path changed ", "))
        "Command ran against disk. VFS has no pending changes."))))
 
+(defun gptel-yatools-shell--refusal (sentence)
+  "Return the result for a call refused before any command was started.
+
+SENTENCE is what the model is told.  The comment is deliberately not the
+command runner's: nothing ran, so nothing was read from disk and there is
+no output for a VFS warning to qualify.  Saying \"Command ran against
+disk\" here made a claim about an execution that never happened, and it
+contradicted the body it was attached to."
+  (gptel-yatools-ok sentence
+                   :provenance :disk
+                   :comment "No command was run."))
+
 ;;-------------------------------------------------------------------------
 ;; Command runner
 ;;-------------------------------------------------------------------------
@@ -148,13 +160,13 @@ workspace would then touch a file system nobody named.  See
          (elsewhere (gptel-yatools-shell--elsewhere root target-directory)))
     (cond
      (elsewhere
-      (gptel-yatools-shell--command-result elsewhere))
+      (gptel-yatools-shell--refusal elsewhere))
      ((not (file-directory-p target-directory))
-      (gptel-yatools-shell--command-result
+      (gptel-yatools-shell--refusal
        (format "Error: working directory does not exist: %s"
                shown-directory)))
      ((string-empty-p (string-trim command))
-      (gptel-yatools-shell--command-result "Error: command is empty."))
+      (gptel-yatools-shell--refusal "Error: command is empty."))
      (t
       (let ((shell (gptel-yatools-shell--shell target-directory)))
         (gptel-yatools--spawn-process

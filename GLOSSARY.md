@@ -303,6 +303,14 @@ so per file, and the write itself, which asks again because a review can
 sit open for minutes.  One answer is what makes the set the user
 approves the set that is applied.  The partition carries the reason out
 with the path, so nobody asks a second time for what it was just told.
+
+It is the one answer to the *sync* question, not to every question about
+a path, and the difference is the point: what a write refuses and a sync
+does not is about the content being handed in, what a sync refuses and a
+write cannot is about the world moving while the review is open.  A
+write that refused a conflict would make a conflicted file impossible to
+work on, and a sync that re-decided a path's control characters would be
+answering a question settled when the entry was made.
 _Avoid_: Sync blocker, check, validation
 
 **Sync report**:

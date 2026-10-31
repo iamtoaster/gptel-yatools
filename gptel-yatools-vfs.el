@@ -15,8 +15,19 @@
 ;; The table itself, its conflict detection, the header-line indicator and the
 ;; sync review UI all live here, along with the tools that drive them:
 ;; reading, writing, diffing, syncing and discarding.  What the tools share
-;; with the rest of the package -- the response envelope, path resolution, the
-;; timeout guard -- is in `gptel-yatools.el', which loads this file.
+;; with the rest of the package -- the response envelope, `define-tool', path
+;; resolution, the call context's deadline -- is in
+;; `gptel-yatools-common.el', which this file requires;
+;; `gptel-yatools.el' is the gptel glue that requires this file in turn and
+;; draws the header-line labels this module contributes.
+;;
+;; Two functions answer "may this be written?", and the split between them is
+;; deliberate enough to be worth knowing before changing either: the write
+;; refuses what is fixed about the entry it is making -- content that is not
+;; text, a control character in the path, a subtree already pending -- while
+;; `gptel-yatools-vfs-refusal' refuses what a review left open can change --
+;; the baseline, the policy, a visiting buffer, a target that became a
+;; directory.  `gptel-yatools-vfs-refusal' says why in its docstring.
 ;;
 ;; A workspace can live on another machine: every path here is an ordinary
 ;; Emacs file name, so a TRAMP name such as "/ssh:host:/repo" works as a
@@ -490,30 +501,6 @@ guessing."
                entries)
       (list :text (mapconcat #'identity (sort lines #'string-lessp) "\n")
             :pending pending))))
-
-(defun gptel-yatools-vfs--validate-insertable (full)
-  "Return nil if FULL can be written into, or a descriptive error string.
-
-Walks up FULL's directory chain.  If any ancestor exists as a
-regular file on disk or in the VFS, writing is impossible without
-deleting that file first.
-
-Both paths are shown workspace-relative, like every other message
-the tools return.  The walk -- and its stop condition, which has to
-hold for remote names too -- is `gptel-yatools-vfs--ancestors'."
-  (catch 'refusal
-    (dolist (ancestor (gptel-yatools-vfs--ancestors full))
-      (when (gptel-yatools-vfs-entry ancestor)
-        (throw 'refusal
-               (format "Error: cannot write %s: ancestor %s is a file in the VFS. Use vfs_discard to remove it first."
-                       (gptel-yatools--display-path full)
-                       (gptel-yatools--display-path ancestor))))
-      (when (file-regular-p ancestor)
-        (throw 'refusal
-               (format "Error: cannot write %s: ancestor %s is a file on disk."
-                       (gptel-yatools--display-path full)
-                       (gptel-yatools--display-path ancestor)))))
-    nil))
 
 ;;-------------------------------------------------------------------------
 ;; The VFS label for the header line
@@ -1096,13 +1083,24 @@ that is a file, a directory, a device -- or when CODING cannot represent
 CONTENT.  OVERWRITE on a file that changed on disk since the VFS captured
 it also asks the user before the baseline is refreshed."
   (let* ((full (gptel-yatools-vfs--key path))
-         (validate-error (gptel-yatools-vfs--validate-insertable full))
+         ;; The same walk the review's refusal makes, so the write and the
+         ;; sync cannot disagree about whether a target is reachable.
+         (ancestor (gptel-yatools-vfs--file-ancestor full))
          (policy-error (gptel-yatools-vfs--write-policy-refusal full))
          (target (gptel-yatools-vfs--coding full coding)))
     (cond
      ((not (stringp content))
       (error "Error: content must be a string."))
-     (validate-error (error "%s" validate-error))
+     ;; The remedy differs by where the blocking file lives, and only the
+     ;; caller of a write can act on either: a pending entry goes away with
+     ;; `vfs_discard', a file on disk does not.
+     (ancestor
+      (error "Error: cannot write %s: ancestor %s is a file %s"
+             (gptel-yatools--display-path full)
+             (gptel-yatools--display-path ancestor)
+             (if (gptel-yatools-vfs-entry ancestor)
+                 "in the VFS. Use vfs_discard to remove it first."
+               "on disk.")))
      ;; A path is shown to the user as a line of a review heading and to
      ;; the model as a line of a reply.  A newline in the name would add
      ;; lines of its own, and the review would describe a change set that
@@ -1719,7 +1717,30 @@ long as the user likes and a file can become a FIFO while they read.
 The order is the order in which the reasons matter: a conflict is
 reported as a conflict even when the file would also fail an encoding
 test, and a target that is no longer a regular file is caught before
-`write-region' blocks on it forever."
+`write-region' blocks on it forever.
+
+This is not, and must not become, the only list of checks in the module.
+`gptel-yatools-vfs-write' asks its own question and refuses things this
+function does not -- content that is not a string, a path holding a
+control character, a target with pending entries stored under it -- and
+the reason is not that one of the two is incomplete.  A check belongs to
+whichever of the two can still be wrong when it runs:
+
+- The write's checks are about the content being handed in, and they are
+  settled at the moment the entry is made: a control character in a path
+  and a subtree of pending files cannot change while the review sits
+  open, so asking again at sync time would be dead code dressed as
+  defence.
+- This function's checks are about the world moving on -- the baseline,
+  the policy, a visiting buffer, a file that became a directory or a FIFO
+  -- which is exactly why it is asked again immediately before writing.
+
+The one check both could claim, \"is the target a regular file\", is
+asked here and not there, because the target can change kind between the
+write and the sync and cannot change kind during the write.  Consolidate
+the two lists and one of them starts refusing something it should let
+through: a write that refused a conflict would make a conflicted file
+impossible to edit, which is the whole point of holding a baseline."
   (let ((entry-coding (gptel-yatools-vfs--entry-coding full))
         (content (or (plist-get (gptel-yatools-vfs-entry full) :content) ""))
         (existing (get-file-buffer full))
@@ -1740,9 +1761,18 @@ test, and a target that is no longer a regular file is caught before
              (list :kind :blocked
                    :reason (format "ancestor %s is a file, not a directory"
                                    (gptel-yatools--display-path ancestor))))))
-     ((and (file-exists-p full) (not (file-regular-p full)))
-      (list :kind :blocked
-            :reason "target is no longer a regular file (device, FIFO or socket)"))
+     ((let ((exists (file-exists-p full)))
+        ;; `file-regular-p' is false for a directory and for a FIFO alike,
+        ;; so the kind is asked for once more before it is named: the
+        ;; reason is the only description of what to fix, and telling
+        ;; somebody to expect a device where a directory now sits sends
+        ;; them looking for the wrong thing.
+        (and exists
+             (not (file-regular-p full))
+             (list :kind :blocked
+                   :reason (if (file-directory-p full)
+                               "target is a directory now"
+                             "target is no longer a regular file (device, FIFO or socket)")))))
      ((and existing (buffer-modified-p existing))
       (list :kind :blocked
             :reason (format "buffer %s has unsaved changes"
@@ -1758,9 +1788,9 @@ test, and a target that is no longer a regular file is caught before
   "Return FULL's ancestor directories, nearest first, top-most last.
 
 Every structural check about a path's parents asks this, so the walk is
-written once: `--file-ancestor' asks which ancestor is a file and
-`--validate-insertable' asks the same question to word a refusal, and
-they used to be two hand-rolled loops that disagreed about when to stop.
+written once: `gptel-yatools-vfs--file-ancestor' is the one question both
+the write and the review ask, and the two hand-rolled loops that used to
+disagree about when to stop are gone.
 
 The stop test is \"the name stopped getting shorter\", not \"we reached
 /\".  A remote (TRAMP) name's top-most directory is \"/ssh:host:/\",

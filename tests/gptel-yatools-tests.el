@@ -378,6 +378,72 @@ default, so a buffer with a buffer-local value keeps it."
 
 ;;;; 46. Messages mixed absolute and workspace-relative paths
 
+(ert-deftest gptel-yatools-test-write-description-names-what-it-refuses ()
+  "The model must be told about the refusals it can meet, before it meets one.
+
+`write_file`'s description is prose written once rather than generated from
+the checks, which keeps it readable and leaves it able to drift.  This is
+the drift alarm: every refusal that a caller can trigger by choosing a path
+or content has a phrase in the description, so a check added without saying
+so fails here instead of surprising a model that had no way to know.
+
+The `write_file` description is the only place the model is told; the
+review's own reasons are shown to the user, who is already looking at the
+paths."
+  (let ((description (gptel-tool-description
+                      (gptel-yatools-test--tool-spec "write_file"))))
+    (dolist (phrase '("ancestor"
+                      "directory"
+                      "control character"
+                      "write policy"
+                      "encoding"))
+      (should (string-match-p (regexp-quote phrase) description)))))
+
+(ert-deftest gptel-yatools-test-a-refused-command-does-not-claim-to-have-run ()
+  "A call refused before anything started must not report on a command.
+
+The runner built the same comment for every branch, refusals included, so
+an empty command -- and a DIRECTORY that does not exist -- came back
+saying \"Command ran against disk. VFS has no pending changes.\": a claim
+that a command ran, on a machine nobody asked, for a call that never
+reached a process.  The comment is the model's context for the body, and
+the body says the opposite."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((empty (funcall (gptel-yatools-test--tool "execute_command") ""))
+              (missing (funcall (gptel-yatools-test--tool "execute_command")
+                                "true" "no/such")))
+          (dolist (out (list empty missing))
+            (should-not (string-match-p "Command ran against disk" out))
+            (should (string-match-p "No command was run" out))))))))
+
+(ert-deftest gptel-yatools-test-write-names-the-file-in-its-way ()
+  "A write must say which ancestor blocks it, and where that ancestor is.
+
+An ancestor that is a file makes the target unwritable without deleting it
+first, and the two cases need different remedies: a pending entry goes
+away with `vfs_discard', a file on disk does not.  Both are reported
+through the write itself, and the same question is asked again by
+`gptel-yatools-vfs-refusal' before anything is synced."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (funcall (gptel-yatools-test--tool "write_file") "p" "x\n")
+        (let ((pending-ancestor
+               (funcall (gptel-yatools-test--tool "write_file") "p/child" "y\n")))
+          (should (string-match-p
+                   "cannot write p/child: ancestor p is a file in the VFS"
+                   pending-ancestor))
+          (should (string-match-p "vfs_discard" pending-ancestor)))
+        (gptel-yatools-test--write (gptel-yatools-test--root-file "q") "x\n")
+        (let ((disk-ancestor
+               (funcall (gptel-yatools-test--tool "write_file") "q/child" "y\n")))
+          (should (string-match-p
+                   "cannot write q/child: ancestor q is a file on disk"
+                   disk-ancestor))
+          (should-not (string-match-p "vfs_discard" disk-ancestor)))))))
+
 (ert-deftest gptel-yatools-test-tool-messages-use-relative-paths ()
   "Paths in tool messages must be relative to the workspace root."
   (gptel-yatools-test--in-dir

@@ -210,7 +210,15 @@ rm -f *.elc
   actually has (ADR 0001).
 - **One refusal answer.**  `gptel-yatools-vfs-refusal` decides conflicts and
   blocks for the review partition, the diff header and the actual write, so
-  the files the user approved are the files that get written.
+  the files the user approved are the files that get written.  It is the one
+  answer to the *sync* question and not to every question about a path: the
+  write refuses what is fixed when the entry is made (content that is not
+  text, a control character in the path, a subtree already pending), and the
+  sync refuses what a review left open can change (the baseline, the policy,
+  a visiting buffer, a target that became a directory).  A write must still
+  accept a conflicted path, or a conflict could never be worked on.  Before
+  adding a check to either list, ask which of the two can still be wrong
+  when it runs — see ADR 0007.
 - **One seam runs every subprocess.**  `gptel-yatools--run-process`
   (`common.el`) takes an argv and a deadline and returns a
   `:status`/`:exit`/`:output` plist; it merges stderr, closes stdin, keeps

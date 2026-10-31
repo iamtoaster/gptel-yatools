@@ -603,6 +603,28 @@ looking at."
               (should (string-match-p "unsaved changes"
                                       (plist-get refusal :reason))))))))))
 
+(ert-deftest gptel-yatools-test-refusal-names-a-directory-as-a-directory ()
+  "A pending file that became a directory must be refused as one.
+
+`file-regular-p' is false for a directory exactly as it is for a FIFO, so
+the target's kind was described with the sentence written for devices and
+sockets: the review told the user, and the model, to expect a FIFO where
+they would find the directory they had just created.  The reason is the
+only description of what to fix, so it has to name what is really there."
+  (gptel-yatools-test--in-dir
+    (let ((target (gptel-yatools-test--root-file "new-file.txt")))
+      (with-temp-buffer
+        (gptel-yatools-test--vfs
+          ;; A new file, pending, on a path that did not exist yet.
+          (gptel-yatools-vfs-put target "vfs\n")
+          ;; A directory appears in its place before the sync -- something
+          ;; the review being open for as long as the user likes allows.
+          (make-directory target)
+          (let ((refusal (gptel-yatools-vfs-refusal target)))
+            (should (eq (plist-get refusal :kind) :blocked))
+            (should (string-match-p "directory" (plist-get refusal :reason)))
+            (should-not (string-match-p "FIFO" (plist-get refusal :reason)))))))))
+
 (ert-deftest gptel-yatools-test-refusal-names-every-reason ()
   "Each way a pending file can be unwritable has its own reason.
 

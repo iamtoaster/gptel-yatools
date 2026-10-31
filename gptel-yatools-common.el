@@ -1691,11 +1691,18 @@ when it is used -- a `defcustom' the user changes during a session must
 change the description the model is given."
   )
 
+(defun gptel-yatools--timeout-default-for (name)
+  "Return the budget NAME's tool declares for itself, or nil for the shared one.
+
+Looked up by name, and read through the thunk the definition stored, so a
+`defcustom' changed during a session is the number returned rather than the
+one that was in force when the tool was defined."
+  (when-let* ((thunk (gethash name gptel-yatools--timeout-defaults)))
+    (and (functionp thunk) (funcall thunk))))
+
 (defun gptel-yatools--tool-timeout-default (tool)
   "Return TOOL's own default timeout in seconds, or nil for the shared one."
-  (when-let* ((function (gethash (gptel-tool-name tool)
-                                 gptel-yatools--timeout-defaults)))
-    (and (functionp function) (funcall function))))
+  (gptel-yatools--timeout-default-for (gptel-tool-name tool)))
 
 (defun gptel-yatools--timeout-default (&optional async)
   "Return the default number of seconds a call may run, ASYNC or not.
@@ -1794,7 +1801,7 @@ NAME, when given, is the tool that ran out of time."
           seconds))
 
 (defun gptel-yatools--refresh-timeout-arg ()
-  "Rewrite the TIMEOUT argument's description in every tool.
+  "Rewrite the TIMEOUT argument, and the docstring, in every tool.
 
 Kept separate from registration so that changing
 `gptel-yatools-timeout' or `gptel-yatools-async-timeout' during a session
@@ -1805,15 +1812,22 @@ argument must still be correct when it is enabled later.
 
 Each tool states the default that applies to it, which is why the async
 flag is read from the tool rather than assumed, and its own stated
-default takes precedence over the shared one."
+default takes precedence over the shared one.
+
+The docstring is re-rendered here too, through `function-documentation'
+(see `gptel-yatools--refresh-tool-docstring').  A docstring is a string
+baked into the `defun', so a compiled package would otherwise keep stating
+whatever the budget was when it was compiled -- and `C-h f' is exactly
+where a user goes to check the number they are about to rely on."
   (dolist (tool gptel-yatools--tools)
-    (let ((args (gptel-tool-args tool)))
+    (let* ((default (gptel-yatools--tool-timeout-default tool))
+           (args (gptel-tool-args tool)))
       (when (equal (plist-get (car (last args)) :name) "timeout")
         (setf (gptel-tool-args tool)
               (append (butlast args)
                       (list (gptel-yatools--timeout-arg
-                             (gptel-tool-async tool)
-                             (gptel-yatools--tool-timeout-default tool)))))))))
+                             (gptel-tool-async tool) default)))))
+      (gptel-yatools--refresh-tool-docstring tool))))
 
 (defun gptel-yatools--set-timeout (symbol value)
   "Set `gptel-yatools-timeout' to VALUE, updating the tool arguments."
@@ -2430,8 +2444,15 @@ confirmation the user cannot read is not a confirmation."
       (let* ((position (cl-position shown names :test #'equal))
              (value (and position (nth position values))))
         (when (equal shown "timeout")
+          ;; Resolved with the tool's own budget, not the shared one: the
+          ;; prompt is the user's only chance to notice a call that runs
+          ;; far longer than they expected, so it must name the number the
+          ;; boundary will actually allow -- the same number the tool's
+          ;; TIMEOUT argument states to the model.
           (setq value (and (gptel-yatools--preview-shows-p value)
-                           (gptel-yatools--resolve-timeout value async))))
+                           (gptel-yatools--resolve-timeout
+                            value async
+                            (gptel-yatools--timeout-default-for name)))))
         (cond
          ((null position) nil)
          ((member shown required)
@@ -2524,11 +2545,11 @@ reports it as the definition bug it is when it happens."
          ;; of the plist before the tool is built.
          (slots (gptel-yatools--plist-without slots :timeout-default))
          (slots (plist-put slots :args
-                           (append (plist-get slots :args)
-                                   (list (gptel-yatools--timeout-arg
-                                          async
-                                          (and (functionp timeout-default)
-                                               (funcall timeout-default)))))))
+                           (gptel-yatools--tool-args
+                            (plist-get slots :args)
+                            async
+                            (and (functionp timeout-default)
+                                 (funcall timeout-default)))))
          (tool (apply #'gptel-make-tool slots))
          (name (gptel-tool-name tool)))
     (if (functionp timeout-default)
@@ -2541,6 +2562,33 @@ reports it as the definition bug it is when it happens."
         (setq gptel-yatools--tools
               (append gptel-yatools--tools (list tool)))))
     tool))
+
+(defun gptel-yatools--tool-args (arg-specs async &optional default)
+  "Return the argument list the model is given for a tool.
+
+ARG-SPECS is the tool's `:args' as written in its definition; ASYNC says
+whether the tool delivers through gptel's callback; DEFAULT, when given,
+is the tool's own budget in seconds.
+
+Every tool takes exactly one TIMEOUT argument after its declared ones, and
+five readers needed that list: registration, the live refresh when a
+budget is customized, the docstring, the confirmation preview, and the
+split that separates the model's arguments from the trailing TIMEOUT.  Each
+built it itself, from the same two facts, so a change to either fact had to
+be made five times.
+
+The one consequence worth knowing is that the count of the model's own
+arguments is `(1- (length (gptel-yatools--tool-args ...)))' -- which is why
+`gptel-yatools--split-args' asks this function rather than counting the
+declaration for itself.
+
+Not folded in here: the per-argument integer coercion some bodies do.
+Those carry a default and a minimum per argument (`gptel-yatools-vfs.el`
+has one minimum of `(- gptel-yatools--output-line-limit 10)'), while the
+`:args' declaration states only whether an argument is optional.  Teaching
+the declaration two more keys to serve two call sites would move the
+knowledge rather than remove it."
+  (append arg-specs (list (gptel-yatools--timeout-arg async default))))
 
 (defun gptel-yatools--docstring-escape (text)
   "Return TEXT with the quoting a docstring needs, and none it does not.
@@ -2600,40 +2648,78 @@ then its description wrapped underneath it."
                 (or (gptel-yatools--fill-text (plist-get arg :description) 6)
                     "")))      arg-specs "\n"))))
 
-(defun gptel-yatools--tool-docstring (name category description arg-specs
-                                           &optional async)
+(defun gptel-yatools--tool-docstring (name category description arg-specs impl
+                                           &optional async default)
   "Return the docstring for a tool's boundary function.
 
 NAME is the tool's name as the model sees it, CATEGORY is its category,
-DESCRIPTION is the description the model is given, and ARG-SPECS are the
-declared arguments; the TIMEOUT argument every tool takes is added, with
-the default ASYNC calls quote.
+DESCRIPTION is the description the model is given, ARG-SPECS are the
+declared arguments, IMPL is the symbol the body lives in, and ASYNC and
+DEFAULT are what the TIMEOUT argument states.
 
-The description is the same text the model reads, so `C-h f' answers what
-this function is for with the words the tool was written in, and cannot
-drift from them: both come from one definition."
+The opening paragraph is about the function the reader asked about: which
+tool it is, which implementation holds the body, and that the text below is
+the model's, not a description of this function.  It goes first because
+`C-h f' is a question about a Lisp function, and opening with a paragraph
+about the model's view of it answered a question nobody had asked yet.
+
+The description follows in full -- the same text the model reads, so it
+cannot drift from it -- and its first sentence is still promoted to a
+summary line so `apropos' has something to show.
+
+A tool whose budget is a `defcustom' gets its docstring re-rendered by
+`gptel-yatools--refresh-timeout-arg', through `function-documentation';
+the string this returns is the one a loaded package starts with."
   (let* ((description (string-trim (or description "")))
          ;; Promote the first sentence to a summary line, when it fits, so
-         ;; `C-h f' and `apropos' have something to show.  The rest of the
-         ;; description follows it, so nothing is said twice.
+         ;; `apropos' has something to show.  The rest of the description
+         ;; follows it, so nothing is said twice.
          (split (and (string-match "\\`\\([^.]\\{1,70\\}\\.\\)\\s-+\\(.+\\)\\'"
                                    description)
                      (list (match-string 1 description)
                            (match-string 2 description))))
          (summary (or (car-safe split) description))
          (rest (cadr split))
-         (args (append arg-specs (list (gptel-yatools--timeout-arg async)))))
+         (args (gptel-yatools--tool-args arg-specs async default)))
     (mapconcat
      #'identity
      (delq nil
            (list
+            (gptel-yatools--fill-text
+             (format "Tool `%s' (category: %s). This function is the call the model makes: it adds the deadline, renders the Result and reports errors, and hands the work to `%s'. Defined by `gptel-yatools-define-tool', which see. Below is the description the model is given."
+                     name category impl))
             (gptel-yatools--fill-text summary)
             (gptel-yatools--fill-text rest)
-            (gptel-yatools--arg-lines args)
-            (gptel-yatools--fill-text
-             (format "Tool `%s' (category: %s). This is the description the model is given, and the call the model makes: this function adds the deadline, renders the Result and reports errors. Defined by `gptel-yatools-define-tool', which see."
-                     name category))))
+            (gptel-yatools--arg-lines args)))
      "\n\n")))
+
+(defun gptel-yatools--refresh-tool-docstring (tool)
+  "Re-render TOOL's docstring from its definition, and store it.
+
+A docstring is a string literal in the `defun', so the one a compiled
+package carries is the one its definition produced, with whatever the
+budget was at that moment.  `function-documentation' is the standing
+override `documentation' consults first, and this is how the live answer
+replaces the frozen one -- at load time, from the macro, and again whenever
+a budget is customized.
+
+The arguments are taken from the tool rather than the definition because
+that is the copy that has been kept current: the declared ones are
+everything but the trailing TIMEOUT that `gptel-yatools--tool-args' adds.
+
+A tool whose function is not a symbol -- a probe built by hand in a test
+or a config, with no `-tool' half to name -- is left alone."
+  (let ((symbol (gptel-tool-function tool)))
+    (when (symbolp symbol)
+      (put symbol 'function-documentation
+           (gptel-yatools--tool-docstring
+            (gptel-tool-name tool)
+            (gptel-tool-category tool)
+            (gptel-tool-description tool)
+            (butlast (gptel-tool-args tool))
+            (intern (format "%s-tool" symbol))
+            (gptel-tool-async tool)
+            (gptel-yatools--tool-timeout-default tool))))))
 
 (defun gptel-yatools--tool-impl-docstring (symbol name)
   "Return the docstring for SYMBOL, the implementation of tool NAME.
@@ -2753,8 +2839,14 @@ Here is a whole tool:
            (display (gptel-yatools--literal (plist-get plist :preview)))
            (async (plist-get plist :async))
            (body rest)
+           (impl (intern (format "%s-tool" symbol)))
+           ;; The budget is a `defcustom', and the macro is expanded before
+           ;; any of them is bound -- the compiler sees `nil'.  So the
+           ;; literal docstring states the shared default, and
+           ;; `--refresh-tool-docstring', called once the tool exists,
+           ;; immediately replaces it with the live one.
            (doc (gptel-yatools--tool-docstring
-                 name category description arg-specs async))
+                 name category description arg-specs impl async))
            (param-names (mapcar (lambda (arg) (intern (plist-get arg :name)))
                                 arg-specs))
            ;; An argument the model may omit has to be optional in Lisp
@@ -2777,7 +2869,6 @@ Here is a whole tool:
            (boundary-params (append required
                                     (cons '&optional
                                           (append optional (list 'timeout)))))
-           (impl (intern (format "%s-tool" symbol)))
            (expected (string-replace "-" "_"
                                      (string-remove-prefix "gptel-yatools-"
                                                            (symbol-name symbol)))))
@@ -2838,6 +2929,13 @@ Here is a whole tool:
           ,@(when (plist-get plist :confirm)
               (list :confirm (plist-get plist :confirm))))
          (gptel-yatools--register-preview ,name ',display ',arg-specs ,async)
+         ;; The docstring above was built while the macro was expanded,
+         ;; before any budget was bound; this replaces it with one rendered
+         ;; from the tool just registered, and re-rendered whenever a
+         ;; budget changes.
+         (gptel-yatools--refresh-tool-docstring
+          (cl-find ,name gptel-yatools--tools
+                   :key #'gptel-tool-name :test #'equal))
          ',symbol))))
 
 ;;-------------------------------------------------------------------------

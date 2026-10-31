@@ -525,5 +525,21 @@ which is the only signal the package has that it is on another machine."
      (unwind-protect (progn ,@body)
        (ignore-errors (delete-directory gptel-yatools-test--remote-root t)))))
 
+(defun gptel-yatools-test--stated-timeouts (text)
+  "Return the seconds every \"N seconds\" in TEXT names, in order.
+
+Used to compare what two audiences are told about a budget without
+depending on how either sentence is phrased around the number.  Filled
+prose breaks lines wherever the column ends, so the whitespace is
+normalised first: a number and the word \"seconds\" are one fact even when
+a newline falls between them."
+  (let ((rest (and (stringp text)
+                   (replace-regexp-in-string "[ \t\n]+" " " text)))
+        (found nil))
+    (while (and rest (string-match "\\([0-9]+\\) seconds" rest))
+      (push (match-string 1 rest) found)
+      (setq rest (substring rest (match-end 0))))
+    (nreverse found)))
+
 (provide 'gptel-yatools-test-lib)
 ;;; gptel-yatools-test-lib.el ends here

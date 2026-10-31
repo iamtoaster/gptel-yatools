@@ -2366,6 +2366,136 @@ them."
       ;; And it points at the macro that wrote it.
       (should (string-match-p "gptel-yatools-define-tool" doc)))))
 
+(ert-deftest gptel-yatools-test-a-tool-docstring-leads-with-what-the-function-is ()
+  "`C-h f' must say what the function is before it quotes the model.
+
+The description is long, and it describes the *call* the model makes, not
+the Lisp function the reader asked about.  Opening with it made `C-h f
+gptel-yatools-write-file' read as though the tool description were the
+whole answer, with no statement of which function this is, which other
+function does the work, or that the text below is what the model sees.
+
+So the docstring opens with a paragraph naming the tool, its category, the
+implementation it hands the work to, and the macro that wrote both --
+before the description, which it introduces rather than impersonates."
+  (dolist (tool gptel-yatools--tools)
+    (let* ((symbol (gptel-tool-function tool))
+           (name (gptel-tool-name tool))
+           (category (gptel-tool-category tool))
+           (impl (intern (format "%s-tool" symbol)))
+           ;; The generated text, before `documentation' turns its
+           ;; `word' quoting into curly quotes; the reader's view is
+           ;; asserted separately below.
+           (raw (get symbol 'function-documentation))
+           (first (replace-regexp-in-string
+                   "[ \t\n]+" " " (car (split-string raw "\n\n"))))
+           (flat (replace-regexp-in-string "[ \t\n]+" " " raw)))
+      (should (stringp raw))
+      ;; The first paragraph is about the function, not about the model.
+      (should (string-prefix-p (format "Tool `%s' (category: %s)." name category)
+                               first))
+      ;; It names the implementation the body lives in -- the reason there
+      ;; are two functions to explain at all.
+      (should (string-match-p (regexp-quote (format "`%s'" impl)) first))
+      ;; And it says what follows, rather than pretending to be it.
+      (should (string-match-p "Below is the description the model is given"
+                              first))
+      ;; The description itself still follows, in full.
+      (should (string-match-p
+               (regexp-quote (car (split-string (gptel-tool-description tool)
+                                                "[.]")))
+               flat))
+      (should (string-match-p "gptel-yatools-define-tool" first))
+      ;; And `documentation' is what serves it to a reader -- where the
+      ;; package's backtick quoting is rendered as curly quotes, so the
+      ;; check looks for the words rather than the markup.
+      (let ((served (replace-regexp-in-string "[‘’`]" "" (documentation symbol))))
+        (should (string-match-p
+                 (regexp-quote (format "Tool %s (category: %s)" name category))
+                 served))))))
+
+(ert-deftest gptel-yatools-test-a-docstring-states-the-budget-in-force ()
+  "`C-h f' must quote the same default the model is told, and keep it live.
+
+The description and the TIMEOUT argument are generated from one
+definition, which is what makes them agree -- except for the budget, which
+is a `defcustom' and so is only readable when it is used.  The docstring
+used the shared default for every tool, so `subagent' -- the one tool with
+a budget of its own -- said 600 seconds to a reader while telling the
+model 1800.
+
+A docstring is a string, and a byte-compiled one would freeze whatever the
+value was at compile time, so the answer is `function-documentation':
+`gptel-yatools--refresh-timeout-arg' already walks every tool when a
+budget changes, and it now re-renders the docstring from the same
+definition it re-renders the argument from."
+  (dolist (tool gptel-yatools--tools)
+    (let ((stated (gptel-yatools-test--stated-timeouts
+                   (documentation (gptel-tool-function tool)))))
+      ;; Whatever this tool states, its own TIMEOUT argument states the
+      ;; same.  Compared against the argument rather than the description:
+      ;; the description never mentions the budget, and should not have to.
+      (should (equal stated
+                     (gptel-yatools-test--stated-timeouts
+                      (plist-get (car (last (gptel-tool-args tool)))
+                                 :description))))
+      (should stated)))
+  ;; And the budget is genuinely the tool's own, not the shared one.
+  (let ((subagent (cl-find "subagent" gptel-yatools--tools
+                           :key #'gptel-tool-name :test #'equal)))
+    (should (equal (gptel-yatools-test--stated-timeouts
+                    (documentation (gptel-tool-function subagent)))
+                   (list (format "%d" gptel-yatools-subagent-timeout))))))
+
+(ert-deftest gptel-yatools-test-a-customized-budget-reaches-both-readers ()
+  "Changing a budget must update `C-h f' as well as the model's argument.
+
+`gptel-yatools--refresh-timeout-arg' exists so that a `defcustom' changed
+during a session is what both readers are told.  It updated the argument
+only, so the docstring kept stating the value from when the package was
+loaded -- a stale number in the one place a user looks to check the
+number."
+  (let ((original gptel-yatools-subagent-timeout))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'gptel-yatools-subagent-timeout 77)
+          (let ((subagent (cl-find "subagent" gptel-yatools--tools
+                                   :key #'gptel-tool-name :test #'equal)))
+            (should (equal (gptel-yatools-test--stated-timeouts
+                            (documentation (gptel-tool-function subagent)))
+                           '("77")))
+            (should (equal (gptel-yatools-test--stated-timeouts
+                            (plist-get (car (last (gptel-tool-args subagent)))
+                                       :description))
+                           '("77")))))
+      (customize-set-variable 'gptel-yatools-subagent-timeout original))))
+
+(ert-deftest gptel-yatools-test-a-confirmation-shows-the-budget-in-force ()
+  "The approval prompt must name the number the call will actually get.
+
+The preview resolved TIMEOUT without the tool's own default, so approving
+a `subagent' call showed 600 seconds while the boundary was about to allow
+1800.  The prompt is the user's only chance to notice a call that runs far
+longer than they expected, so a wrong number there is worse than no
+number.
+
+An omitted TIMEOUT is still omitted from the line, as before: the model
+asked for the default and the default is what it gets.  It is a value the
+model *did* give and that did not name a number which falls back, and that
+fallback is the tool's own budget."
+  (let* ((subagent (cl-find "subagent" gptel-yatools--tools
+                            :key #'gptel-tool-name :test #'equal))
+         (specs (butlast (gptel-tool-args subagent))))
+    (let ((line (gptel-yatools--preview-line
+                 "subagent" '("task" "timeout") specs (list "Check." "nonsense") t)))
+      (should (string-match-p
+               (format "timeout=%d" gptel-yatools-subagent-timeout)
+               line)))
+    ;; A usable value is still shown as given.
+    (let ((line (gptel-yatools--preview-line
+                 "subagent" '("task" "timeout") specs (list "Check." "42") t)))
+      (should (string-match-p "timeout=42" line)))))
+
 (ert-deftest gptel-yatools-test-an-error-is-not-prefixed-twice ()
   "A tool that writes \"Error: ...\" must not reach the model as \"Error: Error: ...\"."
   (let ((out (gptel-yatools--call-tool

@@ -136,6 +136,51 @@ A job that could not be started is not registered. There is nothing to
 stop and nothing to count, and the boundary delivers its `START-ERROR`
 either way.
 
+## Amendment — a child's failure can be claimed
+
+A child fails for reasons that have nothing to do with its task: a dropped
+connection, a 429, a body that would not parse. Whether such a failure is
+worth another attempt is a policy, and the policy belongs in a config, not
+here. What was missing was a place to *put* it. A config could only advise
+the module's own functions, and the one moment that mattered — before the
+parent is told the child failed — was not reachable from outside at all:
+the failure settled the child on the spot, delivered a failure to the
+parent, and the retried request that followed belonged to nobody.
+
+So a child now has three named hook variables rather than a set of
+functions to advise:
+
+- `gptel-yatools-subagent-started-functions`, `-settled-functions`:
+  observation. They report and return; the module goes on doing what it was
+  going to do.
+- `gptel-yatools-subagent-failed-functions`: a veto, run with
+  `run-hook-with-args-until-success`. A non-nil return **claims** the
+  failure, and the child is not settled: it stays `running`, its job stays
+  live, its deadline stays armed, and the parent's tool call keeps waiting
+  inside the budget it was given. A retry then answers that call, and a
+  retry that never succeeds ends as the timeout it always was.
+
+Claiming is a promise. Nothing in the kit finishes a claimed failure, and a
+child claimed and forgotten runs until its deadline collects it — which is
+the correct default, because the alternative is a child that stops costing
+tokens when a config's timer fires or does not.
+
+The operations a policy needs are public for the same reason: a child is
+not something a config should have to reach into.
+
+- `gptel-yatools-subagent-buffer-p` (is this buffer a child this package
+  still owns? — a detached child answers nil, since it is an ordinary
+  session by then),
+- `gptel-yatools-subagent-insert` (write into a child without the write
+  counting as the user taking it over),
+- `gptel-yatools-subagent-retry` (run a settled child again, in place,
+  leaving its job and deadline alone).
+
+The retry leaves the job alone on purpose. Re-arming the deadline would
+give the child a second budget the parent is not waiting for, and the
+exactly-once rule in item 4 would have nothing to protect: the parent would
+have been told the child failed while the child carried on.
+
 ## Consequences
 
 - `execute_command` no longer blocks Emacs.  Direct calls — from `eval`, a
@@ -176,3 +221,8 @@ either way.
   runner: no module outside `gptel-yatools-common.el` may mention the job
   registry or a job's timer, so "return a job" cannot quietly become
   "return a job and register it yourself".
+- A child's failure can now be claimed by a config hook before the parent
+  is told, which is what makes a retry invisible to the parent.  The
+  module's own tests cover the seam end to end; what a config does with it
+  — backoff, which statuses are worth retrying, whether to continue a
+  partial reply — stays out of this package.

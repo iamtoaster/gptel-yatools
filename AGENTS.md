@@ -321,6 +321,18 @@ rm -f *.elc
   outcome (`:outcome-function`) and the sentence a timeout produces.  A
   new long-running tool of any kind should conclude through the same
   object.
+- **A hook observes; only the failure hook may veto.**  A config that wants
+  to react to a child uses `gptel-yatools-subagent-started-functions`,
+  `-failed-functions` or `-settled-functions` rather than advising a
+  private function.  The started and settled hooks report and return; the
+  module does what it was going to do regardless.  `-failed-functions` is
+  the one that changes behaviour: `run-hook-with-args-until-success`, and a
+  non-nil return claims the failure, so the child stays running and its job
+  stays live.  That is what lets a retry happen before the parent is told
+  anything.  Claiming is a promise to finish the job — retry with
+  `gptel-yatools-subagent-retry' or stop the child — because a claimed
+  failure that nobody follows up leaves the child running until its
+  deadline.
 - **Tests are not part of the package.**  They are loaded on demand and
   must not run in a user's normal Emacs startup.
 

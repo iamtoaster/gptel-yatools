@@ -55,6 +55,14 @@
 ;; through the record; `gptel-yatools-subagent--name` only builds something
 ;; a human can read in `C-x b`.  A detached child is renamed anyway, so
 ;; nothing may parse meaning back out of a name.
+;;
+;; Fourth, a config can watch and drive a child without advising anything
+;; here.  `gptel-yatools-subagent-started-functions' and
+;; `-settled-functions' observe, and `-failed-functions' may claim a
+;; failure before it reaches the parent -- which is what makes a retry
+;; invisible to the parent, because its tool call is still waiting.  The
+;; operations such a policy needs are public too:
+;; `gptel-yatools-subagent-buffer-p', `-insert' and `-retry'.
 
 ;;; Code:
 
@@ -356,12 +364,39 @@ first real edit is still seen.")
 Binding `inhibit-read-only' suppresses the read-only check and nothing
 else, so jit-lock and gptel's own `after-change-functions' keep working;
 the module's edit detector has to be silenced separately, because it would
-otherwise see our insert as the user taking the child over."
+otherwise see our insert as the user taking the child over.
+
+Configs get this as `gptel-yatools-subagent-insert'."
   (with-current-buffer buffer
     (let ((inhibit-read-only t)
           (gptel-yatools-subagent--inserting t))
       (goto-char (point-max))
       (insert string))))
+
+(defun gptel-yatools-subagent--request-failed-p (record)
+  "Return non-nil when RECORD's last request failed rather than answered.
+
+A child whose failure a hook claimed is still `running' -- nothing has
+settled it, which is the point -- so `gptel-yatools-subagent--running-p'
+alone cannot say whether a request is in flight.  The last request's own
+info can: gptel sets `:error' on the one that failed, and the module clears
+the info when it issues the next one."
+  (and (gptel-yatools-subagent--record-info record)
+       (plist-get (gptel-yatools-subagent--record-info record) :error)
+       t))
+
+(defun gptel-yatools-subagent--enable-cancel (record)
+  "Give RECORD's buffer a `C-c C-k' that stops its own request.
+
+A child's work belongs to its parent's tool call, so nothing in the child's
+own job list describes it: `gptel-yatools--cancel-function' is how the key
+reaches it from inside the child.  Called when the buffer is made, and
+again by `gptel-yatools-subagent-retry', because settling clears it."
+  (let ((buffer (gptel-yatools-subagent--record-buffer record)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq-local gptel-yatools--cancel-function
+                    (lambda () (gptel-yatools-subagent--abort record 'by-hand)))))))
 
 (defun gptel-yatools-subagent--make-buffer (record)
   "Create and return RECORD's child buffer, configured but not started.
@@ -406,14 +441,15 @@ read-only tool list and the same system prompt."
       (setq-local gptel-confirm-tool-calls nil)
       (gptel-mode 1)
       (setq-local gptel-yatools-subagent--record record)
-      (setq-local gptel-yatools--cancel-function
-                  (lambda () (gptel-yatools-subagent--abort record 'by-hand)))
+      ;; Recorded before the cancel function is installed, because that
+      ;; function is looked up through the record.
+      (setf (gptel-yatools-subagent--record-buffer record) buffer)
+      (gptel-yatools-subagent--enable-cancel record)
       ;; Take the task as the prompt, so the transcript reads as a
       ;; conversation and a later `gptel-send' from here makes sense.
       (insert (gptel-yatools-subagent--record-task record))
       (insert "\n\n")
       (setq buffer-read-only t)
-      (setf (gptel-yatools-subagent--record-buffer record) buffer)
       (setf (gptel-yatools-subagent--record-read-only record) t)
       (add-hook 'kill-buffer-hook
                 (lambda () (gptel-yatools-subagent--buffer-killed record))
@@ -616,6 +652,73 @@ dropped callback is a request that hangs with nothing on screen."
         (funcall callback
                  "Error: a subagent cannot ask the user to confirm a tool call. Use the tools you have; if you cannot finish without this one, say so in your final message.")))))
 
+;;-------------------------------------------------------------------------
+;; Hooks
+;;
+;; What a child can be observed doing, for the parts of a child's life a
+;; user's config has an opinion about -- retrying a failure, logging, telling
+;; another package that a child finished.  The kit's own modules call these
+;; and nothing else in this file reads them, so a config never has to advise
+;; a private function to be told what happened.
+;;
+;; Two rules make them safe to call from a sentinel.  A hook observes: it
+;; reports and returns, and the module goes on doing what it was going to do.
+;; The one exception is `gptel-yatools-subagent-failed-functions', which may
+;; claim a failure and stop the child from settling -- that is a veto, it is
+;; deliberate, and it is the only way to retry without the parent having
+;; already been told the child failed.
+;;-------------------------------------------------------------------------
+
+(defvar gptel-yatools-subagent-started-functions nil
+  "Functions called after a child's request has been issued.
+
+Each is called with the child's RECORD, once per request: when the child
+starts, and again whenever `gptel-yatools-subagent-retry' sends another
+one.  It runs on the tool body's stack, so a signal here fails the start
+and the child is settled as failed, which is the honest report of a config
+that cannot run.
+
+This is an observation point, not a veto: the request has been sent.")
+
+(defvar gptel-yatools-subagent-failed-functions nil
+  "Functions that may claim a child's failure, called with RECORD and INFO.
+
+`run-hook-with-args-until-success': the first function to return non-nil
+claims the failure, and the child is **not** settled -- it stays running,
+its job stays live, its deadline stays armed, and the parent's tool call
+keeps waiting.  That is what a retry needs: the failure never reaches the
+parent, and the remaining budget is still the one the call was given.
+
+Claiming a failure makes the child the claimer's responsibility.  It must
+go on to call `gptel-yatools-subagent-retry' (usually from a timer -- this
+hook runs in gptel's process sentinel, where starting a request is not
+welcome) or stop the child some other way.  A child claimed and then
+forgotten stays running until its deadline settles it as timed out.
+
+INFO is gptel's own plist for the failed request: `:http-status' and
+`:error' are what a decision to retry is usually made of.")
+
+(defvar gptel-yatools-subagent-settled-functions nil
+  "Functions called with RECORD after a child has settled, for any reason.
+
+The record's STATE, ANSWER or ERROR and FINISHED are set, and the job has
+been settled, by the time these run.  Delivery to the parent may or may not
+have happened yet -- a child can answer before the boundary has attached
+its conclusion -- so this reports what the child did, not what the parent
+has been told.
+
+A signal from one of these is logged and not propagated: this runs in the
+same sentinel and timer paths as the settle itself, where a signal would
+only be logged anyway, and the child is already settled.")
+
+(defun gptel-yatools-subagent--run-settled (record)
+  "Tell `gptel-yatools-subagent-settled-functions' that RECORD settled."
+  (condition-case err
+      (run-hook-with-args 'gptel-yatools-subagent-settled-functions record)
+    (error
+     (message "gptel-yatools: a subagent settled hook failed: %s"
+              (error-message-string err)))))
+
 (defun gptel-yatools-subagent--settle (record state &optional message)
   "Settle RECORD with STATE and MESSAGE, and free its buffer for reading.
 
@@ -642,7 +745,8 @@ boundary, which may not have attached its conclusion yet."
           ;; Nothing is running any more, so `C-c C-k' has nothing to reach.
           (setq-local gptel-yatools--cancel-function nil))))
     (when-let* ((job (gptel-yatools-subagent--record-job record)))
-      (gptel-yatools--job-settle job))))
+      (gptel-yatools--job-settle job))
+    (gptel-yatools-subagent--run-settled record)))
 
 (defun gptel-yatools-subagent--abort (record cause)
   "Stop RECORD's child because of CAUSE, and settle it.
@@ -799,7 +903,14 @@ parent's tool call waiting for a result that was never going to arrive."
                (plist-get info :stop-reason))
          (gptel-yatools-subagent--settle record 'done response))))
     ('nil
-     (unless (gptel-yatools-subagent--record-finished record)
+     (unless (or (gptel-yatools-subagent--record-finished record)
+                 ;; A hook may claim the failure, and then nothing here
+                 ;; settles: the child stays running and its job stays
+                 ;; live, so the retry the hook schedules inherits the
+                 ;; budget the parent's call is still waiting on.  See
+                 ;; `gptel-yatools-subagent-failed-functions'.
+                 (run-hook-with-args-until-success
+                  'gptel-yatools-subagent-failed-functions record info))
        (gptel-yatools-subagent--settle
         record 'failed
         (gptel-yatools-subagent--failure-sentence info))))
@@ -974,6 +1085,60 @@ not stop the record from being settled."
 ;;-------------------------------------------------------------------------
 ;; Starting one
 ;;-------------------------------------------------------------------------
+(defun gptel-yatools-subagent--issue-request (record prompt)
+  "Send RECORD's child a request carrying PROMPT, and return its FSM.
+
+PROMPT is the task of a fresh child, sent as a new user turn.  A retry
+passes nil instead: the conversation is already in the buffer -- the task,
+the answers so far, and the partial reply that failed -- and gptel parses
+it from the buffer, which is what lets the child carry on rather than start
+over.
+
+A new state machine is built each time, exactly as `gptel-send' builds one,
+because the old one is in gptel's ERRS state and its `:data' is rebuilt
+from the buffer only when a request starts."
+  (let ((buffer (gptel-yatools-subagent--record-buffer record))
+        (parent (gptel-yatools-subagent--record-parent record)))
+    (with-current-buffer buffer
+      (let* ((fsm (if (and (boundp 'gptel-send--handlers)
+                           (boundp 'gptel-send--transitions))
+                      ;; The table `gptel-send' uses, and for the same
+                      ;; reason: the bare `gptel-make-fsm' default has
+                      ;; no UI handlers at all.  Without it a child
+                      ;; never sets `gptel--fsm-last' -- so its status
+                      ;; indicator is not even clickable -- never
+                      ;; updates its status line, and never draws a
+                      ;; tool call.  It runs the whole request, and
+                      ;; every symptom of that is invisible progress.
+                      (gptel-make-fsm :table gptel-send--transitions
+                                      :handlers gptel-send--handlers)
+                    (gptel-make-fsm)))
+             (gptel-backend gptel-backend)
+             (gptel-model gptel-model)
+             (gptel-use-tools t)
+             ;; `gptel-request' works on a copy of this buffer, so the
+             ;; buffer-local values set in `--make-buffer' are what the
+             ;; prompt is built from; the let-bindings are here for the
+             ;; parts gptel reads from the current buffer instead.
+             (gptel-confirm-tool-calls nil)
+             (gptel-stream nil))
+        (setf (gptel-yatools-subagent--record-fsm record) fsm)
+        (setf (gptel-yatools-subagent--record-info record) nil)
+        ;; Both cases need point at the end: a nil PROMPT sends the buffer
+        ;; up to point, and `:position' -- where the callback's answer is
+        ;; drawn -- comes from point either way.
+        (goto-char (point-max))
+        (gptel-request
+         prompt
+         :buffer buffer
+         :fsm fsm
+         :stream nil
+         :transforms nil
+         :system (gptel-yatools-subagent--system-prompt parent)
+         :callback (lambda (response info)
+                     (gptel-yatools-subagent--callback record response info)))
+        fsm))))
+
 (defun gptel-yatools-subagent--start (task timeout)
   "Start a child on TASK and return the job that will report its answer.
 
@@ -991,7 +1156,8 @@ the boundary waits for -- or does not, when the tool is asynchronous.
                   :turns 0
                   :calls 0
                   :paths nil))
-         (buffer (gptel-yatools-subagent--make-buffer record))
+         ;; Built and configured here; `--issue-request' is what fills it.
+         (_buffer (gptel-yatools-subagent--make-buffer record))
          (deadline (+ (float-time) timeout))
          (job (gptel-yatools--make-job
                :kind 'subagent
@@ -1016,40 +1182,9 @@ the boundary waits for -- or does not, when the tool is asynchronous.
     ;; moment its record exists.
     (gptel-yatools--make-job-live job)
     (condition-case err
-        (with-current-buffer buffer
-          (let* ((fsm (if (and (boundp 'gptel-send--handlers)
-                               (boundp 'gptel-send--transitions))
-                          ;; The table `gptel-send' uses, and for the same
-                          ;; reason: the bare `gptel-make-fsm' default has
-                          ;; no UI handlers at all.  Without it a child
-                          ;; never sets `gptel--fsm-last' -- so its status
-                          ;; indicator is not even clickable -- never
-                          ;; updates its status line, and never draws a
-                          ;; tool call.  It runs the whole request, and
-                          ;; every symptom of that is invisible progress.
-                          (gptel-make-fsm :table gptel-send--transitions
-                                          :handlers gptel-send--handlers)
-                        (gptel-make-fsm)))
-                 (gptel-backend gptel-backend)
-                 (gptel-model gptel-model)
-                 (gptel-use-tools t)
-                 ;; `gptel-request' works on a copy of this buffer, so the
-                 ;; buffer-local values set in `--make-buffer' are what the
-                 ;; prompt is built from; the let-bindings are here for the
-                 ;; parts gptel reads from the current buffer instead.
-                 (gptel-confirm-tool-calls nil)
-                 (gptel-stream nil))
-            (setf (gptel-yatools-subagent--record-fsm record) fsm)
-            (setf (gptel-yatools-subagent--record-info record) nil)
-            (gptel-request
-             (gptel-yatools-subagent--record-task record)
-             :buffer buffer
-             :fsm fsm
-             :stream nil
-             :transforms nil
-             :system (gptel-yatools-subagent--system-prompt parent)
-             :callback (lambda (response info)
-                         (gptel-yatools-subagent--callback record response info)))))
+        (progn
+          (gptel-yatools-subagent--issue-request record task)
+          (run-hook-with-args 'gptel-yatools-subagent-started-functions record))
       (error
        (gptel-yatools-subagent--settle
         record 'failed
@@ -1060,6 +1195,94 @@ the boundary waits for -- or does not, when the tool is asynchronous.
         record 'aborted
         "Error: the subagent was interrupted before it started. Its partial output is not an answer.")))
     job))
+
+;;-------------------------------------------------------------------------
+;; The seam a config uses
+;;
+;; A child fails sometimes for reasons that have nothing to do with its
+;; task: a dropped connection, a 429, a body that would not parse.  Retrying
+;; is a policy, not a mechanism, so the policy belongs in the user's config
+;; and the module offers the three things such a policy needs, so that it
+;; never has to advise a private function or guess at the module's state:
+;;
+;;   `gptel-yatools-subagent-buffer-p'  is this buffer a child?
+;;   `gptel-yatools-subagent-insert'    write into a child, without owning it
+;;   `gptel-yatools-subagent-retry'     run a settled child again, in place
+;;
+;; What usually drives them is `gptel-yatools-subagent-failed-functions',
+;; which can claim a failure before the parent is ever told about it.
+;;-------------------------------------------------------------------------
+
+(defun gptel-yatools-subagent-buffer-p (&optional buffer)
+  "Return non-nil when BUFFER is a child that this package still owns.
+
+BUFFER defaults to the current buffer.  A detached child answers nil: the
+user has taken it over by editing it, so it is an ordinary session by then,
+and anything that treats child buffers specially -- a retry policy, say --
+should treat it like any other chat."
+  (let ((buffer (or buffer (current-buffer))))
+    (and (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (let ((record gptel-yatools-subagent--record))
+             (and record
+                  (not (gptel-yatools-subagent--record-detached record))))))))
+
+(defun gptel-yatools-subagent-insert (buffer string)
+  "Insert STRING at the end of BUFFER, without BUFFER becoming the user's.
+
+A plain `insert' into a settled child is read as the user taking it over:
+the module detaches it, drops it from the parent's list and offers a
+rename.  That is right for a person editing the transcript and wrong for
+anything the package or a config writes there, so this is the way in for
+both."
+  (gptel-yatools-subagent--insert buffer string))
+
+(defun gptel-yatools-subagent-retry (record &optional continuation)
+  "Run RECORD's child again, in place, after it stopped.
+
+CONTINUATION, when it is a non-empty string, is appended to the child's
+transcript as a new instruction before the request is re-sent -- \"your
+reply was cut off, carry on from where it stopped\" is the usual one.  The
+partial reply stays where it is and is still marked as a response, so the
+next request reads it as an assistant turn and the model continues it
+instead of starting over.
+
+The job is left alone.  It stays live, its deadline keeps running, and the
+answer is delivered to the parent exactly as it would have been, which is
+what lets a retry from `gptel-yatools-subagent-failed-functions' be
+invisible to the parent: its tool call goes on waiting inside the budget it
+was given, and only running out of that budget makes the retry a timeout.
+
+Signals a `user-error' for a child that is already running (nothing to
+retry), one the user has detached (it is theirs now) or one whose buffer
+has been killed.  A child whose failure was claimed counts as ready to
+retry even though nothing has settled it: see
+`gptel-yatools-subagent--request-failed-p'."
+  (let ((buffer (gptel-yatools-subagent--record-buffer record)))
+    (cond
+     ((not (buffer-live-p buffer))
+      (user-error "That subagent's buffer is gone"))
+     ((gptel-yatools-subagent--record-detached record)
+      (user-error "That subagent is detached: it is an ordinary session now"))
+     ((and (gptel-yatools-subagent--running-p record)
+           (not (gptel-yatools-subagent--request-failed-p record)))
+      (user-error "That subagent is already running")))
+    (when (and (stringp continuation) (not (string-empty-p continuation)))
+      (gptel-yatools-subagent--insert buffer (concat "\n" continuation "\n")))
+    (setf (gptel-yatools-subagent--record-finished record) nil
+          (gptel-yatools-subagent--record-answer record) nil
+          (gptel-yatools-subagent--record-error record) nil
+          (gptel-yatools-subagent--record-state record) 'running)
+    (with-current-buffer buffer
+      ;; gptel's next inserts are the request's own output, and the buffer
+      ;; must not be typed into while they arrive.
+      (setq gptel-yatools-subagent--settling nil)
+      (setq buffer-read-only t)
+      (setf (gptel-yatools-subagent--record-read-only record) t))
+    (gptel-yatools-subagent--enable-cancel record)
+    (gptel-yatools-subagent--issue-request record nil)
+    (run-hook-with-args 'gptel-yatools-subagent-started-functions record)
+    record))
 
 ;;-------------------------------------------------------------------------
 ;; Aborting the children of an aborted request

@@ -403,6 +403,21 @@ it; the buffer name is decoration built from it, and nothing parses
 meaning back out of a name.
 _Avoid_: Subagent object, agent state
 
+**Subagent hook**:
+One of the three lists a config appends to in order to watch a child:
+`gptel-yatools-subagent-started-functions`, `-failed-functions` and
+`-settled-functions`.  They exist so that a policy that belongs outside
+this package — retrying a transport error, logging, telling another
+package a child finished — does not have to advise a private function to
+learn that anything happened.  Two of the three only observe.  The
+failure hook is the exception and the reason the seam exists: returning
+non-nil from it **claims** the failure, and the child is not settled, so
+the parent's tool call goes on waiting inside its own budget while the
+claimed failure is retried.  A claimed failure is then the claimer's to
+finish: it retries with `gptel-yatools-subagent-retry' or stops the child
+some other way.
+_Avoid_: Subagent callback, agent event, notification
+
 **Detached child**:
 A subagent the user has taken over by editing its buffer after it
 finished.  It leaves the parent's record list, stops dying with the parent

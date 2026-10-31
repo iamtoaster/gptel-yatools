@@ -505,6 +505,52 @@ writable once it finishes, which is also how it becomes yours:
 A child is another agent with your permissions and your provider: the text
 it reads is sent to the model, exactly as the parent's is.
 
+#### Retrying a child from your config
+
+Whether a failed child is worth retrying is a policy, not a mechanism, so
+the policy lives in your config.  Three hooks say what happened, and three
+functions let a policy act without advising anything private:
+
+| | |
+| --- | --- |
+| `gptel-yatools-subagent-started-functions` | called with the record after each request is issued |
+| `gptel-yatools-subagent-failed-functions` | called with the record and gptel's info before a failure settles; **returning non-nil claims it** |
+| `gptel-yatools-subagent-settled-functions` | called with the record after it settles, for any reason |
+| `gptel-yatools-subagent-buffer-p` | is this buffer a child? |
+| `gptel-yatools-subagent-insert` | write into a child without taking it over |
+| `gptel-yatools-subagent-retry` | run a settled (or claimed-failed) child again, in place |
+
+The failure hook is the one that changes anything.  Claiming a failure
+means the child is *not* settled and the parent is told nothing: its tool
+call goes on waiting inside the budget it was given, and running out of
+that budget is what finally makes the failure a timeout.  A retry in the
+middle of it is therefore invisible to the parent, which is what you want
+for a dropped connection or a 429:
+
+```elisp
+(defun my-subagent-retry-maybe (record info)
+  "Retry RECORD after a failure worth retrying, and claim it."
+  (when (member (plist-get info :http-status) '("429" "502" "503"))
+    ;; This runs in gptel's sentinel: start the request from a timer, and
+    ;; ignore the refusal if the child died or was taken over meanwhile.
+    (run-at-time 2 nil
+                 (lambda ()
+                   (ignore-errors (gptel-yatools-subagent-retry record))))
+    t))
+
+(add-hook 'gptel-yatools-subagent-failed-functions
+          #'my-subagent-retry-maybe)
+```
+
+Pass `gptel-yatools-subagent-retry` a second argument to append an
+instruction before re-sending — `"Continue exactly where you stopped."` —
+which is what you want when the failed attempt had already streamed part of
+its answer: the partial reply stays in the transcript, still marked as a
+response, so the model carries on instead of starting over.
+
+Claiming is a promise.  A failure you claim and never follow up leaves the
+child running until its deadline, so either retry it or stop it.
+
 ## Tests
 
 ERT, no network, no prompts, every test in a throwaway temp directory:

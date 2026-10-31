@@ -518,6 +518,267 @@ and its kill has no reason to land early."
       (should-not (memq job (gptel-yatools--jobs-live))))))
 
 ;;-------------------------------------------------------------------------
+;; Retrying a child
+;;
+;; Retrying is policy and lives in a config; what is tested here is that the
+;; module gives a config enough to write that policy without advising a
+;; private function, and that the seam does what the docstrings claim.
+;;-------------------------------------------------------------------------
+(ert-deftest gptel-yatools-test-a-failure-hook-may-claim-the-failure ()
+  "A claimed failure leaves the child running and the parent none the wiser.
+
+The whole point of claiming is that the parent's tool call is still
+waiting, inside its own budget, so a retry can answer it.  Settling as
+failed first would deliver a failure the parent would then have to be told
+to ignore."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((claimed nil)
+           (gptel-yatools-subagent-failed-functions
+            (list (lambda (record info)
+                    (setq claimed (list record (plist-get info :error)))
+                    t)))
+           (job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records)))
+      (gptel-yatools-agent-test--deliver
+       nil (list :error "Curl failed with exit code 7." :status "Curl failure"))
+      (should (eq (car claimed) record))
+      (should (string-match-p "exit code 7" (cadr claimed)))
+      ;; Still running, still live, still undelivered.
+      (should (gptel-yatools-subagent--running-p record))
+      (should-not (gptel-yatools-subagent--record-finished record))
+      (should-not (gptel-yatools-subagent--record-error record))
+      (should-not (gptel-yatools-job-settled job))
+      (should (memq job (gptel-yatools--jobs-live))))))
+
+(ert-deftest gptel-yatools-test-a-failure-hook-may-decline ()
+  "A hook that returns nil leaves the failure to settle as it always did.
+
+Only a non-nil return claims; an observer that merely logs must not change
+the outcome by existing."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((gptel-yatools-subagent-failed-functions
+            (list (lambda (_record _info) nil)))
+           (job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (gptel-yatools-agent-test--deliver
+       nil (list :error "Curl failed with exit code 7." :status "Curl failure"))
+      (should (eq (gptel-yatools-subagent--record-state record) 'failed))
+      (should (eq (plist-get outcome :state) 'failed)))))
+
+(ert-deftest gptel-yatools-test-a-claimed-failure-can-be-retried-in-place ()
+  "A retry resets the record, keeps the job, and sends a second request.
+
+The job is deliberately untouched: same object, same deadline, same
+timer.  A retry that re-armed any of them would give the child a second
+budget and the parent's call a second wait, which is not what a dropped
+connection is worth."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((gptel-yatools-subagent-failed-functions
+            (list (lambda (_record _info) t)))
+           (job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records))
+           (timer (gptel-yatools-job-timer job))
+           (deadline (gptel-yatools-job-deadline job))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (gptel-yatools-agent-test--deliver
+       nil (list :error "Curl failed with exit code 7." :status "Curl failure"))
+      (should (= 1 (length gptel-yatools-agent-test--calls)))
+      (gptel-yatools-subagent-retry record "Continue where you stopped.")
+      ;; A second request went out, carrying the child's own history.
+      (should (= 2 (length gptel-yatools-agent-test--calls)))
+      (should-not (car (nth 0 gptel-yatools-agent-test--calls)))
+      ;; The record is running again, with the previous failure forgotten.
+      (should (gptel-yatools-subagent--running-p record))
+      (should-not (gptel-yatools-subagent--record-finished record))
+      (should-not (gptel-yatools-subagent--record-error record))
+      (should-not (gptel-yatools-subagent--record-answer record))
+      (should (buffer-local-value 'buffer-read-only
+                                  (gptel-yatools-subagent--record-buffer record)))
+      (should (buffer-local-value 'gptel-yatools--cancel-function
+                                  (gptel-yatools-subagent--record-buffer record)))
+      ;; The job was not touched.
+      (should (eq (gptel-yatools-job-timer job) timer))
+      (should (eq (gptel-yatools-job-deadline job) deadline))
+      (should (memq job (gptel-yatools--jobs-live)))
+      ;; And the retry's answer is delivered once, to the same job.
+      (gptel-yatools-agent-test--deliver "All good.")
+      (should (eq (plist-get outcome :state) 'done))
+      (should (string-match-p "All good"
+                              (plist-get outcome :output)))
+      (should-not (memq job (gptel-yatools--jobs-live))))))
+
+(ert-deftest gptel-yatools-test-a-retried-child-reaches-its-parent-once ()
+  "A failure claimed and retried never reaches the parent; the answer does.
+
+This is the whole point of the seam, end to end: a transport error, a
+policy that retries it, and a parent that is told nothing until the child
+has actually answered -- then told exactly once."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((attempts 0)
+           (gptel-yatools-subagent-failed-functions
+            (list (lambda (record _info)
+                    ;; A config would schedule this on a timer, because
+                    ;; this hook runs in gptel's sentinel; calling it here
+                    ;; exercises the same path without the wait.
+                    (setq attempts (1+ attempts))
+                    (gptel-yatools-subagent-retry record)
+                    t)))
+           (job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records))
+           (deliveries 0)
+           (outcome nil))
+      (gptel-yatools--job-conclude-with
+       job (lambda (o) (setq deliveries (1+ deliveries) outcome o)))
+      (gptel-yatools-agent-test--deliver
+       nil (list :error "Curl failed with exit code 7." :status "Curl failure"))
+      (should (= attempts 1))
+      (should (= 2 (length gptel-yatools-agent-test--calls)))
+      ;; The parent has been told nothing yet.
+      (should (= 0 deliveries))
+      (should (memq job (gptel-yatools--jobs-live)))
+      (gptel-yatools-agent-test--deliver "The parser is fine.")
+      (should (= deliveries 1))
+      (should (eq (plist-get outcome :state) 'done))
+      (should (string-match-p "The parser is fine"
+                              (plist-get outcome :output)))
+      (should-not (gptel-yatools-subagent--record-error record)))))
+
+(ert-deftest gptel-yatools-test-a-continuation-is-inserted-without-detaching ()
+  "Writing a continuation into a settled child must not hand it to the user.
+
+A plain `insert' there is read as the user taking the child over, so the
+retry's own instruction detached the very child it was retrying -- and the
+rename prompt arrived before its first request did."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records))
+           (child (gptel-yatools-subagent--record-buffer record))
+           (asked nil))
+      (gptel-yatools-agent-test--deliver "A partial answer")
+      ;; gptel's finishing insert has already cleared nothing: `--settling'
+      ;; is still set only until a user command, and a test runs none.
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) (setq asked t) "")))
+        (gptel-yatools-subagent-retry record "Continue where you stopped."))
+      (should-not asked)
+      (should-not (gptel-yatools-subagent--record-detached record))
+      (should (memq record gptel-yatools-subagent--records))
+      (with-current-buffer child
+        (should (string-match-p "Continue where you stopped"
+                                (buffer-string)))))))
+
+(ert-deftest gptel-yatools-test-a-running-child-is-not-retried ()
+  "Retrying a child that is still working is a mistake worth naming.
+
+Two requests would run in one buffer, doubling the tokens spent and giving
+the parent whichever answered first."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let ((record (car gptel-yatools-subagent--records)))
+      (should-error (gptel-yatools-subagent-retry record) :type 'user-error)
+      (should (= 1 (length gptel-yatools-agent-test--calls))))))
+
+(ert-deftest gptel-yatools-test-a-detached-child-is-not-retried ()
+  "A child the user has taken over is an ordinary session, so this refuses.
+
+Continuing it is `gptel-send', which the user can do themselves; doing it
+from a retry policy would take their buffer and send with the child's
+read-only tool list behind their back."
+  (gptel-yatools-agent-test--with-parent
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (child (gptel-yatools-subagent--record-buffer record))
+           (asked ""))
+      (gptel-yatools-agent-test--deliver "A partial answer")
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) asked)))
+        ;; The user edits the settled child: that is the take-over.
+        (with-current-buffer child
+          (setq gptel-yatools-subagent--settling nil)
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (insert "my own words")))
+        (should (gptel-yatools-subagent--record-detached record))
+        (should-error (gptel-yatools-subagent-retry record) :type 'user-error)
+        ;; The take-over offered a rename on a timer; let it fire here, with
+        ;; the prompt stubbed, rather than inside whatever test runs next.
+        (let ((deadline (+ (float-time) 1.0)))
+          (while (< (float-time) deadline)
+            (accept-process-output nil 0.01)))))))
+
+(ert-deftest gptel-yatools-test-buffer-p-tells-a-child-from-a-chat ()
+  "`gptel-yatools-subagent-buffer-p' is what a retry policy asks first.
+
+It answers nil for an ordinary chat and for a child the user has taken
+over, because a policy that retries children must not also retry the
+session a child became."
+  (gptel-yatools-agent-test--with-parent
+    (should-not (gptel-yatools-subagent-buffer-p (current-buffer)))
+    (gptel-yatools-agent-test--start)
+    (let* ((record (car gptel-yatools-subagent--records))
+           (child (gptel-yatools-subagent--record-buffer record)))
+      (should (gptel-yatools-subagent-buffer-p child))
+      ;; Defaults to the current buffer, which is how a callback asks.
+      (with-current-buffer child
+        (should (gptel-yatools-subagent-buffer-p)))
+      (gptel-yatools-agent-test--deliver "A partial answer")
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+        (with-current-buffer child
+          (setq gptel-yatools-subagent--settling nil)
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (insert "my own words"))))
+      (should (gptel-yatools-subagent--record-detached record))
+      (should-not (gptel-yatools-subagent-buffer-p child))
+      ;; Let the take-over's rename timer fire here, with the prompt
+      ;; stubbed, rather than inside whatever test runs next.
+      (let ((deadline (+ (float-time) 1.0)))
+        (while (< (float-time) deadline)
+          (accept-process-output nil 0.01))))))
+
+(ert-deftest gptel-yatools-test-hooks-see-a-child-start-and-settle ()
+  "The started and settled hooks are called at the points they name.
+
+Both are observation only: a child that nobody is watching must behave
+exactly as one that is."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((started nil)
+           (settled nil)
+           (gptel-yatools-subagent-started-functions
+            (list (lambda (record)
+                    (push (gptel-yatools-subagent--record-state record) started))))
+           (gptel-yatools-subagent-settled-functions
+            (list (lambda (record)
+                    (push (gptel-yatools-subagent--record-state record) settled))))
+           (job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records)))
+      (should (equal started '(running)))
+      (gptel-yatools--job-conclude-with job #'ignore)
+      (should-not settled)
+      (gptel-yatools-agent-test--deliver "All good.")
+      (should (equal settled '(done)))
+      (should (eq (gptel-yatools-subagent--record-state record) 'done)))))
+
+(ert-deftest gptel-yatools-test-a-broken-settled-hook-does-not-undo-the-answer ()
+  "A settled hook that signals is logged, and the child stays settled.
+
+These run in gptel's sentinel, where a signal is only logged anyway; the
+one thing that must not happen is the child being left in a half-state by
+a config's mistake."
+  (gptel-yatools-agent-test--with-parent
+    (let* ((gptel-yatools-subagent-settled-functions
+            (list (lambda (_record) (error "Config bug"))))
+           (job (gptel-yatools-agent-test--start))
+           (record (car gptel-yatools-subagent--records))
+           (outcome nil))
+      (gptel-yatools--job-conclude-with job (lambda (o) (setq outcome o)))
+      (gptel-yatools-agent-test--deliver "All good.")
+      (should (eq (gptel-yatools-subagent--record-state record) 'done))
+      (should (eq (plist-get outcome :state) 'done)))))
+
+;;-------------------------------------------------------------------------
 ;; Taking a child over
 ;;-------------------------------------------------------------------------
 (ert-deftest gptel-yatools-test-subagent-finishing-does-not-detach-it ()

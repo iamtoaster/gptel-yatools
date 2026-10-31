@@ -417,7 +417,15 @@ Images go to `gptel-yatools-diagram-cache-directory`
 `<hash>.puml` source.  That directory is the one place this package writes
 without a review, because the model cannot name a path in it and nothing
 there is data: see [ADR 0003](docs/adr/0003-a-tool-may-own-an-opaque-directory.md).
-`M-x gptel-yatools-diagram-clear-cache` empties it.
+
+It does not grow for ever: the first time Emacs is idle in a session,
+entries not rendered within `gptel-yatools-diagram-cache-max-age-days`
+(30) are deleted.  That costs nothing you can lose — the transcript holds
+the source of every diagram a buffer mentions, and re-opening the chat
+re-renders them all in one PlantUML run.  Set it to `nil` to keep
+everything, or use `M-x gptel-yatools-diagram-clear-cache` to empty the
+cache now — the cure for the cases age cannot cover, like upgrading
+PlantUML or changing the security profile.
 
 Rendering happens **where the cache is**, which normally means on this
 machine — including when the chat is about a remote workspace: the cache

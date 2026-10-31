@@ -230,6 +230,14 @@ rm -f *.elc
   `execute_command` has the workspace as its artifact, and only because
   the workspace is what it acts on — the diagram renderer has its cache.
   ADR 0006.
+- **A disposable cache still needs a lifetime.**  The diagram cache is the
+  one directory this package writes without a review, which is safe only
+  while nothing there is worth keeping — so it is swept by age
+  (`gptel-yatools-diagram-cache-max-age-days`), on an idle timer, once a
+  session.  Nothing tries to work out what is still *referenced*: the
+  transcript already holds every source a buffer mentions and re-rendering
+  is one process, so age is the cheap question with a safe answer.  A
+  sweep must never run on a tool call's path, and never signal.
 - **Skills are read from disk only.**  A pending `SKILL.md` write is
   invisible to discovery; the model must not author instructions that are
   then treated as authoritative before review.  `allowed-tools` is advisory

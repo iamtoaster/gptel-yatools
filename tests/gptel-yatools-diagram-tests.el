@@ -654,6 +654,149 @@ again -- the failure this pins."
           (gptel-yatools-diagram--post-response 1 100000)
           (should (= 1 (length gptel-yatools-diagram--overlays))))))))
 
+;;;; The cache does not grow for ever
+
+(ert-deftest gptel-yatools-diagram-test-sweep-removes-only-old-entries ()
+  "A stale diagram is deleted; one rendered recently is kept.
+
+The cache was only ever emptied by hand, so every diagram a chat had ever
+produced stayed on disk for the life of the installation.  Nothing here
+tries to work out what is still referenced: the transcript holds the
+source of every diagram a buffer mentions, and re-rendering them is one
+PlantUML process, so age is a safe thing to delete by."
+  (gptel-yatools-diagram-test--cache
+    (let* ((now (float-time))
+           (old (gptel-yatools-diagram--write-source "@startuml\nold\n@enduml"))
+           (old-svg (gptel-yatools-diagram--cache-file
+                     (file-name-base old) "svg"))
+           (fresh (gptel-yatools-diagram--write-source
+                   "@startuml\nfresh\n@enduml")))
+      (write-region "<svg/>" nil old-svg nil 'silent)
+      (set-file-times old (time-subtract now (days-to-time 90)))
+      (set-file-times old-svg (time-subtract now (days-to-time 90)))
+      (should (= 2 (gptel-yatools-diagram--sweep-cache nil now)))
+      (should-not (file-exists-p old))
+      (should-not (file-exists-p old-svg))
+      (should (file-exists-p fresh)))))
+
+(ert-deftest gptel-yatools-diagram-test-sweep-keeps-the-boundary ()
+  "An entry just inside the window survives; one just outside does not.
+
+The cutoff is a plain comparison against the file's modification time, so
+the test pins the side each minute falls on rather than trusting the
+arithmetic to land where it was meant to."
+  (gptel-yatools-diagram-test--cache
+    (let* ((now (float-time))
+           (window (* 30 86400))
+           (inside (gptel-yatools-diagram--write-source "@startuml\nin\n@enduml"))
+           (outside (gptel-yatools-diagram--write-source "@startuml\nout\n@enduml")))
+      (set-file-times inside (time-subtract now (- window 60)))
+      (set-file-times outside (time-subtract now (+ window 60)))
+      (should (= 1 (gptel-yatools-diagram--sweep-cache nil now)))
+      (should (file-exists-p inside))
+      (should-not (file-exists-p outside)))))
+
+(ert-deftest gptel-yatools-diagram-test-sweep-can-be-turned-off ()
+  "A nil retention window deletes nothing, whatever the ages are.
+
+The cache is disposable, but deleting it is still the user's decision to
+make: somebody may keep diagrams precisely so a saved chat reopens without
+a PlantUML run."
+  (gptel-yatools-diagram-test--cache
+    (let* ((now (float-time))
+           (file (gptel-yatools-diagram--write-source "@startuml\na\n@enduml"))
+           (gptel-yatools-diagram-cache-max-age-days nil))
+      (set-file-times file (time-subtract now (days-to-time 4000)))
+      (should (= 0 (gptel-yatools-diagram--sweep-cache nil now)))
+      (should (file-exists-p file)))))
+
+(ert-deftest gptel-yatools-diagram-test-sweep-leaves-what-is-not-a-file ()
+  "A directory in the cache is neither deleted nor counted.
+
+The sweep runs unattended, so it must not be the thing that removes
+something a user put there by hand -- and it must not try to `delete-file'
+a directory and fail."
+  (gptel-yatools-diagram-test--cache
+    (let* ((now (float-time))
+           (sub (expand-file-name "keep-me/"
+                                  gptel-yatools-diagram-cache-directory)))
+      (make-directory sub)
+      (set-file-times sub (time-subtract now (days-to-time 900)))
+      (should (= 0 (gptel-yatools-diagram--sweep-cache nil now)))
+      (should (file-directory-p sub)))))
+
+(ert-deftest gptel-yatools-diagram-test-sweep-does-not-signal ()
+  "An unreadable or vanished cache is not an error.
+
+The first sweep of a session runs from an idle timer, where a signal is
+logged and nothing else -- and the cache directory may not exist yet, or
+may belong to another user."
+  (gptel-yatools-diagram-test--cache
+    (should (= 0 (gptel-yatools-diagram--sweep-cache
+                  (expand-file-name "no/such/cache/"
+                                    gptel-yatools-diagram-cache-directory)
+                  (float-time))))))
+
+(ert-deftest gptel-yatools-diagram-test-sweep-happens-once-a-session ()
+  "The sweep is armed once, and does not repeat on every idle moment.
+
+It is idle-triggered because it is housekeeping: it must never be on a
+tool call's path, where a slow directory walk would be charged to a
+render, and it must not run every time Emacs goes quiet either."
+  (gptel-yatools-diagram-test--cache
+    (let* ((now (float-time))
+           (gptel-yatools-diagram--cache-swept nil)
+           (first (gptel-yatools-diagram--write-source "@startuml\n1\n@enduml")))
+      (set-file-times first (time-subtract now (days-to-time 90)))
+      (should (= 1 (gptel-yatools-diagram--sweep-once-per-session)))
+      (should gptel-yatools-diagram--cache-swept)
+      ;; A second idle moment does nothing, even with a fresh stale file.
+      (let ((second (gptel-yatools-diagram--write-source
+                     "@startuml\n2\n@enduml")))
+        (set-file-times second (time-subtract now (days-to-time 90)))
+        (should (= 0 (gptel-yatools-diagram--sweep-once-per-session)))
+        (should (file-exists-p second))))))
+
+(ert-deftest gptel-yatools-diagram-test-the-sweep-is-armed-on-an-idle-timer ()
+  "The cache is swept when Emacs goes quiet, not while a tool call runs.
+
+An idle timer, not a load-time sweep: loading this module in a batch run
+must not delete a user's cache as a side effect of `-l', and a render
+must not pay for a directory walk.  Nothing is armed in batch, where no
+idle timer would fire anyway."
+  (let ((noninteractive nil)
+        (gptel-yatools-diagram--sweep-timer nil))
+    (unwind-protect
+        (progn
+          (should (timerp (gptel-yatools-diagram--arm-cache-sweep)))
+          (should (timerp gptel-yatools-diagram--sweep-timer)))
+      (when (timerp gptel-yatools-diagram--sweep-timer)
+        (cancel-timer gptel-yatools-diagram--sweep-timer)))
+    ;; And batch mode arms nothing, whether or not this test was launched
+    ;; in batch: the guard is on the variable, so it is asserted on it.
+    (let ((gptel-yatools-diagram--sweep-timer nil)
+          (noninteractive t))
+      (should-not (gptel-yatools-diagram--arm-cache-sweep))
+      (should-not gptel-yatools-diagram--sweep-timer))))
+
+(ert-deftest gptel-yatools-diagram-test-clear-cache-empties-it-whatever-the-age ()
+  "The command deletes everything, which is what age cannot do.
+
+Age is the wrong tool for a picture that is still recent but no longer
+right -- an upgraded PlantUML, a changed security profile -- so the manual
+command stays, and it shares the sweep's idea of what an entry is."
+  (gptel-yatools-diagram-test--cache
+    (let* ((one (gptel-yatools-diagram--write-source "@startuml\n1\n@enduml"))
+           (two (gptel-yatools-diagram--write-source "@startuml\n2\n@enduml"))
+           (messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+        (gptel-yatools-diagram-clear-cache))
+      (should-not (file-exists-p one))
+      (should-not (file-exists-p two))
+      (should (cl-some (lambda (m) (string-match-p "Deleted 2 cached" m))
+                       messages)))))
+
 ;;;; Nothing goes through the VFS
 
 (ert-deftest gptel-yatools-diagram-test-render-leaves-no-pending-change ()

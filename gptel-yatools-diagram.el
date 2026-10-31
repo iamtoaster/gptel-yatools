@@ -117,6 +117,114 @@ data, only time."
   :type 'directory
   :group 'gptel-yatools-diagram)
 
+(defcustom gptel-yatools-diagram-cache-max-age-days 30
+  "Delete cached diagrams that have not been rendered for this many days.
+
+The cache would otherwise only ever be emptied by hand, so every diagram
+a chat had ever produced stayed on disk for the life of the installation.
+
+Nothing here tries to work out what is still *referenced*.  That is the
+question a reference-tracking sweep would have to answer, and the honest
+answer -- \"whatever a live buffer mentions\" -- is expensive to compute and
+wrong for saved chats that are not open.  Age needs no reference map: the
+transcript holds the source of every diagram a buffer mentions, and
+`gptel-yatools-diagram--rebuild-missing' re-renders them all in one
+PlantUML process when the chat is next opened.  So a deleted entry costs a
+batch render, never data.
+
+The entry's modification time is its render time, so a diagram that is
+looked at every day still ages out and is rebuilt at most once per
+window.  Touching files on read would be a write from the redisplay path.
+
+nil disables the sweep.  See `gptel-yatools-diagram-clear-cache' for the
+same thing on demand."
+  :type '(choice (const :tag "Never sweep" nil)
+                 (integer :tag "Days"))
+  :group 'gptel-yatools-diagram)
+
+(defconst gptel-yatools-diagram--sweep-idle-seconds 30
+  "How long Emacs must be idle before the cache is swept once.")
+
+(defvar gptel-yatools-diagram--cache-swept nil
+  "Non-nil once this session has swept the cache.
+
+Set before the sweep runs rather than after it: a sweep that fails because
+the directory is unreadable would fail identically on the next idle
+moment, and retrying it forever is worse than trying it once.")
+
+(defvar gptel-yatools-diagram--sweep-timer nil
+  "The idle timer that sweeps the cache, or nil when none is armed.")
+
+(defun gptel-yatools-diagram--cache-files (&optional directory)
+  "Return the regular files in the diagram cache DIRECTORY.
+
+Subdirectories are left alone: this module only ever writes flat files,
+and a directory a user put here is not the sweep's to remove."
+  (let ((dir (or directory gptel-yatools-diagram-cache-directory))
+        (files nil))
+    (when (file-directory-p dir)
+      (dolist (file (directory-files dir t "\\`[^.]"))
+        (when (file-regular-p file)
+          (push file files))))
+    (nreverse files)))
+
+(defun gptel-yatools-diagram--sweep-cache (&optional directory now)
+  "Delete cache entries in DIRECTORY not rendered within the window.
+
+DIRECTORY defaults to `gptel-yatools-diagram-cache-directory' and NOW to
+the current time; both exist so a test can pin the clock.  Return how
+many files were deleted.
+
+Never signals: the first sweep of a session runs from an idle timer,
+where a signal is logged and nothing else, and the directory may not
+exist yet or may not be ours to read."
+  (let* ((days gptel-yatools-diagram-cache-max-age-days)
+         (cutoff (- (or now (float-time))
+                    (* 86400 (if (integerp days) days 0))))
+         (count 0))
+    (when (and (integerp days) (> days 0))
+      (dolist (file (gptel-yatools-diagram--cache-files directory))
+        (let ((attributes (ignore-errors (file-attributes file))))
+          (when (and attributes
+                     (< (float-time (file-attribute-modification-time attributes))
+                        cutoff)
+                     (ignore-errors (delete-file file) t))
+            (setq count (1+ count))))))
+    count))
+
+(defun gptel-yatools-diagram--sweep-once-per-session ()
+  "Sweep the cache, unless this session has already done so.
+
+Return how many files were deleted, or 0 when the sweep was skipped."
+  (if gptel-yatools-diagram--cache-swept
+      0
+    (setq gptel-yatools-diagram--cache-swept t)
+    (condition-case err
+        (gptel-yatools-diagram--sweep-cache)
+      (error
+       (message "gptel-yatools-diagram: could not sweep the cache: %s"
+                (error-message-string err))
+       0))))
+
+(defun gptel-yatools-diagram--arm-cache-sweep (&optional seconds)
+  "Arrange for the cache to be swept once, the next time Emacs is idle.
+
+SECONDS is how long the idle period must last, for a test that would
+rather not wait.  Returns the timer, or nil when nothing was armed.
+
+An idle timer rather than a sweep at load time, for two reasons: loading
+this module in a batch run must not delete a user's cache as a side effect
+of `-l', and a sweep inside a render would charge a directory walk to a
+tool call.  Nothing is armed in batch, where an idle timer would not fire
+anyway."
+  (unless noninteractive
+    (when (timerp gptel-yatools-diagram--sweep-timer)
+      (cancel-timer gptel-yatools-diagram--sweep-timer))
+    (setq gptel-yatools-diagram--sweep-timer
+          (run-with-idle-timer
+           (or seconds gptel-yatools-diagram--sweep-idle-seconds)
+           nil #'gptel-yatools-diagram--sweep-once-per-session))))
+
 (defcustom gptel-yatools-diagram-inline t
   "Whether to draw rendered diagrams inline in a chat buffer.
 
@@ -1020,19 +1128,22 @@ point, so a source that cannot be drawn leaves the buffer as it was."
   "Delete every rendered diagram and its source.
 
 Safe by design: the durable copy of each diagram is the conversation, so
-this costs a re-render, never data.  Nothing is swept automatically -- a
-timer would have to decide what is still referenced, and the honest
-answer is \"whatever a live buffer mentions\", which is expensive to
-compute and wrong for saved chats that are not open."
+this costs a re-render, never data.  It is the same sweep as
+`gptel-yatools-diagram--sweep-cache' with no age limit -- for the cases
+age cannot cover, like upgrading PlantUML or changing the security
+profile, where the old picture is still there but no longer right."
   (interactive)
-  (let ((dir gptel-yatools-diagram-cache-directory)
-        (count 0))
-    (when (file-directory-p dir)
-      (dolist (file (directory-files dir t "\\`[^.]"))
-        (when (file-regular-p file)
-          (delete-file file)
-          (setq count (1+ count)))))
+  (let ((count (length (gptel-yatools-diagram--cache-files))))
+    (dolist (file (gptel-yatools-diagram--cache-files))
+      (ignore-errors (delete-file file)))
     (message "Deleted %d cached diagram file(s)" count)))
 
 (provide 'gptel-yatools-diagram)
+
+;; Armed at load time, and armed *here* rather than in an init file: the
+;; sweep belongs to the module that owns the directory it sweeps, and a
+;; user who never loads this module has no cache to sweep.  Idle, so it
+;; never lands inside a render; once, because it is housekeeping.
+(gptel-yatools-diagram--arm-cache-sweep)
+
 ;;; gptel-yatools-diagram.el ends here

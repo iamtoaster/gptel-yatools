@@ -523,7 +523,7 @@ it is told otherwise, and a chat about a remote workspace has a *remote*
 on this machine, and the cache it writes into is a directory on this
 machine (`user-emacs-directory').  Inheriting the workspace handed a local
 executable path to the host's shell, which is `exec:
-/etc/profiles/.../plantuml: not found', exit 127, and no picture.
+/usr/local/bin/plantuml: not found', exit 127, and no picture.
 
 So the rule is: a subprocess runs where its artifacts live, not where the
 chat's workspace happens to be.  For the renderer those are the same

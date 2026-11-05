@@ -523,7 +523,7 @@ be discovered."
 ;; in their config, as with any package key.
 (when (boundp 'gptel-mode-map)
   (define-key gptel-mode-map (kbd "C-c C-k")
-              #'gptel-yatools--cancel-tool-calls))
+              #'gptel-yatools-cancel-tool-calls))
 
 ;;-------------------------------------------------------------------------
 ;; Drawing the header line

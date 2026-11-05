@@ -425,7 +425,7 @@ CANCEL     a function of JOB and a reason, stopping the work without
 
 Buffer-local because a job belongs to the chat that started it: its
 result is rendered against that buffer's VFS and its status is shown in
-that buffer's header line.  `gptel-yatools--cancel-tool-calls' empties
+that buffer's header line.  `gptel-yatools-cancel-tool-calls' empties
 it.")
 
 (defun gptel-yatools--jobs-live (&optional buffer)
@@ -581,7 +581,7 @@ call, so nothing in the child's own job list describes it.  The module
 that owns such a buffer sets this, and `C-c C-k' reaches it: the key
 means \"stop what this buffer is doing\", whatever started it.")
 
-(defun gptel-yatools--cancel-tool-calls (&optional buffer)
+(defun gptel-yatools-cancel-tool-calls (&optional buffer)
   "Kill the running tool calls of BUFFER and stop its request.
 
 With no job running there is nothing to stop, and that is a `user-error'

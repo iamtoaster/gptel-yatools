@@ -1490,6 +1490,21 @@ A module that calls `make-process' itself has reached past that seam."
                     offenders))))))
     (should (null offenders))))
 
+(ert-deftest gptel-yatools-test-cancel-command-is-public-and-bound ()
+  "The key `C-c C-k' binds is a public command, and stays one.
+
+A binding is a promise: a user who wants a different key rebinds it, and
+copying `M-x gptel-yatools--cancel-tool-calls' out of the manual is not
+something a double dash should be able to break.  This started as a
+private function that the README already told users to call by a public
+name, so the name it is documented under is asserted here rather than
+left to a reader to notice."
+  (should (commandp 'gptel-yatools-cancel-tool-calls))
+  (should (fboundp 'gptel-yatools-cancel-tool-calls))
+  (should-not (fboundp 'gptel-yatools--cancel-tool-calls))
+  (should (eq (lookup-key gptel-mode-map (kbd "C-c C-k"))
+              #'gptel-yatools-cancel-tool-calls)))
+
 (ert-deftest gptel-yatools-test-only-the-registrar-registers-a-job ()
   "No module may put a job in the registry, or time it, by itself.
 

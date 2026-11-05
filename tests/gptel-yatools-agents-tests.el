@@ -376,7 +376,7 @@ tool-call count is how much of the work was done."
     (gptel-yatools-agent-test--start)
     (let ((record (car gptel-yatools-subagent--records)))
       (with-current-buffer (gptel-yatools-subagent--record-buffer record)
-        (gptel-yatools--cancel-tool-calls (current-buffer)))
+        (gptel-yatools-cancel-tool-calls (current-buffer)))
       (should (eq (gptel-yatools-subagent--record-state record) 'aborted))
       (should (string-match-p "aborted before it finished"
                               (gptel-yatools-subagent--record-error record))))))

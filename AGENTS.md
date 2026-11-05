@@ -130,7 +130,7 @@ changing the rule.
   once (ADR 0005).
 - **Cancellation lives here, not in gptel.**  `gptel-abort` looks a
   request up by its network process, which has finished by the time a
-  tool runs.  `C-c C-k` is `gptel-yatools--cancel-tool-calls`, and a job
+  tool runs.  `C-c C-k` is `gptel-yatools-cancel-tool-calls`, and a job
   inherits cancellation by being registered, not by reimplementing it.
 - **Provenance is data.**  A tool says `:disk`, `:vfs`, `:mixed` or
   `:derived` on its Result; the boundary is the only place it becomes

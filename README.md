@@ -68,6 +68,14 @@ Requires Emacs 29.1 or later, [gptel](https://github.com/karthink/gptel)
 and [yaml](https://github.com/zkry/yaml.el).  Nothing else is needed;
 TRAMP ships with Emacs.
 
+**Linux only, so far.**  This package has been developed and tested on Linux
+machines and assumes a Linux machine.  The shell tool runs commands through a
+POSIX shell, the shells it looks for on a remote host are POSIX ones
+(`/bin/sh`, `/bin/ash`), and `vfs_diff` and the sync review expect a GNU `diff`
+on `exec-path`.  Nothing has been tried on Windows, and it may break there; if
+you run it on another platform, expect to read the code rather than the
+manual.
+
 ### straight.el
 
 ```elisp

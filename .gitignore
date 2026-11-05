@@ -8,5 +8,5 @@
 .#*
 *~
 
-# Miscellaneous folders
-security-reports/
+# Local, uncommitted working notes (see AGENTS.md)
+.live-docs/

@@ -81,11 +81,19 @@ manual.
 ```elisp
 (use-package gptel-yatools
   :after gptel
-  :straight (:type git :host github :repo "USER/gptel-yatools")
+  :straight (:type git :host github :repo "iamtoaster/gptel-yatools")
   :config (gptel-yatools-enable "filesystem"))  ; add "shell" when you want it
 ```
 
-Until the repository is public, point straight.el at a checkout:
+### package-vc or plain `load-path`
+
+```elisp
+(package-vc-install '(gptel-yatools :url "https://github.com/iamtoaster/gptel-yatools"))
+```
+
+or clone the repository and `(add-to-list 'load-path "/path/to/gptel-yatools")`.
+To follow your own checkout of the repository, straight.el takes a local path
+instead:
 
 ```elisp
 (use-package gptel-yatools
@@ -93,14 +101,6 @@ Until the repository is public, point straight.el at a checkout:
   :straight (:local-repo "/path/to/gptel-yatools")
   :config (gptel-yatools-enable "filesystem"))
 ```
-
-### package-vc or plain `load-path`
-
-```elisp
-(package-vc-install '(gptel-yatools :url "https://github.com/USER/gptel-yatools"))
-```
-
-or clone the repository and `(add-to-list 'load-path "/path/to/gptel-yatools")`.
 
 ## Usage
 

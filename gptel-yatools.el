@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
+;; URL: https://github.com/iamtoaster/gptel-yatools
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (gptel "0.9.9.5") (yaml "1.2.4"))
 ;; Keywords: convenience, tools, llm

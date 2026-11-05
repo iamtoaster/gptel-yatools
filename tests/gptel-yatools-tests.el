@@ -265,6 +265,68 @@ tools, so adding or removing one would fail a test about something else."
     ;; Not vacuous: an empty tool list would satisfy the two `every' checks.
     (should (string-match-p "tools=[1-9][0-9]*" (cdr result)))))
 
+(ert-deftest gptel-yatools-test-gptel-api-surface-is-intact ()
+  "Every gptel symbol this package reaches for must still be there.
+
+gptel has no stability promise for its private functions, and this
+package advises six of them and reads about twenty variables besides, so
+a gptel upgrade is the one event that can break the package without
+touching a line of it.  Renaming one symbol would otherwise surface as a
+`void-function' in the middle of a tool call -- in the buffer of someone
+who has just upgraded, with the chat stranded in TOOL.
+
+So the surface is named here, once, and checked as a set: a failure
+reports everything that disappeared rather than stopping at the first,
+which is what makes a bump quick to assess.
+
+What is checked is presence and shape, never behaviour: a behavioural
+assertion would duplicate the tests that already exercise these paths
+and would fail for a gptel change that is merely different, not broken."
+  (let ((missing nil))
+    (dolist (function '(gptel--accept-tool-calls gptel--handle-tool-use
+                        gptel--inspect-tool-calls gptel--insert-response
+                        gptel--display-tool-results gptel--map-tool-args
+                        gptel--format-tool-call gptel--update-status
+                        gptel--update-tool-call gptel--fsm-transition
+                        gptel-get-tool gptel-make-fsm gptel-fsm-info
+                        gptel-fsm-state gptel-fsm-p gptel-make-tool
+                        gptel-tool-name gptel-tool-category
+                        gptel-tool-description gptel-tool-function
+                        gptel-tool-args gptel-tool-async gptel-tool-p
+                        gptel-abort gptel-send gptel-request))
+      (unless (fboundp function)
+        (push (format "%s (function)" function) missing)))
+    (dolist (variable '(gptel-tools gptel-mode gptel-mode-map gptel-mode-hook
+                        gptel-post-response-functions gptel-use-context
+                        gptel-use-tools gptel-use-header-line
+                        gptel-confirm-tool-calls gptel-context gptel-model
+                        gptel-backend gptel-stream gptel--fsm-last
+                        gptel--request-alist gptel--tool-preview-alist
+                        gptel--header-line-info gptel--known-tools
+                        gptel-send--handlers gptel-send--transitions))
+      (unless (boundp variable)
+        (push (format "%s (variable)" variable) missing)))
+    ;; The five seams this package hooks into, one advice each.
+    (dolist (pair '((gptel--accept-tool-calls
+                     . gptel-yatools--accept-tool-calls-in-owner)
+                    (gptel--handle-tool-use
+                     . gptel-yatools--tool-calls-outside-the-sentinel)
+                    (gptel--inspect-tool-calls
+                     . gptel-yatools--forget-inspection-vfs)
+                    (gptel-abort . gptel-yatools--abort-accepts-no-argument)
+                    (gptel-abort . gptel-yatools--abort-cancels-tools)
+                    (gptel-use-header-line . gptel-yatools--extend-header-line)))
+      (unless (advice-member-p (cdr pair) (car pair))
+        (push (format "%s (advice on %s)" (cdr pair) (car pair)) missing)))
+    ;; The state machine's shape: a call is deferred while gptel waits in
+    ;; TOOL, and cancelling lands in ABRT, which has a handler but no
+    ;; transition of its own.
+    (unless (assq 'TOOL (symbol-value 'gptel-send--transitions))
+      (push "TOOL (state in gptel-send--transitions)" missing))
+    (unless (assq 'ABRT (symbol-value 'gptel-send--handlers))
+      (push "ABRT (state in gptel-send--handlers)" missing))
+    (should (null (nreverse missing)))))
+
 (ert-deftest gptel-yatools-test-package-compiles-without-warnings ()
   "The package must byte-compile, without a single warning.
 

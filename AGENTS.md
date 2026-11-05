@@ -109,16 +109,33 @@ Four of them, each with a test that fails when a module reaches past it:
   `gptel-yatools-page`; sizing, truncation, escaping and the XML envelope
   stay in `common.el`.
 - **Process** — everything runs through `gptel-yatools--run-process`
-  (`common.el`, `:933`) with an explicit `:directory`.  A module calling
+  (`common.el`, `:911`) with an explicit `:directory`.  A module calling
   `make-process` has left the seam.  A subprocess runs where its
   artifacts live (ADR 0006).
-- **Job** — `gptel-yatools--make-job-live` (`common.el:672`) is the only
+- **Job** — `gptel-yatools--make-job-live` (`common.el:656`) is the only
   place a job becomes live: registry, deadline timer, kill hook, status
   line.  A module that pushes into the registry, arms its own timer or
   adds its own abort advice has left the machinery behind (ADR 0005).
-- **Path** — `gptel-yatools--resolve-path` (`common.el:1063`) resolves a
+- **Path** — `gptel-yatools--resolve-path` (`common.el:1038`) resolves a
   path once, at the tool's edge; past it everything takes an absolute
   path and never interprets it again.
+
+### Nothing here describes one machine
+
+The repository is read by people whose Emacs is laid out differently, so
+no default, comment, message or document may name a directory that is one
+installation's convention:
+
+- Under `user-emacs-directory` the package claims one directory, named
+  after itself: `gptel-yatools/`.  Not `var/gptel-yatools/`, and nothing
+  else with a directory level of someone's own invention.
+- A temp file is built from `temporary-file-directory`, never a literal
+  `/tmp`.
+- A path in a document is a placeholder (`/path/to/gptel-yatools`,
+  `~/.emacs.d`, `/usr/local/bin/plantuml`), never a path that exists on
+  the author's machine.
+- A default that is a `defcustom` a user may legitimately change is not
+  asserted by a test; the convention is enforced in review.
 
 ### Rules the code depends on
 
@@ -227,15 +244,15 @@ call context and deadline, `gptel-yatools-define-tool`, previews, tool
 enabling, and the job registrar and process runner that both subprocess
 tools share.
 
-`gptel-yatools-define-tool` `:2734`, `gptel-yatools-ok` `:1616`,
-`gptel-yatools--respond` `:1641`, `gptel-yatools-page` `:2285`,
-`gptel-yatools-call` (the call context) `:112`, `gptel-yatools--new-call`
-`:1877`, `gptel-yatools--make-job-live` `:672`,
-`gptel-yatools--cancel-jobs` `:570`, `gptel-yatools--run-process` `:933`,
-`gptel-yatools--resolve-path` `:1063`, `gptel-yatools--connection` `:242`,
-`gptel-yatools--remote-shell` `:285`, `gptel-yatools--printable-block`
-`:1163`, `gptel-yatools--job-conclusion` `:2212`,
-`gptel-yatools--without-quit` `:1970`, `gptel-yatools-enable` `:2949`.
+`gptel-yatools-define-tool` `:2683`, `gptel-yatools-ok` `:1581`,
+`gptel-yatools--respond` `:1606`, `gptel-yatools-page` `:2243`,
+`gptel-yatools-call` (the call context) `:110`, `gptel-yatools--new-call`
+`:1836`, `gptel-yatools--make-job-live` `:656`,
+`gptel-yatools--cancel-jobs` `:554`, `gptel-yatools--run-process` `:911`,
+`gptel-yatools--resolve-path` `:1038`, `gptel-yatools--connection` `:240`,
+`gptel-yatools--remote-shell` `:282`, `gptel-yatools--printable-block`
+`:1134`, `gptel-yatools--job-conclusion` `:2170`,
+`gptel-yatools--without-quit` `:1928`, `gptel-yatools-enable` `:2898`.
 
 ### The VFS — `gptel-yatools-vfs.el`
 
@@ -243,63 +260,63 @@ The buffer-local VFS: entries and baselines, conflict and refusal logic,
 pending changes, encoding, diffing, the sync review UI, and the
 filesystem tools.
 
-`gptel-yatools-vfs-entry` `:159`, `-pending` `:174`, `-put` `:211`,
-`-with-text` `:910`, `-write` `:1068`, `-refusal` `:1700`, `-sync`
-`:2048`, `gptel-yatools-write-diff-mode` `:1324`, and the write policy
-defcustoms at `:964`.
+`gptel-yatools-vfs-entry` `:156`, `-pending` `:171`, `-put` `:208`,
+`-with-text` `:899`, `-write` `:1054`, `-refusal` `:1683`, `-sync`
+`:2024`, `gptel-yatools-write-diff-mode` `:1310`, and the write policy
+defcustoms at `:950`.
 
 ### The shell — `gptel-yatools-shell.el`
 
 `read_workspace_root` and `execute_command`: the command's wording and its
 VFS-pending warning, over the shared process runner.
-`gptel-yatools-shell--run-command` `:124`, the tool definitions at `:231`
-and `:239`.
+`gptel-yatools-shell--run-command` `:112`, the tool definitions at `:202`
+and `:210`.
 
 ### Skills — `gptel-yatools-skills.el`
 
 Discovery, frontmatter validation, the content-keyed parse cache, skill
 handles and resolution, the `skill` tool, attaching skills by hand, the
-skill browser.  `gptel-yatools-skills--discover` `:510`,
-`-assign-handles` `:564`, `gptel-yatools-skills-handle` `:598`,
-`gptel-yatools-skills-resolve` `:788`, `gptel-yatools-skills-add` `:1151`,
-`gptel-yatools-skills` `:1289`.
+skill browser.  `gptel-yatools-skills--discover` `:509`,
+`-assign-handles` `:563`, `gptel-yatools-skills-handle` `:597`,
+`gptel-yatools-skills-resolve` `:786`, `gptel-yatools-skills-add` `:1146`,
+`gptel-yatools-skills` `:1283`.
 
 ### Diagrams — `gptel-yatools-diagram.el`
 
 The `render_diagram` tool, the content-addressed cache and its age sweep,
 the render token, the inline overlay, the transcript rebuild.
-`gptel-yatools-diagram--sweep-cache` `:171`, `--token` `:440`,
-`--refresh` `:947`, `--rebuild-missing` `:991`; the tool at `:827`.
+`gptel-yatools-diagram--sweep-cache` `:154`, `--token` `:416`,
+`--refresh` `:892`, `--rebuild-missing` `:935`; the tool at `:774`.
 
 ### Child agents — `gptel-yatools-agents.el`
 
 The `subagent` tool: child records, the read-only capability list, the
 answer and its failures, the `[Subagents]` label and the picker.
-`gptel-yatools-subagent--settle` `:722`, `--callback` `:853`,
-`gptel-yatools-subagent--start` `:1142`, `gptel-yatools-subagent-retry`
-`:1240`.
+`gptel-yatools-subagent--settle` `:722`, `--callback` `:852`,
+`gptel-yatools-subagent--start` `:1141`, `gptel-yatools-subagent-retry`
+`:1239`.
 
 ### gptel glue — `gptel-yatools.el`
 
 Runs a tool call in the buffer that owns the request, defers calls in a
 busy remote workspace, draws the header-line extras, binds `C-c C-k`,
 loads the tool modules.  `gptel-yatools--accept-tool-calls-in-owner`
-`:93`, `gptel-yatools--tool-call-running` `:224`,
-`gptel-yatools--deferred-tool-calls` `:249`,
-`gptel-yatools--tool-calls-outside-the-sentinel` `:398`,
-`gptel-yatools--extend-header-line` `:586`.
+`:83`, `gptel-yatools--tool-call-running` `:193`,
+`gptel-yatools--deferred-tool-calls` `:214`,
+`gptel-yatools--tool-calls-outside-the-sentinel` `:356`,
+`gptel-yatools--extend-header-line` `:530`.
 
 ### Seams, and who crosses them
 
 - **Response** — `gptel-yatools--respond`, `gptel-yatools-page`
-  (`common.el:1641`, `:2285`); crossed by every tool module.
-- **Process** — `gptel-yatools--run-process` (`common.el:933`); crossed by
+  (`common.el:1606`, `:2243`); crossed by every tool module.
+- **Process** — `gptel-yatools--run-process` (`common.el:911`); crossed by
   `shell.el` and `diagram.el`.
-- **Job** — `gptel-yatools--make-job-live` (`common.el:672`); crossed by
+- **Job** — `gptel-yatools--make-job-live` (`common.el:656`); crossed by
   `shell.el` and `agents.el`.
-- **Path** — `gptel-yatools--resolve-path` (`common.el:1063`); crossed by
+- **Path** — `gptel-yatools--resolve-path` (`common.el:1038`); crossed by
   every tool that takes a path.
-- **Refusal** — `gptel-yatools-vfs-refusal` (`vfs.el:1700`); crossed by
+- **Refusal** — `gptel-yatools-vfs-refusal` (`vfs.el:1683`); crossed by
   the review partition, the diff header and the write.
 
 ### Decisions — `docs/adr/`

@@ -1865,8 +1865,12 @@ and it writes a line per step."
   :type 'boolean
   :group 'gptel-yatools)
 
-(defcustom gptel-yatools-tool-trace-file "/tmp/gptel-yatools-trace.log"
-  "Where `gptel-yatools-tool-trace' writes."
+(defcustom gptel-yatools-tool-trace-file
+  (expand-file-name "gptel-yatools-trace.log" temporary-file-directory)
+  "Where `gptel-yatools-tool-trace' writes.
+
+Under `temporary-file-directory' rather than a literal \"/tmp\", so that the
+name follows the machine's own temp directory."
   :type 'file
   :group 'gptel-yatools)
 

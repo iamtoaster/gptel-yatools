@@ -219,7 +219,7 @@ on the current project is a function away:
 | --- | --- | --- |
 | `gptel-yatools-plantuml-command` | `"plantuml"` | The renderer, as a name on `exec-path` or an absolute path. |
 | `gptel-yatools-plantuml-security-profile` | `"SANDBOX"` | The profile PlantUML renders under. |
-| `gptel-yatools-diagram-cache-directory` | `var/gptel-yatools/cache/` under `user-emacs-directory` | Where rendered images and their sources are kept. |
+| `gptel-yatools-diagram-cache-directory` | `gptel-yatools/cache/` under `user-emacs-directory` | Where rendered images and their sources are kept. |
 | `gptel-yatools-diagram-cache-max-age-days` | 30 | Delete cache entries not rendered within this many days, on the first idle moment of a session.  `nil` keeps everything. |
 | `gptel-yatools-diagram-inline` | `t` | Draw diagrams in the chat buffer.  Off, the token stays as text. |
 | `gptel-yatools-plantuml-graphviz-timeout` | 30 s | Ceiling for GraphViz layout, capped by the call's own remaining deadline. |

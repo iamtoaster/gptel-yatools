@@ -96,7 +96,7 @@ short `timeout' argument cannot be outlived by the layout engine."
   :group 'gptel-yatools-diagram)
 
 (defcustom gptel-yatools-diagram-cache-directory
-  (expand-file-name "var/gptel-yatools/cache/" user-emacs-directory)
+  (expand-file-name "gptel-yatools/cache/" user-emacs-directory)
   "Directory holding rendered diagrams and their sources.
 
 The directory is this module's alone.  Nothing in it is referenced by a

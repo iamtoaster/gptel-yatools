@@ -431,8 +431,9 @@ addresses the same file it always did.  The cost is that upgrading
 PlantUML, or changing the security profile, can leave an older picture
 in place for a source already rendered.  `gptel-yatools-diagram-clear-cache'
 is the cure, and the whole cache is disposable by construction (ADR 0003).
-See docs/plantuml-diagram-tool.md, section 5.2, for why the name is
-content-addressed at all."
+The name is content-addressed rather than counted or dated so that nothing
+has to map a token to a file: the token is the same prefix of the digest,
+and a rebuild recomputes both from the transcript."
   (substring (gptel-yatools-diagram--digest source)
              0 gptel-yatools-diagram--hash-length))
 

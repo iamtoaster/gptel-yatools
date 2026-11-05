@@ -18,7 +18,7 @@ outright:
 
 ```
 Error: PlantUML could not render the diagram (exit code 127).
-/bin/sh: exec: line 2: /etc/profiles/per-user/dizzar/bin/plantuml: not found
+/bin/sh: exec: line 2: /usr/local/bin/plantuml: not found
 ```
 
 The workspace was `/docker:host:/tmp/work`, so `default-directory` was

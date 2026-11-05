@@ -94,8 +94,8 @@ picked up too.")
 
 Also installs the kill-buffer guard, so a buffer holding unsynced
 changes cannot be killed by accident.  The guard is (re)installed on
-every call because the table may already exist from before this
-guard was introduced, and `add-hook' is idempotent."
+every call because the table may already exist from an earlier call, and
+`add-hook' is idempotent."
   (unless gptel-yatools-vfs
     (setq gptel-yatools-vfs (make-hash-table :test #'equal)))
   (unless (memq #'gptel-yatools-vfs--query-kill-buffer kill-buffer-query-functions)
@@ -136,9 +136,8 @@ against whichever buffer is current -- the failure that made
 ;; The pending-change module
 ;;
 ;; One answer to one question: which VFS entries still differ from disk.
-;; Everything that needs to know asks here, because the two questions the
-;; VFS table can answer are different ones and used to be spelled the same
-;; way:
+;; The two questions the VFS table can answer are different ones and are
+;; spelled differently:
 ;;
 ;;   entry    "is there an entry here?"  No disk I/O, no reaping.
 ;;   pending  "...and does it still differ?"  One disk read; an entry disk
@@ -152,9 +151,7 @@ against whichever buffer is current -- the failure that made
 ;;
 ;; Reaping is a consequence of asking, not a separate sweep.  `pending'
 ;; and `pending-paths' are the only things that read disk to compare, so
-;; they are the only places that can notice; a caller that had to remember
-;; to sweep would eventually stop remembering, which is how this file came
-;; to hold three copies of the same stanza.
+;; they are the only places that can notice.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs-entry (path)
   "Return PATH's VFS entry plist, or nil when there is no entry.
@@ -417,15 +414,13 @@ Each line is TYPE, a tab, the name, and -- when the entry is not simply
 what disk holds -- a third tab-separated note saying so: `(pending)' for
 an entry that exists only in the VFS, `(pending change)' for one whose
 disk content a pending write shadows.  Without the note the listing is
-indistinguishable from one of a directory that is entirely on disk,
-which is how a merged reply came to be described as a description of
-disk.
+indistinguishable from one of a directory that is entirely on disk.
 
 An entry that disk has caught up with is neither: it shadows nothing, so
 it contributes no note and is dropped on the way out, exactly as
-`gptel-yatools-vfs-pending' drops it when it is asked about one file.
-A listing that kept such an entry would tell the model a change was
-pending while `vfs_diff' said there was none.
+`gptel-yatools-vfs-pending' drops it when it is asked about one file.  A
+listing that kept such an entry would tell the model a change was pending
+while `vfs_diff' said there was none.
 
 Returns a plist of :text and :pending (non-nil when any line carries a
 note), so the caller can say which provenance the reply has instead of
@@ -441,12 +436,9 @@ guessing."
     ;; One `file-name-all-completions' answers the whole listing: the
     ;; names, and whether each is a directory (a trailing "/" says so).
     ;; The obvious spelling -- `directory-files' plus a `file-directory-p'
-    ;; per entry -- costs one TRAMP command per *entry*, so listing a
-    ;; directory of forty files took thirty-seven round trips, and each is
-    ;; a synchronous wait on the one connection the workspace shares.  A
-    ;; fan-out of subagents reading directories spent nearly all its time
-    ;; there; the profiler put 97% of the run inside
-    ;; `tramp-sh-handle-file-directory-p'.
+    ;; per entry -- costs one TRAMP command per *entry*: measured at
+    ;; thirty-seven round trips for a directory of forty files, with 97%
+    ;; of the run inside `tramp-sh-handle-file-directory-p'.
     ;;
     ;; `directory-files-and-attributes' looks like the answer and is not:
     ;; over TRAMP it falls back to one `stat' per entry, measured at
@@ -716,9 +708,8 @@ concatenate it unconditionally."
 ;;
 ;; One reader answers "what text is at this path, and where did it come
 ;; from?" for every tool that reads one: `read_path',
-;; `read_file_from_offset', `fetch_lines_from_file_using_regex' and the
-;; skill file reader.  It owns the binary policy too, which used to be
-;; written out five times as "call --binary-p, then build a notice".
+;; `read_file-from-offset', `fetch_lines_from_file_using_regex' and the
+;; skill file reader.  It owns the binary policy too.
 ;;
 ;; The answer is a value with a `:kind', not a signal and not a rendered
 ;; string: a tool has to be able to turn a missing path into *its own*
@@ -848,12 +839,11 @@ caller to wrap the call in `ignore-errors' and lose the reason."
 (defun gptel-yatools-vfs--read-from-disk (full)
   "Return the answer for the file at FULL, asking disk about it once.
 
-One `file-attributes' call answers what three predicates used to be asked
-separately -- does it exist, is it a directory, is it a regular file --
-and it answers them in one round trip.  That matters only over TRAMP,
+One `file-attributes' call answers what three predicates would otherwise
+be asked separately -- does it exist, is it a directory, is it a regular
+file -- and it answers them in one round trip.  That matters over TRAMP,
 where each question is a separate command and a separate wait for the
-reply: reading ten files cost sixty-five round trips, and the model
-waiting on a fan-out felt every one of them.
+reply: measured, reading ten files cost sixty-five round trips.
 
 Readability is not asked at all.  The read itself is the only question
 that matters, and its failure already means \"unreadable\", which is what
@@ -866,9 +856,8 @@ Only then is `file-directory-p' asked, which does follow.
 A file that is neither a directory nor a link gets `file-regular-p' --
 not because the check is free of meaning, but because it is free of cost:
 `file-attributes' has just filled TRAMP's cache, and the follow-up
-question is answered from it rather than from the host.  Measured, that
-is zero extra round trips, and it is what keeps a FIFO or a device
-refused instead of read."
+question is answered from it rather than from the host: zero extra round
+trips, which keeps a FIFO or a device refused instead of read."
   (let* ((attrs (condition-case nil (file-attributes full) (file-error nil)))
          (type (and attrs (file-attribute-type attrs))))
     (cond
@@ -948,18 +937,15 @@ the file already has."
 ;;-------------------------------------------------------------------------
 ;; What a write is not allowed to touch
 ;;
-;; The agent is not the only code in this Emacs: the package itself decides
-;; which tools exist and what the review shows, and the user's init files
-;; decide what runs on the next start.  A model that can write those has a
-;; way around every control this package offers -- not by defeating the
-;; review, but by changing the code that performs it.  Denying them costs
-;; little and is the reason the lists below exist.
+;; A model that can write this package's own code or the user's init files
+;; has a way around every control this package offers -- not by defeating
+;; the review, but by changing the code that performs it.
 ;;
 ;; The directory list holds the package's own directory.  It deliberately
 ;; does not hold all of `user-emacs-directory': repositories are commonly
 ;; cloned inside it, and refusing to edit those would make the tool useless
-;; exactly where it was started.  What actually runs on the next start is
-;; named instead, file by file, below.
+;; exactly where it was started.  What runs on the next start is named
+;; instead, file by file, below.
 ;;-------------------------------------------------------------------------
 (defcustom gptel-yatools-write-denied-directories
   (delq nil
@@ -1364,12 +1350,9 @@ every tool reply, and a write whose target name holds one is refused.
 ;;
 ;; - Faces are painted onto the text as `font-lock-face' properties while
 ;;   the lines are inserted, and syntactic fontification is switched off
-;;   with `font-lock-defaults' set to (nil t) -- exactly what
-;;   `magit-section-mode' does, with the comment "Turn off syntactic font
-;;   locking".  A face already on the text cannot arrive late; the
-;;   keyword-driven kind can, because it is context-sensitive and runs on
-;;   redisplay, so a hunk could sit unhighlighted until something else
-;;   forced a refontification.
+;;   with `font-lock-defaults' set to (nil t), as `magit-section-mode'
+;;   does.  A face already on the text cannot arrive late; the
+;;   keyword-driven kind can, because it runs on redisplay.
 ;;
 ;;   `font-lock-face' rather than `face' for the same reason magit uses
 ;;   it: fontifying a region strips the `face' property, while
@@ -1378,12 +1361,12 @@ every tool reply, and a write whose target name holds one is refused.
 ;; - Folding is a `hidden' flag per section plus an overlay with
 ;;   `invisible' and `intangible' over the body.  `invisible' alone is not
 ;;   enough: point would step from a heading into the hidden body and the
-;;   section would look stuck open, which is why magit puts
-;;   `cursor-intangible' on the same overlay.
+;;   section would look stuck open, so `cursor-intangible' goes on the
+;;   same overlay.
 ;;
 ;; A section is a struct, not a text property, because the buffer is
 ;; static: nothing is edited in it, so the ranges recorded during
-;; insertion stay right, and a fold toggles without rewriting any text.
+;; insertion stay right.
 ;;-------------------------------------------------------------------------
 (defface gptel-yatools-diff-file-heading
   '((t :inherit diff-file-header :weight bold))
@@ -1721,26 +1704,22 @@ test, and a target that is no longer a regular file is caught before
 
 This is not, and must not become, the only list of checks in the module.
 `gptel-yatools-vfs-write' asks its own question and refuses things this
-function does not -- content that is not a string, a path holding a
-control character, a target with pending entries stored under it -- and
-the reason is not that one of the two is incomplete.  A check belongs to
-whichever of the two can still be wrong when it runs:
+function does not.  A check belongs to whichever of the two can still be
+wrong when it runs:
 
 - The write's checks are about the content being handed in, and they are
   settled at the moment the entry is made: a control character in a path
   and a subtree of pending files cannot change while the review sits
-  open, so asking again at sync time would be dead code dressed as
-  defence.
+  open.
 - This function's checks are about the world moving on -- the baseline,
   the policy, a visiting buffer, a file that became a directory or a FIFO
-  -- which is exactly why it is asked again immediately before writing.
+  -- which is why it is asked again immediately before writing.
 
 The one check both could claim, \"is the target a regular file\", is
 asked here and not there, because the target can change kind between the
-write and the sync and cannot change kind during the write.  Consolidate
-the two lists and one of them starts refusing something it should let
-through: a write that refused a conflict would make a conflicted file
-impossible to edit, which is the whole point of holding a baseline."
+write and the sync and cannot change during the write.  A write that
+refused a conflict would make a conflicted file impossible to edit, which
+is the whole point of holding a baseline.  See ADR 0007."
   (let ((entry-coding (gptel-yatools-vfs--entry-coding full))
         (content (or (plist-get (gptel-yatools-vfs-entry full) :content) ""))
         (existing (get-file-buffer full))
@@ -1788,20 +1767,18 @@ impossible to edit, which is the whole point of holding a baseline."
   "Return FULL's ancestor directories, nearest first, top-most last.
 
 Every structural check about a path's parents asks this, so the walk is
-written once: `gptel-yatools-vfs--file-ancestor' is the one question both
-the write and the review ask, and the two hand-rolled loops that used to
-disagree about when to stop are gone.
+written once, and the write and the review cannot disagree about when to
+stop.
 
 The stop test is \"the name stopped getting shorter\", not \"we reached
 /\".  A remote (TRAMP) name's top-most directory is \"/ssh:host:/\",
 which `file-name-directory' returns unchanged: a test for \"/\" alone
 never fires there, so the walk never ends -- and because each pass asks
-`file-regular-p' about that root, it is not a cheap spin either, it is an
-endless round trip to the host.  That is why `vfs_diff' and `file_sync'
-hung on a remote workspace while `write_file' did not.
+`file-regular-p' about that root, it is an endless round trip to the
+host.
 
-A plain \"/\" and the empty string are skipped, as they always were, and
-so is FULL itself: walking up from a path never yields that path."
+A plain \"/\" and the empty string are skipped, and so is FULL itself:
+walking up from a path never yields that path."
   (let ((ancestor (directory-file-name (file-name-directory full)))
         (ancestors nil)
         (next nil))
@@ -1996,10 +1973,9 @@ order).
 Every file is classified by `--refusal', and the reason it gives is
 carried out of here rather than asked for again: the set shown to the
 user, the reason printed beside each file, and the set the write will
-accept all come from one answer.  That is why conflicts are an alist and
-not a bare list of paths -- a caller that wants only the paths takes the
-cars, and one that wants to say why does not have to re-read the disk to
-find out."
+accept all come from one answer.  Conflicts are an alist rather than a
+bare list of paths so that a caller wanting to say why need not re-read
+the disk to find out."
   (let (conflicts blocked syncable)
     (dolist (file targets)
       (let ((refusal (gptel-yatools-vfs-refusal file)))
@@ -2399,9 +2375,7 @@ The counts are numbers, so every question here is asked with `zerop' or
          (read (gptel-yatools-vfs-read full)))
     ;; The file is read first and the regexp validated second, so a call
     ;; that is wrong twice -- no such file, and a broken pattern -- is
-    ;; told about the file.  It used to be the other way round, and the
-    ;; ordering was a `cond' clause here rather than a decision about
-    ;; which answer is more useful.
+    ;; told about the file.
     (gptel-yatools-vfs-with-text
      read
      (lambda (content provenance)
@@ -2416,15 +2390,14 @@ The counts are numbers, so every question here is asked with `zerop' or
            (goto-char (point-min))
            (let ((line-num 0)
                  (matches '()))
-             ;; Known and deliberate: `string-match-p' honours the ambient
-             ;; `case-fold-search' (t by default), so a regexp with no case
-             ;; construct matches case-insensitively.  A model that wants an
-             ;; exact case writes one into the regexp ([A-Z], \\`...\\'); the
-             ;; alternative -- binding `case-fold-search' here -- would make
-             ;; the tool's matching disagree with Emacs, which is the model's
-             ;; mental model of an "Emacs regexp".  Deferred, not overlooked;
-             ;; see `gptel-yatools-vfs--replace-once', which must be exact and
-             ;; binds it.
+             ;; `string-match-p' honours the ambient `case-fold-search' (t
+             ;; by default), so a regexp with no case construct matches
+             ;; case-insensitively.  A model that wants an exact case writes
+             ;; one into the regexp ([A-Z], \\`...\\'); binding
+             ;; `case-fold-search' here would make the tool's matching
+             ;; disagree with Emacs, which is the model's mental model of an
+             ;; "Emacs regexp".  `gptel-yatools-vfs--replace-once' must be
+             ;; exact and binds it.
              (while (not (eobp))
                (setq line-num (1+ line-num))
                (let ((line (buffer-substring-no-properties

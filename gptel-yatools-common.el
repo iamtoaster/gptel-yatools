@@ -38,10 +38,8 @@
 ;; rewrite its Result; advice on `NAME' sees everything, including the
 ;; deadline, and can stand in for the whole call.
 ;;
-;; This file is one module with four interfaces, and each is meant to be
-;; crossed at one seam rather than reached into.  They are declared here so
-;; that a caller knows which one it is using, and so that a later edit can
-;; tell a seam from an accident:
+;; This file is one module with four interfaces, each meant to be crossed at
+;; one seam rather than reached into:
 ;;
 ;;   respond   `gptel-yatools--respond' (render a Result), and
 ;;             `gptel-yatools-page' (the size budget, for a tool that pages
@@ -155,8 +153,8 @@ still resolves and renders paths against the root the call started in."
 (defun gptel-yatools--call-deadline ()
   "Return the deadline in seconds of the call in progress.
 
-Falls back on `gptel-yatools-timeout' outside a call, which is what a
-helper called directly used to read anyway."
+Falls back on `gptel-yatools-timeout' outside a call, for a helper called
+directly."
   (or (and gptel-yatools--call
            (gptel-yatools-call-deadline gptel-yatools--call))
       (gptel-yatools--resolve-timeout nil)))
@@ -171,7 +169,7 @@ helper called directly used to read anyway."
 ;;
 ;; Two tool modules run subprocesses, and neither of them wants to know how
 ;; one is polled, killed and reaped.  The four rules below are the same for
-;; both, and each one was learned the hard way:
+;; both:
 ;;
 ;;   - stderr is merged into stdout in the shell, because with `:stderr'
 ;;     Emacs creates a pipe process whose default sentinel appends
@@ -194,8 +192,8 @@ helper called directly used to read anyway."
 ;; wrong is silent rather than loud:
 ;;
 ;;   - the program is the *remote* shell, because `shell-file-name' names a
-;;     file on this machine.  Asking a container for
-;;     "/run/current-system/sw/bin/zsh" is a command that never starts;
+;;     file on this machine.  Asking a container for this machine's shell
+;;     is a command that never starts;
 ;;   - the kill goes through `signal-process' on the process object, which
 ;;     TRAMP translates into a remote `kill'.  A remote process's id is the
 ;;     id of the local ssh/docker client, so the process-group kill used
@@ -250,8 +248,8 @@ workspace is.
 `file-remote-p' alone cannot answer it.  For a multi-hop name it returns
 only the last hop, so \"/ssh:a|sudo:root@b:/etc/\" and
 \"/ssh:c|sudo:root@b:/etc/\" both answer \"/sudo:root@b:\" although they
-leave from different machines.  TRAMP's dissection keeps the hop, so its
-fields are the identity: method, user, host, port and the hop chain.
+leave from different machines.  TRAMP's dissection keeps the hop, so the
+identity is method, user, host, port and the hop chain.
 
 A name handled by something other than TRAMP falls back on the prefix
 `file-remote-p' gives, which is all such a handler offers."
@@ -272,8 +270,7 @@ A name handled by something other than TRAMP falls back on the prefix
 
 The label is what a message can name: \"ssh:a|sudo:root@b\" rather than
 the last hop alone.  It is built from `gptel-yatools--connection', so the
-two cannot describe different hosts -- there is one dissection, and one
-place that says what a connection is called."
+two cannot describe different hosts."
   (pcase (gptel-yatools--connection path)
     (`(,hop ,method ,user ,host ,port)
      (concat hop method ":"
@@ -292,11 +289,9 @@ there.
 Every candidate is asked whether it is executable *on the host*, including
 the shell the TRAMP method declares: a method's declared shell is a
 default (\"\\/bin/sh\" for every backend that ships with Emacs), not a
-promise, and a stripped busybox host where `/bin/sh' does not exist is
-exactly the case the fallbacks are for.  When nothing answers -- a
-backend that does not implement `file-executable-p' cannot be asked --
-the first candidate is returned anyway, so the command that fails names
-the shell it tried."
+promise.  When nothing answers -- a backend that does not implement
+`file-executable-p' cannot be asked -- the first candidate is returned
+anyway, so the command that fails names the shell it tried."
   (let ((remote (file-remote-p directory)))
     (or (gethash remote gptel-yatools--remote-shell-cache)
         (let* ((candidates
@@ -315,15 +310,10 @@ the shell it tried."
 ;; Jobs: work a tool has started and not yet finished
 ;;
 ;; A tool that hands its work to a process returns a JOB instead of a
-;; Result.  The body then says only *what to run* and *how to read the
-;; outcome*; the boundary decides whether to wait for it and render it, or
-;; to let gptel's callback render it whenever it arrives.
-;;
-;; That single decision is the whole difference between a synchronous and
-;; an asynchronous tool.  It is not a difference in the body, in the
-;; Result, or in the envelope -- so `execute_command' and `vfs_diff' run
-;; through the same spawner, and a synchronous tool is an asynchronous one
-;; whose answer is waited for.
+;; Result.  The body says only *what to run* and *how to read the outcome*;
+;; the boundary decides whether to wait for it and render it, or to let
+;; gptel's callback render it whenever it arrives.  That single decision is
+;; the whole difference between a synchronous and an asynchronous tool.
 ;;
 ;; A job is concluded exactly once.  A deadline timer and a process
 ;; sentinel can both fire, and gptel counts a tool result every time its
@@ -335,13 +325,9 @@ the shell it tried."
 ;; hook, arms the deadline and starts the status line counting.  The
 ;; registrar starts nothing -- the work is already running when it is
 ;; called -- and a job is registered at the moment it can be stopped, and
-;; not before.  `gptel-yatools--spawn-process' calls it once the process
-;; exists; a module whose work is not a process, such as the subagent,
-;; calls it as soon as it has something to stop.  So a new long-running
-;; tool gets the deadline, cancellation, the status line and the
-;; kill-buffer hook by returning a job: it never re-implements
-;; registration, and nothing outside this section knows what a live job is
-;; (ADR 0005).
+;; not before.  So a new long-running tool gets the deadline, cancellation,
+;; the status line and the kill-buffer hook by returning a job, and nothing
+;; outside this section knows what a live job is (ADR 0005).
 ;;-------------------------------------------------------------------------
 
 (defconst gptel-yatools--job-output-limit 1000000
@@ -362,8 +348,7 @@ is a whole request in another buffer; what they share is everything the
 boundary does with them -- the deadline, the status line, cancellation,
 and the rule that the answer is delivered exactly once.  The function
 slots are where the difference lives: a job that leaves them nil is a
-process job, and every job, either kind, is made live by
-`gptel-yatools--make-job-live'.
+process job.
 
 KIND       a symbol naming the work in the status line: `command' for a
            process, `subagent' for a child request.  Anything else is
@@ -464,8 +449,7 @@ it.")
   "Return the word describing COUNT jobs of KIND.
 
 A process job is a command, because that is what `execute_command'
-starts, and the status line said so before there was anything else to
-name."
+starts."
   (let ((word (pcase kind
                 ('command "command")
                 ('subagent "subagent")
@@ -549,7 +533,7 @@ does not reshuffle itself as jobs come and go."
 ;; have no way to stop: `C-g' has nothing to interrupt, and `gptel-abort'
 ;; looks the request up in `gptel--request-alist', whose entry is the
 ;; network process -- removed once curl finished, so during a tool call it
-;; finds nothing.  So cancellation is a thing this package has to provide.
+;; finds nothing.
 ;;
 ;; It kills the jobs first and stops the request second.  Delivering a
 ;; "cancelled" result instead would let the model retry the command, which
@@ -676,9 +660,7 @@ Every job comes through here, whatever its work is.  Registering it in
 its buffer's job list is what makes it cancellable and countable;
 installing the buffer's kill hook is what stops it when the chat goes
 away; arming the deadline timer is what bounds it; and noting the change
-starts the status line ticking.  What the job's own function slots add is
-only what stopping *this* work means and how its outcome is read, so a new
-long-running tool inherits the rest by returning a job (ADR 0005).
+starts the status line ticking (ADR 0005).
 
 The registrar starts nothing: the caller's work is already running.  That
 is why `gptel-yatools--spawn-process' calls it after `make-process'
@@ -688,8 +670,7 @@ registered earlier could be cancelled while it had no process to kill.
 
 JOB must already carry its BUFFER, STARTED and DEADLINE.  A nil deadline
 arms no timer.  A job that could not be started at all is not registered
-here: nothing could stop it, and the boundary delivers its START-ERROR
-without the registry."
+here: nothing could stop it."
   (let ((buffer (gptel-yatools-job-buffer job)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -784,11 +765,9 @@ for the same reason."
 (defun gptel-yatools--job-expire (job)
   "Stop JOB because its deadline has passed, and conclude it as timed out.
 
-This runs on a timer, where a signal is caught by Emacs's timer loop and
-merely logged -- so a command that could not be stopped cleanly would be
-left running with its job still counted as live.  The stop is therefore
-attempted and its failure ignored: concluding the job is what has to
-happen, and an outcome that says it timed out is the truth either way."
+This runs on a timer, where a signal is logged and nothing else, so the
+stop is attempted and its failure ignored: concluding the job is what has
+to happen, and an outcome that says it timed out is the truth either way."
   (unless (or (gptel-yatools-job-delivered job)
               (gptel-yatools-job-settled job))
     (setf (gptel-yatools-job-timed-out job) t)
@@ -839,8 +818,7 @@ that the kill still lands inside it -- larger on a remote host, where
 killing is a round trip before it is even a signal.
 
 Nothing waits.  The process reports to its sentinel when it exits and the
-deadline timer kills it if it does not, so the caller either concludes the
-job itself or leaves the boundary to."
+deadline timer kills it if it does not."
   (let* ((directory (or directory default-directory))
          (timeout (or timeout (gptel-yatools--call-deadline)))
          (remote (file-remote-p directory))
@@ -954,9 +932,8 @@ group is the remote one, killed through TRAMP.
 
 The process is started by `gptel-yatools--spawn-process', the same
 spawner a tool uses when it hands the work to the boundary, and waited
-for here.  So there is one process implementation, and a tool that needs
-the outcome rather than a Result -- `render_diagram', which batches --
-asks for it with this function instead of duplicating the rules."
+for here -- so there is one process implementation, and a tool that needs
+the outcome rather than a Result asks for it with this function."
   (gptel-yatools--await-job
    (gptel-yatools--spawn-process argv :directory directory :timeout timeout)))
 
@@ -1013,8 +990,7 @@ VFS count, for example, is what the header-line cache exists for.")
 ;; Turning the first into the second happens in exactly one function,
 ;; `gptel-yatools--resolve-path', at the tool's edge.  The VFS interface
 ;; takes absolute paths only and says so loudly (see
-;; `gptel-yatools-vfs--key'), which is what stops a second tool from
-;; quietly inventing a second base.
+;; `gptel-yatools-vfs--key').
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--workspace-root ()
   "Return the root every relative path of this package is resolved against.
@@ -1029,10 +1005,9 @@ and renders paths against the root the call started in."
 (defun gptel-yatools--detect-workspace-root ()
   "Return the workspace root implied by the current buffer, ignoring any pin.
 
-Separate from `gptel-yatools--workspace-root' so that reading the pin
-and computing a fresh answer are two different calls: the boundary needs
-the fresh one, and a function that called the pinned one to get it would
-never see the pin change."
+Separate from `gptel-yatools--workspace-root' so that reading the pin and
+computing a fresh answer are two different calls: the boundary needs the
+fresh one."
   (let ((proj (project-current)))
     (if proj
         (file-name-as-directory (expand-file-name (project-root proj)))
@@ -1066,8 +1041,7 @@ A name handled by something other than TRAMP falls back on what
 This is where a path the model wrote becomes a path this package acts
 on, and it is the only such place.  Everything past it takes absolute
 paths, so what a relative path means is decided once, by the tool that
-received it, rather than re-guessed by the VFS from whichever buffer
-happens to be current.
+received it.
 
 A remote workspace is one machine, and a path never leaves it:
 
@@ -1076,12 +1050,10 @@ A remote workspace is one machine, and a path never leaves it:
 - An absolute path -- \"/etc/hostname\", or \"~/notes\" -- is resolved
   against the root's *machine*.  `expand-file-name' would have treated it
   as a local absolute name and read this computer instead: in a
-  container-based workspace, `read_path \"/etc/hostname\"' used to answer
-  with the user's own desktop, which is the most misleading thing a file
-  tool can do, because the reply looks perfectly ordinary.
+  container-based workspace, `read_path \"/etc/hostname\"' answered with
+  the user's own desktop, and the reply looked perfectly ordinary.
 - A path that already names a machine is kept, unless it names a
-  different one, in which case it is refused: a tool call approved for a
-  workspace must not go and act on another host.
+  different one, in which case it is refused.
 
 A local workspace is unaffected: there, an absolute path is already a
 path on the one machine in play."
@@ -1132,11 +1104,10 @@ because a line break in a here-document is content, not an attack.")
 
 Escaping either was the mistake this exists to undo: they are the two C0
 characters that are legitimate in text meant to be read, and spelling them
-out turned a ten-line script -- or an indented one -- into one unreadable
-wall of <U+000A> and <U+0009>, which is not an audit of what will be
-approved.  Everything else invisible is still spelled out, and a carriage
-return still is: it says nothing a reader can see, and would move the
-cursor if it ever reached a terminal.")
+out turned a script into one unreadable wall of <U+000A> and <U+0009>.
+Everything else invisible is still spelled out, and a carriage return
+still is: it says nothing a reader can see, and would move the cursor if
+it ever reached a terminal.")
 
 (defun gptel-yatools--escape-chars (string regexp)
   "Return STRING with every match of REGEXP written as <U+XXXX>.
@@ -1208,8 +1179,7 @@ digits, is deliberate: a model that quotes an argument sends \"2.0\"
 about as often as \"2\", and refusing the first would make it fall back
 to a default -- a wrong answer that looks like a right one.  This is the
 primitive `gptel-yatools--coerce-integer' and `gptel-yatools--checked-arg'
-are both built from, so an argument is read the same way whether it is
-being defaulted or merely normalised."
+are both built from."
   (cond
    ((integerp value) value)
    ((numberp value)
@@ -1274,9 +1244,8 @@ answer than doing what it plainly meant.  A value that names no integer
 is left alone for the body to refuse in its own words.
 
 The declarations this reads are the `:args' list of
-`gptel-yatools-define-tool', which already states every argument's type
--- so the check is written once, in the definition, and not again as a
-`gptel-yatools--require-string' call at the top of thirteen bodies."
+`gptel-yatools-define-tool', which already states every argument's type,
+so the check is written once, in the definition."
   (if (and (null value) optional)
       nil
     (pcase type
@@ -1315,10 +1284,9 @@ of a large file costs a whole context window in one call.")
 
 A byte 0x80-0xFF read by `string-to-multibyte' becomes the character
 #x3FFF00+BYTE, whose charset is `eight-bit'.  Detecting them with a
-regexp costs one C-level pass over the text, where the character loop
-in `gptel-yatools--escape-raw-bytes' costs roughly a microsecond per
-character -- 60 ms for a 60 kB tool response, paid on every single
-call.")
+regexp costs one C-level pass over the text, where a per-character loop
+costs roughly a microsecond per character -- 60 ms for a 60 kB tool
+response, paid on every single call.")
 
 (defun gptel-yatools--escape-raw-bytes (string)
   "Return STRING with undecodable raw bytes and invisible characters escaped.
@@ -1340,8 +1308,8 @@ at all.
 
 Almost every response is ordinary text, which needs no escaping at
 all, so that case is detected first and returned as it is: the
-character loop below is only for the rare string that really does
-carry raw bytes."
+character loop below is only for the string that really does carry raw
+bytes."
   (let ((s (if (multibyte-string-p string)
                string
              (string-to-multibyte string))))
@@ -1376,10 +1344,7 @@ text unambiguous for the reader.
 
 That includes a bare trailing backslash and the prefixes \"\\x\" and
 \"\\xa\": an escape cut to one or two of its four characters reads as an
-escape with no byte behind it, which is exactly the ambiguity this
-function exists to avoid.  A legitimate backslash at the cut is lost
-with it -- truncation has already lost text, and an unambiguous cut is
-worth one character."
+escape with no byte behind it."
   (let ((cut (substring string 0 (min limit (length string)))))
     (if (string-match "\\\\\\(x[0-9a-f]?\\)?\\'" cut)
         (substring cut 0 (match-beginning 0))
@@ -1669,12 +1634,11 @@ failure from arriving as \"Error: Error: ...\"."
 ;;-------------------------------------------------------------------------
 ;; Tool call timeouts
 ;;
-;; Tool calls used to run synchronously inside gptel's request handler, so a
-;; tool that blocked -- a hung shell command, a read from a FIFO -- blocked
-;; Emacs itself.  Every tool still gets a deadline (120 seconds by default,
-;; or `gptel-yatools-async-timeout' for one that delivers asynchronously)
-;; plus an optional TIMEOUT argument for the rare call that genuinely needs
-;; longer, and that argument's description tells the model not to raise it
+;; A tool that blocks -- a hung shell command, a read from a FIFO -- blocks
+;; Emacs itself, so every tool gets a deadline (120 seconds by default, or
+;; `gptel-yatools-async-timeout' for one that delivers asynchronously) plus
+;; an optional TIMEOUT argument for the rare call that genuinely needs
+;; longer.  That argument's description tells the model not to raise it
 ;; unless it truly has to.
 ;;-------------------------------------------------------------------------
 (defvar gptel-yatools--timeout-defaults (make-hash-table :test #'equal)
@@ -1745,10 +1709,7 @@ must never be told a number the boundary will not enforce.
 
 This is the only place the model is told about timeouts: one argument
 description, stated once, naming the default and telling the model not
-to raise it unless the work genuinely needs longer.  Saying the same
-thing again at the end of every tool description was tried and dropped
--- it tripled the size of the whole tool interface and had to be
-re-appended on every reload to stay in step with this one."
+to raise it unless the work genuinely needs longer."
   (list :name "timeout"
         :type "integer"
         :description
@@ -1768,10 +1729,7 @@ from a sentinel knows the call's budget but not always its name, and a
 sentence with a gap is worse than one without the clause.
 
 This and `gptel-yatools--failure-envelope' are the only two places a
-failure is turned into something a model reads.  Three entry points used
-to build the same two envelopes each, in the same words, so a change to
-either sentence had to be made in five places and the fifth was always
-the one that got forgotten."
+failure is turned into something a model reads."
   (gptel-yatools--envelope
    :disk "Tool call timed out."
    (gptel-yatools--timeout-message seconds name)))
@@ -2347,26 +2305,22 @@ line) and :partial (the page is not the whole of TEXT)."
 ;; What the user is asked to approve
 ;;
 ;; gptel renders a pending tool call with `gptel--format-tool-call', which
-;; truncates every string argument at 256 characters.  For a tool whose
-;; arguments are the thing being approved -- a shell command is the one
-;; that matters -- that is the wrong failure: the call could be approved
-;; on a harmless prefix.  `gptel--tool-preview-alist' is gptel's answer: a
-;; tool-specific renderer in place of the default, asked for by name.
+;; truncates every string argument at 256 characters, so a call could be
+;; approved on a harmless prefix.  `gptel--tool-preview-alist' is gptel's
+;; answer: a tool-specific renderer in place of the default, asked for by
+;; name.
 ;;
-;; Two facts about that alist are easy to get wrong, and both were:
+;; Two facts about that alist are easy to get wrong:
 ;;
 ;; - Its docstring says the setup function is called with \"a plist of the
 ;;   corresponding tool call arguments\", but gptel actually passes
 ;;   `(gptel--map-tool-args TOOL-SPEC ARGS)' -- a positional list.  A
 ;;   renderer that reads it as a plist finds nothing and draws nil.
 ;; - The list it is handed is `gptel-tool-args'' order, which is the
-;;   declared order plus the TIMEOUT every tool gets.  So the renderer has
-;;   to be built from the same declaration the tool is.
+;;   declared order plus the TIMEOUT every tool gets.
 ;;
 ;; Hence `:preview': a tool names the arguments worth showing, and the
-;; definition builds the renderer that reads them -- by name, in the
-;; declared positions, so adding an argument cannot shift the line without
-;; a test noticing.
+;; definition builds the renderer that reads them by name.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--preview-value (value)
   "Return VALUE as it is written into a confirmation.
@@ -2374,14 +2328,11 @@ line) and :partial (the page is not the whole of TEXT)."
 A string is quoted with `prin1-to-string' after
 `gptel-yatools--printable-block': quoting is what keeps a `\"' or a `\\'
 in the value from being read as the end of it, and the printable pass is
-what spells out the invisible characters.  Newlines survive both.
-
-They have to.  A shell command holding a here-document, or a subagent's
-brief, is text a person is meant to read line by line; escaping the line
-breaks turned either into one dense line of <U+000A> that could only be
-approved on trust.  A value that spans lines is put on a line of its own
-so the block does not begin mid-line.  Anything that is not a string is
-printed as it prints itself."
+what spells out the invisible characters.  Newlines survive both: a shell
+command holding a here-document, or a subagent's brief, is text a person
+is meant to read line by line.  A value that spans lines is put on a line
+of its own so the block does not begin mid-line.  Anything that is not a
+string is printed as it prints itself."
   (if (stringp value)
       (let ((printed (prin1-to-string (gptel-yatools--printable-block value))))
         (if (string-match-p "\n" printed)
@@ -2528,17 +2479,15 @@ rather than repeated in each definition.
 
 The tool is added to gptel's registry, which is what `gptel-menu' lists,
 and to `gptel-yatools--tools', replacing an earlier tool of the same name
-in place.  Replacing in place is what lets one tool module be reloaded
-without reordering the list the rest of the package reads.
+in place, so one tool module can be reloaded without reordering the list
+the rest of the package reads.
 
 An asynchronous tool is accepted, and `:async' travels to gptel unchanged.
 gptel calls such a tool with a callback as its first argument and does not
 use the return value; the boundary delivers the envelope to that callback
-instead, which is why the result can arrive after the call has returned
-without any of the rendering rules changing.  The one thing that is still
-refused is a *synchronous* tool whose body returns a job: gptel would
-stringify it and send the printed struct to the model, so the boundary
-reports it as the definition bug it is when it happens."
+instead.  A *synchronous* tool whose body returns a job is refused: gptel
+would stringify it and send the printed struct to the model, so the
+boundary reports it as the definition bug it is."
   (let* ((async (plist-get slots :async))
          (timeout-default (plist-get slots :timeout-default))
          ;; `gptel-make-tool' would reject our own key, so it is taken out

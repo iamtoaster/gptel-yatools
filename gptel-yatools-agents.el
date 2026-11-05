@@ -805,17 +805,16 @@ than an answer that says the host had gone."
 ;; reply, a reasoning block, a tool call, and a tool call with its result.
 ;; A request that supplies a callback is telling gptel "I will draw it",
 ;; and the display branches of `gptel--insert-response' are then only
-;; reached if the callback forwards to it -- which is why a child used to
-;; show its prose and nothing else.
+;; reached if the callback forwards to it.
 ;;
 ;; The forwarding needs one more step than it looks.  `gptel--display-tool-results'
 ;; inserts each tool block by calling `(plist-get info :callback)' *itself*,
 ;; with a raw string -- it assumes the callback is `gptel--insert-response'.
 ;; Left alone, that nested call would land in this module's callback and be
-;; counted as a turn (and, for a tool result, could settle the child).  So
-;; the callback is pointed at `gptel--insert-response' for the duration and
-;; put back afterwards: gptel keeps this very plist and delivers every later
-;; turn through it, so restoring it is not tidiness, it is correctness.
+;; counted as a turn, and for a tool result could settle the child.  So the
+;; callback is pointed at `gptel--insert-response' for the duration and put
+;; back afterwards: gptel keeps this very plist and delivers every later
+;; turn through it, so restoring it is a correctness requirement.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-subagent--insert-response (record response info)
   "Insert RESPONSE into RECORD's child buffer as gptel would draw it.
@@ -870,8 +869,8 @@ truth and is recoverable.
 
 `quit' is caught separately from `error' because `condition-case' does
 not treat it as one: a `C-g' while the child's answer was being handled
-used to escape every handler here too, leaving the child running and its
-parent's tool call waiting for a result that was never going to arrive."
+would otherwise escape every handler here, leaving the child running and
+its parent's tool call waiting for a result that never arrives."
   (setf (gptel-yatools-subagent--record-info record) info)
   (condition-case err
       (gptel-yatools-subagent--dispatch record response info)

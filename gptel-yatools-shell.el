@@ -14,9 +14,7 @@
 ;; lives in `gptel-yatools-vfs.el' and Agent Skills in
 ;; `gptel-yatools-skills.el'.
 ;;
-;; The command runner is here rather than with the VFS because a command
-;; runs against the disk and only *reports* on the VFS: when changes are
-;; pending, its output carries a warning listing them.
+;; A command runs against the disk and only *reports* on the VFS.
 
 ;;; Code:
 
@@ -33,8 +31,7 @@
 When any VFS entries are pending, the envelope's comment warns the model
 that the command ran against disk, not the VFS: a file it expected to
 find may only exist in the pending changes, and one it read may be
-stale.  That warning is the whole reason a command result carries the
-VFS flag, since the output itself always describes the disk."
+stale."
   (let ((changed (gptel-yatools-vfs-pending-paths)))
     (gptel-yatools-ok
      output
@@ -49,11 +46,9 @@ VFS flag, since the output itself always describes the disk."
 (defun gptel-yatools-shell--refusal (sentence)
   "Return the result for a call refused before any command was started.
 
-SENTENCE is what the model is told.  The comment is deliberately not the
-command runner's: nothing ran, so nothing was read from disk and there is
-no output for a VFS warning to qualify.  Saying \"Command ran against
-disk\" here made a claim about an execution that never happened, and it
-contradicted the body it was attached to."
+SENTENCE is what the model is told.  The comment is not the command
+runner's: nothing ran, so nothing was read from disk and there is no
+output for a VFS warning to qualify."
   (gptel-yatools-ok sentence
                    :provenance :disk
                    :comment "No command was run."))
@@ -64,15 +59,10 @@ contradicted the body it was attached to."
 (defun gptel-yatools-shell--where (directory)
   "Return DIRECTORY as a command report should name it.
 
-A local directory reads as a workspace-relative path, exactly as before.
-A remote one names the host as well, because that is the one fact the
-model must not be left to infer: the command ran *there*, not on the
-machine Emacs is running on, and a report that says only \".\" cannot be
-told apart from the local case.
-
-The host is named through `gptel-yatools--connection-label', the same
-function `gptel-yatools-shell--machine' uses, so a report and a refusal
-cannot disagree about which machine they mean."
+A local directory reads as a workspace-relative path.  A remote one names
+the host as well: the command ran *there*, not on the machine Emacs is
+running on, and a report that says only \".\" cannot be told apart from
+the local case."
   (let ((label (gptel-yatools--connection-label directory)))
     (if label
         (format "%s on the remote host %s"
@@ -85,9 +75,7 @@ cannot disagree about which machine they mean."
 
 `shell-file-name' and `shell-command-switch' describe the shell on *this*
 machine.  A remote workspace has its own, and a local path there names
-nothing: the adapter used to hand the runner
-`(shell-file-name shell-command-switch COMMAND)', which on a host without
-that path is `exec: /run/…/zsh: not found' and exit 127."
+nothing: it is `exec: /path/on/this/machine: not found' and exit 127."
   (if (file-remote-p directory)
       (cons (gptel-yatools--remote-shell directory) "-c")
     (cons shell-file-name shell-command-switch)))
@@ -128,35 +116,25 @@ The result always carries a body: the command's exit code and combined
 output, or a description of why it could not be started.
 
 The command is killed once it outlives the current tool timeout
-\(the call's deadline, or `gptel-yatools-timeout'), so a hung command
-cannot block Emacs forever.  The spawner, the kill and the reap are
-`gptel-yatools--spawn-process's, in `gptel-yatools-common.el': this
-function is the adapter that turns an outcome into the sentence the
-model reads.
+\(the call's deadline, or `gptel-yatools-timeout').  The spawner, the
+kill and the reap belong to `gptel-yatools--spawn-process' in
+`gptel-yatools-common.el'; this function only turns an outcome into the
+sentence the model reads.
 
 The command is started, not waited for: the job goes back to the
 boundary, which either waits for it or hands the answer to gptel's
-callback, depending on whether the tool is declared `:async'.
+callback.
 
-A command runs where its workspace is, so a DIRECTORY on a different
-machine is refused rather than quietly run there: `expand-file-name' lets
-an absolute path replace the workspace root, and a command approved for a
-workspace would then touch a file system nobody named.  See
-`gptel-yatools-shell--elsewhere'."
+A DIRECTORY on a different machine is refused rather than quietly run
+there: `expand-file-name' lets an absolute path replace the workspace
+root, and a command approved for a workspace would then touch a file
+system nobody named."
   (let* ((root (gptel-yatools--workspace-root))
-         ;; Ask for the root once, before `default-directory' is rebound
-         ;; below: a relative path and a message must both mean the
-         ;; directory the call started in, not the subdirectory it runs
-         ;; in.  The call's context already pins it, so there is nothing
-         ;; to re-bind here.
          (timeout (gptel-yatools--call-deadline))
          (target-directory (if (and directory (not (string-empty-p directory)))
                                (expand-file-name directory root)
                              root))
          (shown-directory (gptel-yatools-shell--where target-directory))
-         ;; Resolved first because it is the first thing that can go
-         ;; wrong: a DIRECTORY on another machine must not even be asked
-         ;; whether it exists, since that question opens a connection.
          (elsewhere (gptel-yatools-shell--elsewhere root target-directory)))
     (cond
      (elsewhere
@@ -170,10 +148,6 @@ workspace would then touch a file system nobody named.  See
      (t
       (let ((shell (gptel-yatools-shell--shell target-directory)))
         (gptel-yatools--spawn-process
-         ;; The spawner merges stderr and closes stdin for every caller, so
-         ;; this adapter supplies nothing but the command itself and the
-         ;; directory -- the shell is this machine's locally and the
-         ;; host's remotely.
          (list (car shell) (cdr shell) command)
          :directory target-directory
          :timeout timeout
@@ -182,11 +156,10 @@ workspace would then touch a file system nobody named.  See
          (lambda (outcome)
            ;; Runs when the command has finished, in the buffer that owns
            ;; the call -- minutes later, for an asynchronous one.  The
-           ;; pending-VFS warning is computed now, not at call time,
-           ;; because it explains the output the model is about to read.
+           ;; pending-VFS warning is computed now, because it explains the
+           ;; output the model is about to read.
            ;;
-           ;; The command may also have changed files on disk, which can
-           ;; change which pending entries still differ, so the cached
+           ;; The command may have changed files on disk, so the cached
            ;; header-line count must not outlive it.
            (gptel-yatools-vfs-disk-moved-externally)
            (gptel-yatools-shell--command-result
@@ -255,20 +228,11 @@ a command that never started says why."
 ;;-------------------------------------------------------------------------
 ;; What the user is asked to approve
 ;;
-;; gptel renders a pending tool call with `gptel--format-tool-call', which
-;; truncates every string argument at 256 characters.  For `execute_command'
-;; that is the wrong failure: a command is approved on its text, so a long
-;; one could be approved on a harmless prefix.  It also escapes a newline,
-;; which matters just as much here, because an inline script arrives as
-;; one -- see `gptel-yatools--printable-block'.
-;;
-;; The fix used to live here, as a renderer written by hand and registered
-;; against `gptel--tool-preview-alist'.  It is now the `:preview' line of
-;; the definition above, which is where the argument order it has to agree
-;; with is declared -- see `gptel-yatools--preview-line' in
-;; `gptel-yatools-common.el'.  Keeping it there means adding an argument
-;; cannot leave the confirmation reading the wrong position, which is
-;; exactly what it did once.
+;; gptel truncates every string argument at 256 characters, which for
+;; `execute_command' would let a long command be approved on a harmless
+;; prefix.  The `:preview' line of the definition above is what replaces
+;; that, and it declares the argument order it reads -- see
+;; `gptel-yatools--preview-line' in `gptel-yatools-common.el'.
 ;;-------------------------------------------------------------------------
 
 (provide 'gptel-yatools-shell)

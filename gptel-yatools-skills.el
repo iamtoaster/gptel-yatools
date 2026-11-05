@@ -444,10 +444,9 @@ compares the text against DIR's name and so belongs to this directory."
 Disk only, deliberately.  Accepting a pending VFS copy as well would let
 the model write a `SKILL.md', load it, and be told its contents are
 authoritative -- all before the write has been reviewed, so the model
-would be authoring the rules it then obeys with the review bypassed.
-Every other agentic tool reads its rules files from disk for the same
-reason: a file the agent creates is not in force until it is written,
-and the person who reviews the write is the one who puts it in force."
+would be authoring the rules it then obeys.  A file the agent creates is
+not in force until it is written, and the person who reviews the write is
+the one who puts it in force."
   (file-regular-p (expand-file-name "SKILL.md" dir)))
 
 (defun gptel-yatools-skills--subdirectories (dir)
@@ -623,11 +622,10 @@ Returns (:skill SKILL) for a single match, (:ambiguous MATCHES) when the
 text identifies more than one skill, or nil when nothing matches.
 
 A bare name that occurs more than once is ambiguous *before* anything
-else is tried.  Handles are unique, so the earlier order -- handle,
-then path, then name -- let the one skill whose handle happened to spell
-an ambiguous name (the skill sitting directly in its root, whose path is
-that name) answer for all of them, while the index said the name matched
-several and never showed the others.
+else is tried.  Handles are unique, so a lookup order of handle, then
+path, then name would let the one skill whose handle happened to spell an
+ambiguous name (the skill sitting directly in its root, whose path is
+that name) answer for all of them.
 
 An ambiguous name is never resolved to \"the first one\": with skills
 grouped into directories, one name in two groups is a reasonable
@@ -800,15 +798,14 @@ plist:
   :summary  one line, for an echo area.
   :detail   the full text, for a tool reply.
 
-Deciding loadability here is the point.  Resolution used to answer only
-\"which skill does this name mean\", and every caller then asked \"is it
-valid?\" itself -- so the `skill' tool and `gptel-yatools-skills-add'
-could answer the same name differently, and did: the command threw the
-ambiguity away and told the user to run the command they had just run.
+Deciding loadability here is the point: an outcome of `loaded',
+`ambiguous', `unknown' or `invalid', so no caller asks a second question
+about the same name.  A caller that resolved a name and then tested it
+itself could answer the same name differently from another caller.
 
 The two renderings exist because the two callers need different lengths,
-not different wording: both come from here, so neither invents its own
-sentence about an ambiguous or invalid skill."
+not different wording, so neither invents its own sentence about an
+ambiguous or invalid skill."
   (pcase (gptel-yatools-skills--lookup (plist-get found :skills) name)
     (`(:skill ,skill)
      (if (plist-get skill :problems)
@@ -1107,9 +1104,7 @@ actually sent.
 
 Every name goes through `gptel-yatools-skills-resolve', the same outcome
 the `skill' tool adapts, so an ambiguous or invalid name is reported here
-the way it is reported to the model.  It used to be resolved separately,
-which is why this command could answer \"no skill named X; run
-`gptel-yatools-skills-add' to pick one\" for a name that matched two."
+the way it is reported to the model."
   (require 'gptel-context)
   (let* ((found (gptel-yatools-skills--discover))
          (sent nil))
@@ -1195,9 +1190,8 @@ NAMES is a list of skills, completed from everything
 (defun gptel-yatools-skills--header-line-label ()
   "Return the header-line label counting the skills attached to the context.
 
-The names used to be spelled out here, which cost more room the more
-skills were attached.  Only the count is shown now; the names are one
-click, or one `help-echo', away."
+Only the count is shown; the names are one click, or one `help-echo',
+away."
   (when-let* ((names (gptel-yatools-skills--attached-names)))
     (let ((count (length names)))
       (propertize

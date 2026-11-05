@@ -24,15 +24,13 @@
 ;; macro that defines it -- lives in `gptel-yatools-common.el', which the
 ;; tool modules require.  The tools themselves live in the file that owns
 ;; their subject: `gptel-yatools-vfs.el' for the filesystem,
-;; `gptel-yatools-shell.el' for the shell and workspace tools, and
-;; `gptel-yatools-skills.el' for Agent Skills.
+;; `gptel-yatools-shell.el' for the shell and workspace tools,
+;; `gptel-yatools-skills.el' for Agent Skills, `gptel-yatools-diagram.el'
+;; for diagrams and `gptel-yatools-agents.el' for child agents.
 ;;
-;; What is left here is the one thing that belongs to gptel rather than to
-;; any tool: a tool call must run in the buffer that owns the request, so
-;; that a chat's buffer-local VFS and `default-directory' apply.  gptel
-;; only anchors some of the paths that reach its dispatcher, so this file
-;; anchors the rest, and drops the stale VFS state that a reused
-;; inspection buffer would otherwise keep.
+;; What is left here belongs to gptel rather than to any tool: a tool call
+;; must run in the buffer that owns the request, so that a chat's
+;; buffer-local VFS and `default-directory' apply.
 ;;
 ;; Loading this file registers every tool in gptel's registry, so they
 ;; appear in the `gptel-menu' tool picker immediately.  Nothing is sent to
@@ -53,32 +51,24 @@
 ;;-------------------------------------------------------------------------
 ;; A tool call must run in the buffer that owns the request
 ;;
-;; Both `gptel-yatools-vfs' and `default-directory' are buffer-local, so
-;; a tool that runs in the wrong buffer reads and writes a fresh, empty
-;; VFS and resolves every relative path against a directory nobody asked
-;; about.  gptel only anchors some of the paths that reach
-;; `gptel--accept-tool-calls': the
-;; automatic path (`gptel--handle-tool-use') and the minibuffer confirmation
-;; path already re-enter the request buffer, but the dispatcher itself has
-;; no such wrapper, and `gptel--inspect-accept-tool-calls' calls it from the
-;; `*gptel-tool-calls*' inspection buffer.  A `write_file' accepted from
-;; there is stored in the inspection buffer's VFS -- which the chat buffer
-;; never sees -- and a `file_sync' accepted from there reports that the VFS
-;; has no pending changes even though the chat has plenty.
-;;
-;; One limit is recorded rather than fixed: a request whose chat buffer was
-;; killed dies inside gptel itself ("Selecting deleted buffer"); we only
-;; make the failure readable when we are the ones to notice it.
+;; Both `gptel-yatools-vfs' and `default-directory' are buffer-local, so a
+;; tool that runs in the wrong buffer reads a fresh, empty VFS and
+;; resolves every relative path against a directory nobody asked about.
+;; gptel re-enters the request buffer on the automatic and the
+;; confirmation path, but `gptel--inspect-accept-tool-calls' calls the
+;; dispatcher from the `*gptel-tool-calls*' inspection buffer, so a
+;; `write_file' accepted from there lands in that buffer's VFS and a
+;; `file_sync' accepted there finds nothing pending.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--tool-owner-buffer (&optional overlay)
   "Return the buffer the tool call in OVERLAY belongs to.
 
-OVERLAY, when it is the dispatch overlay, is the most precise answer: it
-lives in the buffer the model's request came from.  Otherwise the
-buffer recorded in `gptel--fsm-last''s request info is used, which is
-what the `*gptel-tool-calls*' inspection buffer carries.  Falling back
-on the current buffer keeps direct calls (tests, `eval', a tool invoked
-from a hook) working as before.
+OVERLAY, when it is the dispatch overlay, lives in the buffer the model's
+request came from and is the most precise answer.  Otherwise the buffer
+recorded in `gptel--fsm-last''s request info is used, which is what the
+`*gptel-tool-calls*' inspection buffer carries.  Falling back on the
+current buffer keeps direct calls (tests, `eval', a tool invoked from a
+hook) working.
 
 The result can be a killed buffer; callers must check `buffer-live-p'
 so that a dead owner is reported instead of silently running the tool
@@ -93,14 +83,10 @@ somewhere else."
 (defun gptel-yatools--accept-tool-calls-in-owner (function tool-calls &optional overlay)
   "Call FUNCTION on TOOL-CALLS and OVERLAY in the request's own buffer.
 
-FUNCTION is `gptel--accept-tool-calls'.  Re-entering the owner buffer is
-what keeps that buffer's VFS and `default-directory' in effect for the
-whole batch of calls, whichever buffer the user is looking at when the
-call is confirmed.
-
-The batch is anchored once, not once per call: no registered tool leaves
-another buffer current.  A tool that did switch buffers would still leak
-into the later calls of its batch."
+FUNCTION is `gptel--accept-tool-calls'.  Re-entering the owner buffer
+keeps that buffer's VFS and `default-directory' in effect for the whole
+batch of calls, whichever buffer the user is looking at when the call is
+confirmed.  The batch is anchored once, not once per call."
   (let ((owner (gptel-yatools--tool-owner-buffer overlay)))
     (cond
      ((not (buffer-live-p owner))
@@ -114,23 +100,17 @@ into the later calls of its batch."
 (defun gptel-yatools--update-tool-status (message &optional face)
   "Show MESSAGE in the owning gptel chat buffer's status indicator.
 
-Tools that may run for a while call this just before they start, so
-the header line says what is happening instead of continuing to show
+Tools that may run for a while call this just before they start, so the
+header line says what is happening instead of continuing to show
 \"Calling tool\".  MESSAGE should start with a space, matching gptel's
 own status strings.
 
-The frame is redrawn here, and that is the point of this function rather
-than a nicety.  `gptel--update-status' ends with
-`force-mode-line-update', which only *flags* the mode line: Emacs
-redraws when it next becomes idle.  A tool call does not become idle --
-a subprocess is polled until it exits, in `gptel-yatools--run-process' --
-so without an explicit redisplay the new status is set, is correct, and
-is never seen.  The screen keeps whatever was drawn before the call
-began, which is why a long command appeared to leave \"Typing...\" up.
-
-Measured on a terminal frame, in the polling loop `gptel-yatools--run-process'
-uses: `gptel--update-status' alone gives 0 redisplays over a two-second
-command; adding the `redisplay' below gives one, immediately.
+The explicit `redisplay' is required, not a nicety:
+`gptel--update-status' ends with `force-mode-line-update', which only
+*flags* the mode line, and Emacs redraws when it next becomes idle -- a
+tool call polling a subprocess never does.  Measured on a terminal frame:
+`gptel--update-status' alone gives 0 redisplays over a two-second
+command; adding the `redisplay' gives one, immediately.
 
 Nothing happens outside a live `gptel-mode' buffer, so calling a tool
 directly (tests, `eval', a hook) is unaffected."
@@ -145,18 +125,14 @@ directly (tests, `eval', a hook) is unaffected."
 (defun gptel-yatools--forget-inspection-vfs (&rest _)
   "Drop stale buffer-local VFS state from the tool-call inspection buffer.
 
-`gptel--inspect-tool-calls' reuses `*gptel-tool-calls*' and only
-switches it to `lisp-data-mode' the first time -- the mode switch, and
-with it `kill-all-local-variables', is skipped on every later use.  A
-`gptel-yatools-vfs' table left there by an earlier session therefore survives,
-and its entries would make the kill guard ask about files nobody
-touched from that buffer when the inspection window is closed.  Tools
-no longer run there (see
-`gptel-yatools--accept-tool-calls-in-owner'), so the table is pure debris.
+`gptel--inspect-tool-calls' reuses `*gptel-tool-calls*' and switches it to
+`lisp-data-mode' only the first time, so `kill-all-local-variables' is
+skipped on later uses and a `gptel-yatools-vfs' table left there survives.
+Tools no longer run in that buffer, so the table is debris -- and it would
+make the kill guard ask about files nobody touched.
 
-`default-directory' is deliberately left alone: it is inherited only
-when the buffer is created, but nothing resolves paths against it any
-more."
+`default-directory' is deliberately left alone: nothing resolves paths
+against it any more."
   (when (get-buffer "*gptel-tool-calls*")
     (with-current-buffer (get-buffer "*gptel-tool-calls*")
       (gptel-yatools-vfs-reset-buffer-state))))
@@ -167,9 +143,7 @@ more."
 A tool call in a remote workspace waits for the connection to be free
 rather than assuming it is, so this is a poll interval and not a guess at
 how long the work takes.  A tool that runs while the connection is busy
-is refused by TRAMP (\"Forbidden reentrant call\"), which is what a
-subagent fan-out produced: several calls arriving within one another's
-file operations."
+is refused by TRAMP (\"Forbidden reentrant call\")."
   :type 'number
   :group 'gptel-yatools)
 
@@ -178,9 +152,7 @@ file operations."
 
 At the default poll interval this is twenty seconds.  A tool that has
 waited that long is reported as an error rather than started anyway: a
-refused remote call is not a file that is missing, and pretending
-otherwise is what made a subagent describe the wrong machine in the first
-place."
+refused remote call is not a file that is missing."
   :type 'integer
   :group 'gptel-yatools)
 
@@ -192,13 +164,10 @@ place."
 (defun gptel-yatools--tramp-locked-p (buffer)
   "Return non-nil when BUFFER's TRAMP connection is in use.
 
-The lock is a property of the connection *process*, which is why it is
-read there and not from the file name: `with-tramp-locked-connection'
-sets it on the process for the whole of a file operation, and TRAMP
-refuses any second call into that connection until it is cleared.
-
-Nothing here opens a connection: dissecting a name is parsing, and
-looking up the process is a name lookup in `process-list'."
+The lock is a property of the connection *process*, not of the file name:
+`with-tramp-locked-connection' sets it on the process for the whole of a
+file operation.  Nothing here opens a connection: dissecting a name is
+parsing, and looking up the process is a lookup in `process-list'."
   (when (and (buffer-live-p buffer)
              (fboundp 'tramp-dissect-file-name))
     (when-let* ((vec (ignore-errors
@@ -224,25 +193,21 @@ instead, which is the only outcome a waiting chat can act on."
 (defvar gptel-yatools--tool-call-running nil
   "Non-nil while a tool call is inside the remote filesystem.
 
-TRAMP waits for its command's reply by pumping output, which runs
-timers.  A deferred tool call whose timer fires then would start inside
-another call's TRAMP operation and re-enter the connection -- corrupting
-its buffer (\"End of file during parsing\"), or having its own reply read
-by the wrong waiter.  Measured: three calls, three concurrent.
+TRAMP waits for its command's reply by pumping output, which runs timers,
+so a deferred call whose timer fires then would start inside another
+call's TRAMP operation and re-enter the connection -- corrupting its
+buffer (\"End of file during parsing\") or having its own reply read by
+the wrong waiter.  Measured: three calls, three concurrent.
 
-Emacs is single-threaded, so this flag is enough: nothing else can begin
-while a call is on the stack, and a call that finds it set waits its
-turn.")
+Emacs is single-threaded, so this flag is enough: a call that finds it set
+waits its turn.")
 
 (defcustom gptel-yatools-remote-tool-wait-limit 120
   "Most seconds a tool call may wait for another call to finish.
 
-A call that is waiting behind another one is only bounded by that other
-call finishing.  If it never does -- a connection that has silently died,
-a host that stopped answering -- the waiting calls would sit in gptel's
-TOOL state for ever, with no result and no error, which is exactly the
-state a stuck subagent was found in.  At this limit the wait is reported
-as an error instead."
+A call waiting behind another is otherwise bounded only by that other call
+finishing.  At this limit the wait is reported as an error instead of
+leaving the request in gptel's TOOL state with no result and no error."
   :type 'number
   :group 'gptel-yatools)
 
@@ -253,37 +218,34 @@ Each entry is a list (FUNCTION FSM ARGS TRIES DEADLINE).  The oldest is
 first, and only the oldest is ever considered, so calls run in the order
 they arrived.
 
-A queue rather than one timer per call, because of what TRAMP does to
-timers: `with-tramp-suspended-timers' -- which wraps every operation it
-performs -- binds `timer-list' to nil for the duration and discards
-whatever was pushed onto it.  A `run-at-time' made inside that section is
-therefore *silently lost*: it is never cancelled, never fires, and nothing
-reports it.  Measured directly: a timer created inside such a section
-never fires, while one created outside survives one.
+A queue rather than one timer per call, because `with-tramp-suspended-timers'
+-- which wraps every operation TRAMP performs -- binds `timer-list' to nil
+for the duration and discards whatever was pushed onto it.  A
+`run-at-time' made inside that section is silently lost: never cancelled,
+never fired, never reported.  Measured: a timer created inside such a
+section never fires, while one created outside survives one.
 
 The tool-use handler runs from gptel's process sentinel, which can be
-inside exactly such a section, so scheduling a timer there is precisely
-the thing that does not work.  One timer, created when this package
+inside exactly such a section.  One timer, created when this package
 loads, works through the queue instead.")
 
 (defvar gptel-yatools--tool-drain-timer nil
   "The timer that works through `gptel-yatools--deferred-tool-calls'.
 
-Created once at load time and re-armed from its own body.  Re-arming from
-inside the callback is safe because by then the TRAMP section is over;
-creating one from a request would not be.")
+Created once at load time and re-armed from its own body, which is safe
+because by then the TRAMP section is over.")
 
 (defun gptel-yatools--drain-deferred-calls ()
   "Run the oldest deferred tool call, if it can run now.
 
 Called on a timer.  Leaves the queue alone while another of this package's
 calls is on the stack, and drops entries whose request has moved on --
-with a trace line, because a call that vanished without a word is what
-this queue exists to stop happening.
+with a trace line, because a call that vanished without a word is
+indistinguishable from a hang.
 
-The deadline is checked before the reasons for waiting, not after: a call
-queued behind something that never finishes must still give up, and that
-is exactly the case where nothing else would ever reconsider it."
+The deadline is checked before the reasons for waiting: a call queued
+behind something that never finishes must still give up, and that is the
+case where nothing else would reconsider it."
   (when gptel-yatools--deferred-tool-calls
     (let* ((entry (car gptel-yatools--deferred-tool-calls))
            (function (nth 0 entry))
@@ -294,8 +256,8 @@ is exactly the case where nothing else would ever reconsider it."
            (buffer (ignore-errors (plist-get (gptel-fsm-info fsm) :buffer))))
       (condition-case err
           (cond
-           ;; The request moved on, or its buffer died.  Legitimate
-           ;; reasons to stop, but they are recorded: a call that simply
+           ;; The request moved on, or its buffer died.  A legitimate
+           ;; reason to stop, but it is recorded: a call that simply
            ;; disappears is indistinguishable from a hang.
            ((not (and (buffer-live-p buffer)
                       (eq (gptel-fsm-state fsm) 'TOOL)))
@@ -317,8 +279,7 @@ is exactly the case where nothing else would ever reconsider it."
                            gptel-yatools-remote-tool-wait-limit))))
            ;; Another of this package's calls is on the stack.  Emacs runs
            ;; one timer at a time, so this is the only guard that keeps
-           ;; two calls from starting inside one another: TRAMP runs
-           ;; timers while it waits for a reply.
+           ;; two calls from starting inside one another.
            (gptel-yatools--tool-call-running
             (gptel-yatools--trace "wait: another call is running"))
            ;; Another operation holds the connection.  Leave it queued.
@@ -350,10 +311,9 @@ is exactly the case where nothing else would ever reconsider it."
 (defun gptel-yatools--ensure-drain-timer ()
   "Start the queue's timer, if it is not already running.
 
-Called at load time, and from anywhere the queue grows: when the timer is
-missing this creates it, which only works from outside a TRAMP section --
-but the timer is a repeating one that re-arms from its own body, so it is
-not missing at those moments."
+Called at load time, and from anywhere the queue grows.  Creating it only
+works from outside a TRAMP section, but it is a repeating timer that
+re-arms from its own body, so it is not missing at those moments."
   (unless (timerp gptel-yatools--tool-drain-timer)
     (setq gptel-yatools--tool-drain-timer
           (run-with-timer
@@ -362,8 +322,7 @@ not missing at those moments."
              (condition-case err
                  (gptel-yatools--drain-deferred-calls)
                ;; A signal here would be logged and the queue would stop
-               ;; being worked, which is the failure this file keeps
-               ;; rediscovering.  The timer repeats, so it recovers.
+               ;; being worked.  The timer repeats, so it recovers.
                (error (gptel-yatools--trace "drain error: %S" err))))))))
 
 (defun gptel-yatools--run-tool-call-later (function fsm args tries &optional deadline)
@@ -376,10 +335,9 @@ request that waits for ever.
 DEADLINE, in `float-time' units, bounds the whole wait: it is set on the
 first call and carried through every pass of the queue.
 
-Nothing is scheduled here.  That is the whole point: this can run inside
-TRAMP's suspended-timer section, where a timer created for the purpose is
-silently discarded.  The entry is queued, and the one timer made at load
-time picks it up."
+Nothing is scheduled here: this can run inside TRAMP's suspended-timer
+section, where a timer created for the purpose is discarded.  The entry
+is queued, and the one timer made at load time picks it up."
   (let ((deadline (or deadline
                       (+ (float-time) gptel-yatools-remote-tool-wait-limit))))
     (unless (gptel-yatools--deferred-call-p fsm)
@@ -398,34 +356,25 @@ time picks it up."
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)
   "Run gptel's tool-use handler, but not from inside a process sentinel.
 
-gptel runs a tool call from the response process's sentinel: when curl
-finishes, the sentinel moves the state machine through TYPE and into TOOL,
-whose handler applies the tools.  In a remote workspace that is a TRAMP
-call nested inside whatever else Emacs was doing, and TRAMP refuses a
-second call into a connection it is already using -- \"Forbidden reentrant
-call of Tramp\".  Measured both ways: a tool called from a process
-sentinel while a remote file's attributes are being read fails exactly
-that way, and the same call succeeds from a timer.
+gptel runs a tool call from the response process's sentinel.  In a remote
+workspace that is a TRAMP call nested inside whatever else Emacs was
+doing, and TRAMP refuses a second call into a connection it is already
+using: \"Forbidden reentrant call of Tramp\".  Measured both ways: a tool
+called from a process sentinel while a remote file's attributes are being
+read fails that way, and the same call succeeds from a timer.
 
-So for a remote workspace the handler is deferred, then waits until the
-connection is free.  The connection's lock says when another operation
-is running; a flag says when another of this package's own calls is, since
-those can otherwise start inside one another.
+So for a remote workspace the handler is deferred until the connection is
+free.  The connection's lock says when another operation is running; a
+flag says when another of this package's own calls is.
 
-Nothing here schedules a timer.  See `gptel-yatools--deferred-tool-calls':
-a timer created at this point can be silently discarded, because this runs
-from gptel's process sentinel, which may be inside TRAMP's
-suspended-timer section.
+Nothing here schedules a timer -- see `gptel-yatools--deferred-tool-calls'.
 
-A local workspace is untouched: there is no connection to re-enter, and a
-tool call keeps running inline.
+A local workspace is untouched: there is no connection to re-enter.
 
-Both paths are guarded, and that matters as much as the waiting.  This
-runs from gptel's state-machine handler, which itself runs inside
-`with-demoted-errors' in the process sentinel: an error escaping here is
-turned into a message and the request is left in TOOL with no result and
-no error, for ever.  A failure is reported to the request instead, so the
-chat says what happened."
+Both paths are guarded: this runs from gptel's state-machine handler,
+which runs inside `with-demoted-errors' in the process sentinel, so an
+error escaping here leaves the request in TOOL with no result and no
+error, for ever.  A failure is reported to the request instead."
   (let ((buffer (plist-get (gptel-fsm-info fsm) :buffer)))
     (gptel-yatools--trace "arrive: buffer=%S remote=%S state=%S"
                           buffer
@@ -461,8 +410,8 @@ chat says what happened."
 (gptel-yatools--ensure-drain-timer)
 
 ;; `advice-add' is idempotent for an identical advice function, but the
-;; guard makes the intent explicit and keeps the load path obviously safe
-;; to re-run (the test suite reloads this file on purpose).
+;; guard keeps the load path obviously safe to re-run (the test suite
+;; reloads this file on purpose).
 (unless (advice-member-p #'gptel-yatools--accept-tool-calls-in-owner
                          'gptel--accept-tool-calls)
   (advice-add 'gptel--accept-tool-calls :around
@@ -479,21 +428,18 @@ chat says what happened."
 ;; then have no way to stop: `C-g' has nothing on the stack to interrupt,
 ;; and `gptel-abort' looks the request up in `gptel--request-alist', whose
 ;; entry is the *network* process -- removed once the response arrived, so
-;; during a tool call it finds nothing and does nothing.
+;; during a tool call it finds nothing.
 ;;
-;; So cancellation is provided here, where the gptel adaptation lives: a
-;; command, a key in `gptel-mode-map', and advice so that gptel's own abort
-;; does what its name promises when the thing running is a tool.
+;; So cancellation is provided here: a command, a key in `gptel-mode-map',
+;; and advice so that gptel's own abort does what its name promises when
+;; the thing running is a tool.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--abort-cancels-tools (&optional buffer)
   "Kill this package's running tool jobs when gptel aborts BUFFER.
 
 BUFFER defaults to the current buffer, and is optional because this is
 advice on `gptel-abort': an advice narrower than the function it guards
-turns a working abort into \"Wrong number of arguments\".
-
-Aborting a request should stop the command it started, not leave it
-running on the host with its output going nowhere."
+turns a working abort into \"Wrong number of arguments\"."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (gptel-yatools--cancel-jobs buffer))))
@@ -504,8 +450,7 @@ running on the host with its output going nowhere."
 `gptel-abort' declares BUF as a required argument, but its docstring says
 it \"defaults to the current buffer\" and a key bound to it usually passes
 nothing.  Following the docstring produced \"Wrong number of arguments\"
-from `gptel-abort' itself, so the promise is kept here rather than left to
-be discovered."
+from `gptel-abort' itself."
   (apply function (or args (list (current-buffer)))))
 
 (unless (advice-member-p #'gptel-yatools--abort-accepts-no-argument
@@ -519,8 +464,7 @@ be discovered."
 ;; `C-c RET' is the only binding `gptel-mode-map' ships with, and gptel's
 ;; own `C-c C-k' bindings live in other maps (the tool-call actions map,
 ;; the inspection map, the request-preview buffer), which take precedence
-;; wherever they apply.  A user who wants a different key rebinds this one
-;; in their config, as with any package key.
+;; wherever they apply.
 (when (boundp 'gptel-mode-map)
   (define-key gptel-mode-map (kbd "C-c C-k")
               #'gptel-yatools-cancel-tool-calls))
@@ -529,16 +473,16 @@ be discovered."
 ;; Drawing the header line
 ;;
 ;; gptel builds `header-line-format' as (BACKEND STATUS INFO), and INFO
-;; right-aligns itself with a `:align-to' space.  Labels from this package
-;; have to join that group rather than sit beside it: appended after INFO
-;; they are drawn past the right edge, inserted before it they are stranded
-;; next to the backend name.  So the INFO element is replaced wholesale by a
+;; right-aligns itself with a `:align-to' space.  A label from this package
+;; has to join that group rather than sit beside it: appended after INFO it
+;; is drawn past the right edge, inserted before it it is stranded next to
+;; the backend name.  So the INFO element is replaced wholesale by a
 ;; segment that renders every label and gptel's own indicators as one
 ;; right-aligned string.
 ;;
-;; This lives here, with the other gptel adaptation, and not in a tool
-;; module: it touches gptel private state (`gptel--header-line-info') and
-;; nothing about the filesystem.  Modules contribute labels through
+;; This touches gptel private state (`gptel--header-line-info') and nothing
+;; about the filesystem, so it belongs here and not in a tool module.
+;; Modules contribute labels through
 ;; `gptel-yatools-header-line-extra-functions' and never draw.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools--header-line-extras ()
@@ -595,11 +539,9 @@ Element 1 is the status indicator, which gptel rewrites in place with
 `(setf (nth 1 header-line-format) ...)'.  Element 2 is the one replaced
 here.
 
-Replacing in place, rather than dropping the segment and appending it,
-is what makes a second run harmless: removing it first shortens the list
-below the length the replacement is guarded on, so the segment would be
-dropped for good.  gptel rebuilds the list on every request, but this
-also has to survive being run twice."
+Replacing in place rather than dropping the segment and appending it is
+what makes a second run harmless: removing it first shortens the list
+below the length the replacement is guarded on."
   (when (and gptel-use-header-line (consp header-line-format))
     (let* ((fmt (copy-sequence header-line-format))
            (existing (cl-position gptel-yatools--header-line-segment fmt
@@ -622,7 +564,7 @@ also has to survive being run twice."
 ;; Each module defines its own tools with `gptel-yatools-define-tool', which
 ;; registers them as it defines them, so there is no list to assemble here.
 ;; The modules are required at this point and not earlier: they build on
-;; `gptel-yatools-common.el', and they are what this file is glue for.
+;; `gptel-yatools-common.el'.
 ;;-------------------------------------------------------------------------
 (require 'gptel-yatools-vfs)
 (require 'gptel-yatools-shell)

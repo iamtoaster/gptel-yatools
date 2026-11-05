@@ -1,5 +1,10 @@
 ;;; gptel-yatools-skills-tests.el --- Tests for the Agent Skills tool  -*- lexical-binding: t; no-byte-compile: t; -*-
 
+;; Copyright (C) 2026  Vladislav Slobodenyuk
+
+;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
+;; SPDX-License-Identifier: MIT
+
 ;; Loaded on demand only, like the main suite.  See the usage notes at the
 ;; top of `gptel-yatools-tests.el'; this file shares its helpers, so loading
 ;; it loads the main suite too, and the two are run together:

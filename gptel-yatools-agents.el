@@ -1,6 +1,6 @@
 ;;; gptel-yatools-agents.el --- Child agents the model can delegate to  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025  Vladislav Slobodenyuk
+;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
 ;; SPDX-License-Identifier: MIT

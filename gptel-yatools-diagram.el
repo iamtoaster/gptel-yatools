@@ -1,6 +1,6 @@
 ;;; gptel-yatools-diagram.el --- Diagrams in the chat buffer  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025  Vladislav Slobodenyuk
+;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
 ;; SPDX-License-Identifier: MIT

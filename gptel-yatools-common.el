@@ -1,6 +1,6 @@
 ;;; gptel-yatools-common.el --- What every gptel-yatools tool is  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025  Vladislav Slobodenyuk
+;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
 ;; SPDX-License-Identifier: MIT

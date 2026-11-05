@@ -1,6 +1,6 @@
 ;;; gptel-yatools-agents-tests.el --- Tests for child agents  -*- lexical-binding: t; no-byte-compile: t; -*-
 
-;; Copyright (C) 2025  Vladislav Slobodenyuk
+;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
 ;; SPDX-License-Identifier: MIT

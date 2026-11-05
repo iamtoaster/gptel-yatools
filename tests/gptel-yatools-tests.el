@@ -1,6 +1,6 @@
 ;;; gptel-yatools-tests.el --- Tests for the package glue and shared tools  -*- lexical-binding: t; no-byte-compile: t; -*-
 
-;; Copyright (C) 2025  Vladislav Slobodenyuk
+;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
 ;; SPDX-License-Identifier: MIT

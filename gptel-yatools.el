@@ -1,6 +1,6 @@
 ;;; gptel-yatools.el --- Extra tools for gptel  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025  Vladislav Slobodenyuk
+;; Copyright (C) 2026  Vladislav Slobodenyuk
 
 ;; Author: Vladislav Slobodenyuk <toastergithubmail@gmail.com>
 ;; Version: 0.1.0

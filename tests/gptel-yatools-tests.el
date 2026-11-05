@@ -907,7 +907,8 @@ away from correct; re-rooting the path would guess at what was meant."
   (gptel-yatools-test--with-remote
     (with-temp-buffer
       (gptel-yatools-test--vfs
-        (let ((result (gptel-yatools-execute-command "pwd" "/tmp/")))
+        (let ((result (gptel-yatools-execute-command
+                       "pwd" temporary-file-directory)))
           (gptel-yatools-test--should-be-enveloped result)
           (should (string-match-p "remote host" result))
           (should (string-match-p "on this machine" result))
@@ -1459,7 +1460,7 @@ dissection, which keeps the hop."
     (should-not (equal (gptel-yatools--connection "/ssh:h#22:/x")
                        (gptel-yatools--connection "/ssh:h#2222:/x")))
     ;; A local path is not on any connection.
-    (should (null (gptel-yatools--connection "/tmp/")))))
+    (should (null (gptel-yatools--connection temporary-file-directory)))))
 
 (ert-deftest gptel-yatools-test-subprocesses-are-run-at-one-seam ()
   "No tool module may build its own process loop.

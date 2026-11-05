@@ -2228,11 +2228,17 @@ and as nothing at all once the tabs are spelled out."
                          " [runs in the background])\n"))))
 
 (ert-deftest gptel-yatools-test-command-confirmation-names-the-directory ()
-  "The working directory is part of what is being approved."
-  (should (string-match-p
-           "directory=\"/tmp/x\""
-           (gptel-yatools-test--preview
-            "execute_command" (list :command "ls" :directory "/tmp/x")))))
+  "The working directory is part of what is being approved.
+
+The path used here is built from `temporary-file-directory' rather than
+written as \"/tmp/x\", so the test says the same thing on a machine whose
+temp directory is somewhere else."
+  (let ((directory (directory-file-name
+                    (expand-file-name "x/" temporary-file-directory))))
+    (should (string-match-p
+             (regexp-quote (format "directory=\"%s\"" directory))
+             (gptel-yatools-test--preview
+              "execute_command" (list :command "ls" :directory directory))))))
 
 (ert-deftest gptel-yatools-test-command-confirmation-names-the-timeout ()
   "A per-call timeout is part of what will happen, and is shown too.

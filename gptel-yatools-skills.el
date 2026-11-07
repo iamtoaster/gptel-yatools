@@ -1156,7 +1156,8 @@ you want to see and edit exactly what is being sent, or when
 `gptel-use-context' is off.
 
 NAMES is a list of skills, completed from everything
-`gptel-yatools-skill-directories' holds."
+`gptel-yatools-skill-directories' holds.  INSERT, when non-nil, puts them
+at point for one request instead of attaching them to the context."
   (interactive
    (let* ((skills (plist-get (gptel-yatools-skills--discover) :skills))
           (candidates (gptel-yatools-skills--candidates skills))
@@ -1168,7 +1169,10 @@ NAMES is a list of skills, completed from everything
 
 ;;;###autoload
 (defun gptel-yatools-skills-remove (names)
-  "Stop sending skills previously added with `gptel-yatools-skills-add'."
+  "Stop sending skills previously added with `gptel-yatools-skills-add'.
+
+NAMES is a list of skill names; an empty list, or a list of empty
+strings, detaches every skill in the buffer."
   (interactive
    (list (completing-read-multiple
           "Skill to stop sending (comma separated, empty for all): "

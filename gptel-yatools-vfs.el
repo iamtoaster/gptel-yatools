@@ -92,7 +92,7 @@ picked up too.")
 (defun gptel-yatools-vfs--table ()
   "Return this buffer's VFS hash table, creating it if needed.
 
-Also installs the kill-buffer guard, so a buffer holding unsynced
+Also installs the `kill-buffer' guard, so a buffer holding unsynced
 changes cannot be killed by accident.  The guard is (re)installed on
 every call because the table may already exist from an earlier call, and
 `add-hook' is idempotent."
@@ -113,7 +113,7 @@ proceed instead of breaking batch cleanup."
     (or noninteractive
         (null paths)
         (yes-or-no-p
-         (format "%d unsynced VFS change(s) in this buffer (%s). Kill anyway? "
+         (format "%d unsynced VFS change(s) in this buffer (%s).  Kill anyway? "
                  (length paths)
                  (mapconcat #'gptel-yatools--display-path paths ", "))))))
 
@@ -129,7 +129,7 @@ against whichever buffer is current -- the failure that made
 `write_file' and `read_path' disagree about what \"p.txt\" names."
   (if (file-name-absolute-p path)
       (expand-file-name path)
-    (error "gptel-yatools: internal error: the VFS was given the relative path %S; tool functions must resolve paths with `gptel-yatools--resolve-path' before calling the VFS"
+    (error "Error: internal error: the VFS was given the relative path %S; tool functions must resolve paths with `gptel-yatools--resolve-path' before calling the VFS"
            path)))
 
 ;;-------------------------------------------------------------------------
@@ -266,10 +266,10 @@ sync from silently transcoding line endings (CRLF) or legacy 8-bit
 encodings (ISO-8859-1, Shift-JIS, ...) to UTF-8/unix.
 
 Only regular files are considered: reading a FIFO blocks forever and
-reading /dev/zero or /dev/urandom never ends.  An unreadable file
-(permission denied, I/O error) yields nil instead of signalling, so a
-single unreadable pending file cannot break every tool call and every
-redisplay of the header line."
+reading /dev/zero or /dev/urandom never ends.  An unreadable file such as
+one refused by permissions, or an I/O error, yields nil instead of
+signalling, so a single unreadable pending file cannot break every tool
+call and every redisplay of the header line."
   (when (file-regular-p path)
     (condition-case nil
         (with-temp-buffer
@@ -288,8 +288,8 @@ redisplay of the header line."
 CODING is a value previously recorded from `last-coding-system-used'.
 Auto-detected (\"undecided\") coding systems are replaced by their
 UTF-8 equivalent with the same end-of-line convention: a file that
-was decoded successfully as `undecided' is by definition valid UTF-8
-(or plain ASCII), so re-encoding it as UTF-8 is lossless."
+was decoded successfully as `undecided' is by definition valid UTF-8, or
+plain ASCII, so re-encoding it as UTF-8 is lossless."
   (cond
    ((null coding) 'utf-8-unix)
    ((eq (coding-system-base coding) 'undecided)
@@ -928,7 +928,7 @@ and the error channel the boundary renders hardcodes `vfs=\"false\"'."
 CODING is the tool argument: a coding system name, or nil to keep what
 the file already has."
   (when (and coding (not (coding-system-p (intern coding))))
-    (error "Error: unknown coding system '%s'. Use an Emacs coding system name such as utf-8, iso-latin-1 or utf-8-dos."
+    (error "Error: unknown coding system '%s'.  Use an Emacs coding system name such as utf-8, iso-latin-1 or utf-8-dos"
            coding))
   (gptel-yatools-vfs--resolve-coding
    (or (and coding (intern coding))
@@ -1046,9 +1046,9 @@ escape hatch survives, it just is not the model's to pull."
   (let ((name (gptel-yatools--display-path full)))
     (unless (and (not noninteractive)
                  (y-or-n-p
-                  (format "%s changed on disk since this chat captured it. Overwrite those changes with the VFS version? "
+                  (format "%s changed on disk since this chat captured it.  Overwrite those changes with the VFS version? "
                           name)))
-      (error "Error: cannot write %s: it changed on disk since the VFS captured it. overwrite=true discards that change and needs the user's confirmation, which was not given. Nothing was written. Call vfs_discard and read the file again instead, or ask the user."
+      (error "Error: cannot write %s: it changed on disk since the VFS captured it.  overwrite=true discards that change and needs the user's confirmation, which was not given.  Nothing was written.  Call vfs_discard and read the file again instead, or ask the user"
              name))))
 
 (defun gptel-yatools-vfs-write (path content &optional overwrite coding)
@@ -1076,7 +1076,7 @@ it also asks the user before the baseline is refreshed."
          (target (gptel-yatools-vfs--coding full coding)))
     (cond
      ((not (stringp content))
-      (error "Error: content must be a string."))
+      (error "Error: content must be a string"))
      ;; The remedy differs by where the blocking file lives, and only the
      ;; caller of a write can act on either: a pending entry goes away with
      ;; `vfs_discard', a file on disk does not.
@@ -1094,27 +1094,27 @@ it also asks the user before the baseline is refreshed."
      ;; escaped: there is no legitimate reason to create one, and the
      ;; refusal is one place that covers every writing tool.
      ((string-match-p gptel-yatools--control-char-regexp full)
-      (error "Error: cannot write %s: the path contains a control or invisible character. Rename the file, or write it from the shell if you really mean it. Nothing was written."
+      (error "Error: cannot write %s: the path contains a control or invisible character.  Rename the file, or write it from the shell if you really mean it.  Nothing was written"
              (gptel-yatools--display-path full)))
      (policy-error
-      (error "Error: cannot write %s: %s. Nothing was written."
+      (error "Error: cannot write %s: %s.  Nothing was written"
              (gptel-yatools--display-path full)
              policy-error))
      ((file-directory-p full)
-      (error "Error: cannot write %s: it is a directory on disk."
+      (error "Error: cannot write %s: it is a directory on disk"
              (gptel-yatools--display-path full)))
      ;; Writing a file over a virtual directory would make every pending
      ;; child unsyncable ("File exists"), so reject it at write time.
      ((gptel-yatools-vfs--has-children-p full)
-      (error "Error: cannot write %s: it is a directory in the VFS because pending file(s) are stored under it. Discard those entries first."
+      (error "Error: cannot write %s: it is a directory in the VFS because pending file(s) are stored under it.  Discard those entries first"
              (gptel-yatools--display-path full)))
      ;; Writing to a FIFO blocks until a reader appears, and to a device it
      ;; may fail or scribble on hardware.
      ((and (file-exists-p full) (not (file-regular-p full)))
-      (error "Error: cannot write %s: it is not a regular file (device, FIFO or socket)."
+      (error "Error: cannot write %s: it is not a regular file (device, FIFO or socket)"
              (gptel-yatools--display-path full)))
      ((not (gptel-yatools-vfs--encodable-p content target))
-      (error "Error: %s cannot represent %s. Nothing was written. Either remove it, or pass coding=\"utf-8\" to convert %s to UTF-8 on sync."
+      (error "Error: %s cannot represent %s.  Nothing was written.  Either remove it, or pass coding=\"utf-8\" to convert %s to UTF-8 on sync"
              target
              (if-let* ((culprit (gptel-yatools-vfs--first-unencodable content target)))
                  (format "%S" culprit)
@@ -1158,9 +1158,9 @@ defaults to t, and an edit for \"hello\" would silently land on \"Hello\"
           (unless first (setq first (match-beginning 0))))
         (cond
          ((zerop count)
-          (error "Error: the text to replace was not found. Read the file again and copy the exact text, including whitespace and indentation."))
+          (error "Error: the text to replace was not found.  Read the file again and copy the exact text, including whitespace and indentation"))
          ((> count 1)
-          (error "Error: the text to replace occurs %d times. It must be unique; include more surrounding context in old_string."
+          (error "Error: the text to replace occurs %d times.  It must be unique; include more surrounding context in old_string"
                  count))
          (t
           (goto-char first)
@@ -1183,11 +1183,11 @@ accepts a character, and a JSON number reaching it would replace the
 match with that character, while nil is not a way to spell \"delete\" --
 \"\" is."
   (unless (stringp old)
-    (error "Error: old_string must be a string."))
+    (error "Error: old_string must be a string"))
   (unless (stringp new)
-    (error "Error: new_string must be a string. Use \"\" to delete the matched text."))
+    (error "Error: new_string must be a string.  Use \"\" to delete the matched text"))
   (when (string-empty-p old)
-    (error "Error: old_string must not be empty."))
+    (error "Error: old_string must not be empty"))
   (let* ((read (gptel-yatools-vfs-read path))
          (kind (plist-get read :kind))
          (full (gptel-yatools-vfs--key path)))
@@ -1196,7 +1196,7 @@ match with that character, while nil is not a way to spell \"delete\" --
       ;; The read tools refuse to show binary content, so an edit here
       ;; could only be a blind guess at bytes the model has never seen.
       ;; Replacing such a file wholesale is fine.
-      (error "Error: %s is a binary file (%s); it cannot be edited as text. Use write_file to replace it wholesale, or execute_command to inspect it."
+      (error "Error: %s is a binary file (%s); it cannot be edited as text.  Use write_file to replace it wholesale, or execute_command to inspect it"
              (gptel-yatools--display-path full)
              (if-let* ((size (plist-get read :size)))
                  (format "%d bytes" size)

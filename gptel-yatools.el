@@ -66,10 +66,11 @@
 
 OVERLAY, when it is the dispatch overlay, lives in the buffer the model's
 request came from and is the most precise answer.  Otherwise the buffer
-recorded in `gptel--fsm-last''s request info is used, which is what the
-`*gptel-tool-calls*' inspection buffer carries.  Falling back on the
-current buffer keeps direct calls (tests, `eval', a tool invoked from a
-hook) working.
+recorded in the request info of the variable `gptel--fsm-last' is used,
+which
+is what the `*gptel-tool-calls*' inspection buffer carries.  Falling back
+on the current buffer keeps direct calls (tests, `eval', a tool invoked
+from a hook) working.
 
 The result can be a killed buffer; callers must check `buffer-live-p'
 so that a dead owner is reported instead of silently running the tool
@@ -100,6 +101,9 @@ confirmed.  The batch is anchored once, not once per call."
 
 (defun gptel-yatools--update-tool-status (message &optional face)
   "Show MESSAGE in the owning gptel chat buffer's status indicator.
+
+FACE is passed to `gptel--update-status' to pick the indicator's face;
+nil keeps whatever gptel uses for a status.
 
 Tools that may run for a while call this just before they start, so the
 header line says what is happening instead of continuing to show
@@ -357,6 +361,9 @@ is queued, and the one timer made at load time picks it up."
 (defun gptel-yatools--tool-calls-outside-the-sentinel (function fsm &rest args)
   "Run gptel's tool-use handler, but not from inside a process sentinel.
 
+FUNCTION is called with FSM and ARGS, the way gptel calls it: FSM is the
+tool-call state and ARGS the arguments of the call.
+
 gptel runs a tool call from the response process's sentinel.  In a remote
 workspace that is a TRAMP call nested inside whatever else Emacs was
 doing, and TRAMP refuses a second call into a connection it is already
@@ -446,7 +453,7 @@ turns a working abort into \"Wrong number of arguments\"."
       (gptel-yatools--cancel-jobs buffer))))
 
 (defun gptel-yatools--abort-accepts-no-argument (function &rest args)
-  "Call FUNCTION, supplying the current buffer when it is given no argument.
+  "Call FUNCTION with ARGS, or with the current buffer when ARGS is empty.
 
 `gptel-abort' declares BUF as a required argument, but its docstring says
 it \"defaults to the current buffer\" and a key bound to it usually passes
@@ -531,11 +538,10 @@ this reason, so do the same."
 (defun gptel-yatools--extend-header-line (&rest _)
   "Put this package's labels in gptel's right-hand indicator group.
 
-`gptel-use-header-line' builds `header-line-format' as
+The option `gptel-use-header-line' makes `header-line-format' hold
 \(BACKEND STATUS INFO).  The INFO element is replaced by
 `gptel-yatools--header-line-segment', which renders the labels together
 with gptel's indicators as a single aligned group.
-
 Element 1 is the status indicator, which gptel rewrites in place with
 `(setf (nth 1 header-line-format) ...)'.  Element 2 is the one replaced
 here.

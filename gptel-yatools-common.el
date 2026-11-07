@@ -543,9 +543,10 @@ does not reshuffle itself as jobs come and go."
 (defun gptel-yatools--abort-request (&optional buffer)
   "Move BUFFER's gptel request to its abort state, when it has one.
 
-The state machine is recorded in the chat buffer as `gptel--fsm-last' by
-`gptel--update-tool-call', before the tool runs, which is where it can be
-found while a tool call is what is holding the request."
+The state machine is recorded in the chat buffer in the variable
+`gptel--fsm-last' by `gptel--update-tool-call', before the tool runs,
+which is where it can be found while a tool call is what is holding the
+request."
   (with-current-buffer (or buffer (current-buffer))
     (let ((fsm (bound-and-true-p gptel--fsm-last)))
       (when (gptel-fsm-p fsm)
@@ -562,8 +563,9 @@ found while a tool call is what is holding the request."
 
 A subagent's buffer runs a request that belongs to its parent's tool
 call, so nothing in the child's own job list describes it.  The module
-that owns such a buffer sets this, and `C-c C-k' reaches it: the key
-means \"stop what this buffer is doing\", whatever started it.")
+that owns such a buffer sets this, and \\[gptel-yatools-cancel-tool-calls]
+reaches it: the key means \"stop what this buffer is doing\", whatever
+started it.")
 
 (defun gptel-yatools-cancel-tool-calls (&optional buffer)
   "Kill the running tool calls of BUFFER and stop its request.
@@ -783,6 +785,9 @@ to happen, and an outcome that says it timed out is the truth either way."
 (defun gptel-yatools--kill-process (process remote)
   "Kill PROCESS, locally or on the host, and give it a moment to be reaped.
 
+REMOTE says PROCESS was started through a file-name handler's shell, so
+it has to be killed on the host rather than here.
+
 A local process is killed with its whole process group, because Emacs puts
 each subprocess in one and the shell may ignore SIGINT while its children
 carry on.  A remote process cannot be killed that way: `(process-id
@@ -810,6 +815,11 @@ start, under the same rules: stderr merged into stdout, stdin closed at
 once, the host's own shell when the directory is remote, and a
 handler-built process there so the command runs on the host rather than
 on this machine.
+
+Runs where DIRECTORY says, or in `default-directory' when it is nil: a
+subprocess runs where its artifacts live, so a caller that works on a
+remote tree passes that tree's directory rather than letting the command
+run here (ADR 0006).
 
 RESULT is a function of the outcome plist returning the Result to
 report; DESCRIPTION names the work in the header line.  TIMEOUT is the
@@ -914,8 +924,8 @@ outlives the call that started it."
 ARGV is a list of strings: the program and its arguments, not a shell
 command.  The keyword arguments are:
 
-  :directory  where to run, or nil for `default-directory'.
-  :timeout    seconds to allow, or nil for the call's own deadline.
+  :directory  DIRECTORY to run in, or nil for `default-directory'.
+  :timeout    TIMEOUT in seconds to allow, or nil for the call's deadline.
 
 The answer is always a plist, never a signal, so a caller writes one
 `pcase' instead of a `condition-case' around each failure:
@@ -1063,7 +1073,7 @@ path on the one machine in play."
      ((file-remote-p path)
       (unless (equal (gptel-yatools--connection root)
                      (gptel-yatools--connection path))
-        (error "Error: the workspace is on %s, but %s is on %s. Give a path relative to the workspace root, or an absolute path on %s, so the tool acts where the workspace is."
+        (error "Error: the workspace is on %s, but %s is on %s.  Give a path relative to the workspace root, or an absolute path on %s, so the tool acts where the workspace is"
                (gptel-yatools--connection-label root)
                (gptel-yatools--display-path path)
                (gptel-yatools--connection-label path)
@@ -1211,7 +1221,7 @@ WHAT names the argument in the message.  Tools are called with JSON
 arguments; a missing or wrong-typed required argument used to reach
 `expand-file-name' or `string-trim' and signal a raw Lisp error."
   (unless (stringp value)
-    (error "Error: %s must be a string." what))
+    (error "Error: %s must be a string" what))
   value)
 
 (defun gptel-yatools--flag-p (value)
@@ -1380,8 +1390,8 @@ line limit is passed, so a large response costs one C-level
 (defun gptel-yatools--truncate (string)
   "Return STRING made safe and bounded for a tool response.
 
-The text is capped to the line and character limits and has raw
-(non-UTF-8) bytes escaped.  The size limit is enforced twice: once on
+The text is capped to the line and character limits and has raw,
+non-UTF-8 bytes escaped.  The size limit is enforced twice: once on
 the original text, so the reported counts mean something to the
 reader, and again after escaping, because one raw byte becomes four
 characters and would otherwise blow past the limit by up to 4x.
@@ -1652,8 +1662,7 @@ half an hour while a shell command that does is already suspicious.
 
 The value is a function, not a number, because the answer has to be read
 when it is used -- a `defcustom' the user changes during a session must
-change the description the model is given."
-  )
+change the description the model is given.")
 
 (defun gptel-yatools--timeout-default-for (name)
   "Return the budget NAME's tool declares for itself, or nil for the shared one.
@@ -1690,7 +1699,8 @@ one, so a bad `setq' in a config file cannot make a tool unbounded."
 VALUE is the TIMEOUT argument supplied by the model: a number, a
 numeric string, or nil for the default.  Unusable values fall back on
 DEFAULT when given -- a tool's own stated budget -- and otherwise on the
-default for this kind of call, see `gptel-yatools--timeout-default',
+default for this kind of call where ASYNC says which kind this is: see
+`gptel-yatools--timeout-default',
 which is `gptel-yatools-timeout' for a synchronous tool and
 `gptel-yatools-async-timeout' for an asynchronous one.  The result is
 always at least one second."
@@ -1764,19 +1774,19 @@ NAME, when given, is the tool that ran out of time."
 Kept separate from registration so that changing
 `gptel-yatools-timeout' or `gptel-yatools-async-timeout' during a session
 updates what the model is told instead of leaving a stale number behind.
-The tools are taken from this package's own list, not from `gptel-tools':
-a tool that the user has not enabled is not in `gptel-tools', but its
+The tools are taken from this package's own list, not from the variable
+`gptel-tools': a tool that the user has not enabled is not there, but its
 argument must still be correct when it is enabled later.
 
 Each tool states the default that applies to it, which is why the async
 flag is read from the tool rather than assumed, and its own stated
 default takes precedence over the shared one.
 
-The docstring is re-rendered here too, through `function-documentation'
-(see `gptel-yatools--refresh-tool-docstring').  A docstring is a string
-baked into the `defun', so a compiled package would otherwise keep stating
-whatever the budget was when it was compiled -- and `C-h f' is exactly
-where a user goes to check the number they are about to rely on."
+The docstring is re-rendered here too, through `function-documentation',
+which see.  A docstring is a string baked into the `defun', so a compiled
+package would otherwise keep stating whatever the budget was when it was
+compiled -- and `C-h f' is exactly where a user goes to check the number
+they are about to rely on."
   (dolist (tool gptel-yatools--tools)
     (let* ((default (gptel-yatools--tool-timeout-default tool))
            (args (gptel-tool-args tool)))
@@ -1788,12 +1798,16 @@ where a user goes to check the number they are about to rely on."
       (gptel-yatools--refresh-tool-docstring tool))))
 
 (defun gptel-yatools--set-timeout (symbol value)
-  "Set `gptel-yatools-timeout' to VALUE, updating the tool arguments."
+  "Set `gptel-yatools-timeout' to VALUE, updating the tool arguments.
+
+SYMBOL is the variable being set, as a `:set' function receives it."
   (set-default symbol value)
   (gptel-yatools--refresh-timeout-arg))
 
 (defun gptel-yatools--set-async-timeout (symbol value)
-  "Set `gptel-yatools-async-timeout' to VALUE, updating the tool arguments."
+  "Set `gptel-yatools-async-timeout' to VALUE, updating the tool arguments.
+
+SYMBOL is the variable being set, as a `:set' function receives it."
   (set-default symbol value)
   (gptel-yatools--refresh-timeout-arg))
 
@@ -1869,8 +1883,9 @@ and it writes a line per step."
   (expand-file-name "gptel-yatools-trace.log" temporary-file-directory)
   "Where `gptel-yatools-tool-trace' writes.
 
-Under `temporary-file-directory' rather than a literal \"/tmp\", so that the
-name follows the machine's own temp directory."
+The name is built from the variable `temporary-file-directory' rather
+than a literal \"/tmp\", so that the file lands in the machine's own temp
+directory, and a trace needs no place of its own."
   :type 'file
   :group 'gptel-yatools)
 
@@ -2067,6 +2082,9 @@ So the boundary's timeout envelope is for a job that has no such function
 (defun gptel-yatools--job-tool-result (job name seconds)
   "Wait for JOB and return the Result its body declared.
 
+NAME labels the tool and SECONDS is the budget that ran out, both used to
+describe a deadline the job did not meet.
+
 A job that outlived its deadline and has no result function of its own
 signals `gptel-yatools-timeout-error', so the model is told the call was
 abandoned rather than handed the output of a process killed mid-sentence."
@@ -2122,7 +2140,7 @@ debug: `condition-case-unless-debug' leaves the signal alone while
              ;; A synchronous tool cannot hand gptel a job: gptel would
              ;; stringify it and send the printed struct to the model.
              ;; That is a definition bug, and it is said so.
-             (error "Error: internal error: the %s tool returned a job but is not declared :async. Nothing was changed." name)))))
+             (error "Error: internal error: the %s tool returned a job but is not declared :async.  Nothing was changed" name)))))
       (gptel-yatools-timeout-error
        (gptel-yatools--timeout-envelope (plist-get (cdr err) :seconds)
                                         (or (plist-get (cdr err) :tool) name)))
@@ -2131,6 +2149,10 @@ debug: `condition-case-unless-debug' leaves the signal alone while
 
 (defun gptel-yatools--start-async (name function callback args arg-specs &optional default)
   "Run FUNCTION for an asynchronous tool call and deliver its envelope.
+
+NAME labels the tool in what the model is told when the call goes wrong,
+and ARGS is what gptel passed positionally: the tool's own arguments,
+then its timeout, split by `gptel-yatools--split-args'.
 
 gptel calls an asynchronous tool with its callback as the first argument.
 The body runs here, in the buffer that owns the call, and returns either a
@@ -2209,6 +2231,9 @@ to read its own timeout is rendered by that body instead."
 (defun gptel-yatools--split-args (args arg-specs)
   "Return (TOOL-ARGS . TIMEOUT) from the positional ARGS gptel passes.
 
+ARG-SPECS is the tool's `:args' declaration, whose length says how many
+of the leading ARGS are the tool's own.
+
 ARGS holds the tool's declared arguments in order, then the TIMEOUT every
 tool takes; the declaration says how many of the first are the tool's own.
 gptel passes them positionally, so this is the only place the boundary has
@@ -2220,11 +2245,14 @@ to know where the tool's arguments end."
 (defun gptel-yatools--call-tool-async (name function first args arg-specs &optional default)
   "Tool boundary for a tool registered with `:async t'.
 
+NAME labels the tool in what the model is told when the call goes wrong.
+
 FIRST is what gptel passed first.  On a real tool call that is gptel's
 callback, and the answer is delivered to it.  A direct call -- from
 `eval', a hook, or a test -- passes the tool's own first argument instead,
 and is answered synchronously, so both ways of calling a tool keep
-working and both end at the same envelope.
+working and both end at the same envelope.  FUNCTION is the tool's body,
+and ARGS is the rest of what gptel passed.
 
 An error raised before a job exists has to be delivered here: returning it
 would leave gptel waiting for a callback that is never going to come."
@@ -2560,6 +2588,8 @@ be escaped to survive both the byte compiler -- which warns about
 (defun gptel-yatools--fill-text (text &optional indent)
   "Return TEXT quoted for a docstring and wrapped to 80 columns.
 
+INDENT, when given, shifts every line right by that many columns.
+
 Escaping happens before filling, so a line is measured in the characters
 the byte compiler will actually see: an apostrophe becomes \\=' and would
 otherwise push an otherwise-fitting line over the limit.  A word too long
@@ -2759,7 +2789,8 @@ calling a tool produce the same envelope.
 
 The tool itself is registered in gptel's registry -- which is what
 `gptel-menu' lists -- and in `gptel-yatools--tools'.  Nothing is sent to
-the model until `gptel-yatools-enable' adds it to `gptel-tools'.
+the model until `gptel-yatools-enable' adds it to the variable
+`gptel-tools'.
 
 Here is a whole tool:
 
@@ -2895,17 +2926,18 @@ Here is a whole tool:
 ;; Enabling
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-enable-all ()
-  "Add every tool defined by this package to `gptel-tools'."
+  "Add every tool this package defines to the variable `gptel-tools'."
   (interactive)
   (gptel-yatools-enable))
 
 (defun gptel-yatools-enable (&rest categories-or-names)
-  "Add some of this package's tools to `gptel-tools'.
+  "Add some of this package's tools to the variable `gptel-tools'.
 
 CATEGORIES-OR-NAMES are tool categories, like \"filesystem\", tool
 names, like \"write_file\", or nil for every tool.
 
-Enabled tools are prepended to `gptel-tools' and replace any earlier
+Enabled tools are prepended to the variable `gptel-tools' and replace any
+earlier
 entry with the same name, so calling this twice does not send a tool
 to the model twice.  The value is set with `customize-set-variable',
 so it is the buffer-local value that changes when there is one."

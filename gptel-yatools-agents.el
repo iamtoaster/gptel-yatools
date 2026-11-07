@@ -101,8 +101,9 @@ step, none of which exist.
 Names are resolved against `gptel-yatools--tools' when a child starts, so a
 typo is reported to the model as an error rather than silently leaving the
 child with fewer tools than it was promised.  The list is deliberately not
-filtered through the parent's `gptel-tools': a parent that never enabled
-`read_path' must not hand the model a child that cannot read."
+filtered through the variable `gptel-tools' of the parent: a parent that
+never
+enabled `read_path' must not hand the model a child that cannot read."
   :type '(repeat string)
   :group 'gptel-yatools-agents)
 
@@ -322,7 +323,7 @@ never had the tools for."
       (let ((spec (cl-find name gptel-yatools--tools
                            :key #'gptel-tool-name :test #'equal)))
         (unless spec
-          (error "Error: the subagent tool list names %S, which this package does not define. Nothing was started; fix `gptel-yatools-subagent-tools'"
+          (error "Error: the subagent tool list names %S, which this package does not define.  Nothing was started; fix `gptel-yatools-subagent-tools'"
                  name))
         (push spec specs)))
     (nreverse specs)))
@@ -386,7 +387,7 @@ the info when it issues the next one."
        t))
 
 (defun gptel-yatools-subagent--enable-cancel (record)
-  "Give RECORD's buffer a `C-c C-k' that stops its own request.
+  "Give RECORD's buffer a \\[gptel-yatools-cancel-tool-calls] that stops it.
 
 A child's work belongs to its parent's tool call, so nothing in the child's
 own job list describes it: `gptel-yatools--cancel-function' is how the key
@@ -500,7 +501,10 @@ Two things make a change not the user's.  Our own inserts bind
 separator and prompt prefix it inserts after the reply -- arrive while
 `gptel-yatools-subagent--settling' is still set, because no user command
 has run since the child settled.  A child still running has a read-only
-buffer, so nothing else reaches here."
+buffer, so nothing else reaches here.
+
+BEG and END delimit the change; a zero-width change is not an edit and
+leaves the child attached."
   (when (and (not gptel-yatools-subagent--inserting)
              (not gptel-yatools-subagent--settling)
              (/= beg end)
@@ -753,8 +757,9 @@ boundary, which may not have attached its conclusion yet."
 
 CAUSE comes from two places and is named in the sentence the parent reads,
 because \"aborted\" alone leaves the parent model guessing whether it did
-something wrong.  From the child's own buffer come `by-hand' (`C-c C-k'
-there) and `buffer-killed'; from the job's CANCEL function come the kit's
+something wrong.  From the child's own buffer come `by-hand', the reason
+set by \\[gptel-yatools-cancel-tool-calls] there, and `buffer-killed';
+from the job's CANCEL function come the kit's
 two reasons, `cancelled' (the chat is going away, or the user cancelled the
 call) and `timed-out' (the deadline passed).  A timeout is settled as
 `timed-out' rather than as an abort, and says how long the child had.
@@ -964,6 +969,9 @@ boundary's work, and this module must not reach into that machinery."
 (defun gptel-yatools-subagent--failure-sentence (info)
   "Return the sentence describing why gptel's request produced no answer.
 
+INFO is the plist gptel's callback received: `:error', `:status' and
+`:http-status' are the three fields read here.
+
 Three different failures arrive as nil, and they need different reactions:
 a connection that never opened is worth retrying, a rate limit is worth
 waiting out, and a rejected request is worth rephrasing.  `:error' is gptel's
@@ -1030,6 +1038,9 @@ half-finished investigation for a negative result."
 
 (defun gptel-yatools-subagent--report (record outcome)
   "Return the body the parent model reads for RECORD's finished answer.
+
+OUTCOME is the plist the child's job settled with: `:turns', `:calls',
+`:paths' and `:elapsed'.
 
 The metadata is not decoration: without the paths, \"no problems found\"
 cannot be told apart from \"did not look\", and the parent has no way to
@@ -1143,8 +1154,7 @@ from the buffer only when a request starts."
 
 TIMEOUT is the call's own budget in seconds.  The child runs in a hidden
 buffer with a read-only tool list, and its answer arrives through the job
-the boundary waits for -- or does not, when the tool is asynchronous.
-"
+the boundary waits for -- or does not, when the tool is asynchronous."
   (let* ((parent (current-buffer))
          (record (gptel-yatools--make-subagent
                   :id (gptel-yatools-subagent--next-id parent)

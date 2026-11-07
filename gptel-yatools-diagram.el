@@ -65,9 +65,9 @@
 (defcustom gptel-yatools-plantuml-command "plantuml"
   "The PlantUML executable to run.
 
-A name is looked up on `exec-path'; an absolute path is used as given.
-When it cannot be found the tool says so, naming this variable, rather
-than failing in a way the model has to guess at."
+A name is looked up on the variable `exec-path'; an absolute path is
+used as given.  When it cannot be found the tool says so, naming this
+variable, rather than failing in a way the model has to guess at."
   :type 'string
   :group 'gptel-yatools-diagram)
 
@@ -476,7 +476,7 @@ differs."
              (if (file-name-absolute-p command)
                  (and (file-executable-p command) command)
                (executable-find command)))
-        (error "PlantUML is needed to render a diagram, but %s was not found. Install it, or set gptel-yatools-plantuml-command to the executable path. Some diagram types also need GraphViz (dot)."
+        (error "PlantUML is needed to render a diagram, but %s was not found.  Install it, or set gptel-yatools-plantuml-command to the executable path.  Some diagram types also need GraphViz (dot)"
                (if command (format "%s" command) "no command is configured")))))
 
 (defun gptel-yatools-diagram--graphviz-timeout ()
@@ -570,7 +570,7 @@ Signals with the model-facing wording when PlantUML refuses the source."
              (output (string-trim (plist-get outcome :output))))
         (cond
          ((eq status 'timed-out)
-          (error "PlantUML did not finish within %s seconds and was killed. The diagram may be too large or GraphViz may be stuck; simplify the source or raise the timeout argument."
+          (error "PlantUML did not finish within %s seconds and was killed.  The diagram may be too large or GraphViz may be stuck; simplify the source or raise the timeout argument"
                  (gptel-yatools--call-deadline)))
          ((and (eq status 'exited) (integerp exit) (zerop exit)
                (gptel-yatools-diagram--cached source))
@@ -736,13 +736,13 @@ anything else."
                  lines "\n"))))
 
 (defun gptel-yatools-diagram-cheatsheet-text (topic)
-  "Return the cheat-sheet section named TOPIC, or the list of topics.
+  "Return the `cheat-sheet' section named TOPIC, or the list of topics.
 
 TOPIC is matched case-insensitively against the `## <topic>' headings of
 `gptel-yatools-diagram-cheatsheet'.  An empty or unknown TOPIC returns the
 topic list rather than the whole sheet, which keeps the reply small and
-tells the model what to ask for next: the list a model can see is the list
-that exists."
+tells the model what to ask for next: the list a model can see is the
+list of `cheat-sheet' topics that exists."
   (let* ((topic (downcase (string-trim (or topic ""))))
          (sheet gptel-yatools-diagram-cheatsheet)
          (topics (gptel-yatools-diagram-cheatsheet-topics)))
@@ -802,9 +802,9 @@ Call it with neither argument and it lists the diagram types it has a cheat shee
    ;; A source that is present but empty is a mistake, not an index
    ;; request: the model meant to draw something and said nothing.
    ((string-empty-p (string-trim source))
-    (error "The source is empty. Give the PlantUML source of one diagram, or call with no arguments to list the diagram types that have a syntax sheet."))
+    (error "The source is empty.  Give the PlantUML source of one diagram, or call with no arguments to list the diagram types that have a syntax sheet"))
    ((> (gptel-yatools-diagram--start-count source) 1)
-    (error "The source contains %d diagrams. One diagram per call; render them separately."
+    (error "The source contains %d diagrams.  One diagram per call; render them separately"
            (gptel-yatools-diagram--start-count source)))
    (t
     (unless (gptel-yatools-diagram--cached source)

@@ -1,0 +1,34 @@
+; -*- mode: emacs-lisp; lexical-binding: t -*-
+;; Eldev project descriptor for gptel-yatools.
+;;
+;; `bin/eldev' is Eldev itself, committed so that a clean checkout needs no
+;; install step.  Run `bin/eldev help' for the command list.
+
+;; gptel and yaml are on MELPA, not on MELPA Stable, which is the default.
+(eldev-use-package-archive 'melpa)
+
+;; A warning is a failure here: AGENTS.md promises a clean byte-compile, and
+;; Eldev would otherwise print the warning and exit zero.
+(setf eldev-build-treat-warnings-as-errors t)
+
+(defconst gptel-yatools--project-root
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Where this project starts, recorded as Eldev loads this file.
+
+Eldev hands its linters relative file names, so their answer depends on
+`default-directory'.  The test command leaves that pointing at a test
+directory, and a chained `check' would then lint files that are not there
+and report every one of them as having no file header at all.")
+
+(eldev-defcommand eldev-check (&rest _parameters)
+  "Run every check CI runs: byte-compile, the tests, then the linters.
+
+The order matters.  `lint' exits non-zero on the first file with a
+warning, so a lint problem placed before the tests would hide whatever the
+tests had to say.  The linters run last so the compiler and the suite get
+to report first."
+  (eldev-compile)
+  (eldev-test)
+  ;; Rebound because the tests move it, see `gptel-yatools--project-root'.
+  (let ((default-directory gptel-yatools--project-root))
+    (eldev-lint)))

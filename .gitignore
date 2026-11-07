@@ -3,6 +3,10 @@
 *-autoloads.el
 .dirs
 
+# Eldev's project cache (see Eldev)
+.eldev/
+.eldev-cache/
+
 # Emacs noise
 .dir-locals.el
 .#*

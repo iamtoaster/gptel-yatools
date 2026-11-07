@@ -10,8 +10,8 @@ context comment); one generated boundary per tool renders that into the
 envelope the model sees.  Writes go into the VFS and reach disk only
 through `file_sync`, after a diff the user accepts.  Emacs 29.1+, `gptel`
 and `yaml` are the dependencies — `Package-Requires` in
-`gptel-yatools.el` is the only manifest.  ERT is the test harness; there
-is no Makefile, CI or formatter config.
+`gptel-yatools.el` is the only manifest.  ERT is the test harness, Eldev
+runs it, and GitHub Actions runs Eldev on every supported Emacs.
 
 ## Relevant commands
 
@@ -22,18 +22,21 @@ temp directory made with `make-temp-file` (so nothing leaves
 `temporary-file-directory`).
 
 ```sh
-./tests/run-tests.sh DIR [DIR...] [SELECTOR]
+bin/eldev test [SELECTOR...]
 ```
 
-`DIR` is any directory holding `gptel` or `yaml` (repeat for each;
-`GPTEL_YATOOLS_TEST_LOAD_PATH`, colon-separated, works too) and the
-script always runs `emacs -Q --batch`, so no user init file is loaded.
-`EMACS` selects the executable.  `SELECTOR` is an ERT regexp, e.g.
-`'^gptel-yatools-test-vfs-'`.
+`SELECTOR` is an ERT selector, e.g. `'^gptel-yatools-test-vfs-'`; several
+combine as `or`, and `-f '*vfs-tests.el'` narrows by file instead.  Eldev
+resolves `gptel` and `yaml` itself, from MELPA as `Package-Requires`
+declares them, and runs Emacs with `--no-init-file` and friends, so no
+user init file is loaded and the machine's own `load-path` is not part of
+the repository.  `EMACS` selects the executable.
 
-`tests/run-tests.sh --help` restates all of this.  The script is the only
-supported entry point: the load-path of the machine you happen to be on
-is not part of the repository.
+`bin/eldev' is Eldev itself, committed so that a clean checkout needs no
+install step; the first run bootstraps it and caches under `.eldev/`,
+which is gitignored.  `bin/eldev help` lists every command, and
+`Eldev` is the project descriptor that says where the dependencies come
+from.
 
 The diagram suite skips the tests that need PlantUML when it is not
 installed; the rest of it (content addressing, the transcript reader, the
@@ -43,18 +46,26 @@ loaded by path from each suite and is not a test file itself.
 Interactively: `M-x load-file RET tests/gptel-yatools-test-lib.el RET`,
 then the suite, then `M-x ert RET gptel-yatools-test- RET`.
 
-### How to check the compile
+### How to check the compile, and lint
 
-A clean byte-compile is part of the check (it writes `.elc` files, which
-are gitignored):
+A clean byte-compile is part of the check, and `Eldev` turns a warning
+into a failure so that "clean" is enforced rather than hoped for:
 
 ```sh
-emacs -Q --batch -L . $(for d in $DIRS; do printf -- '-L %s ' "$d"; done) \
-  -f batch-byte-compile gptel-yatools.el gptel-yatools-common.el \
-  gptel-yatools-vfs.el gptel-yatools-shell.el gptel-yatools-skills.el \
-  gptel-yatools-diagram.el gptel-yatools-agents.el
-rm -f *.elc
+bin/eldev compile
+bin/eldev lint          # checkdoc, package-lint and relint
+bin/eldev check         # compile, then tests, then lint
 ```
+
+`.elc` files are left behind and are gitignored; `bin/eldev clean`
+removes them along with the `.eldev/` cache.
+
+### What CI runs
+
+`.github/workflows/ci.yml` runs `bin/eldev compile` and `bin/eldev test`
+on Emacs 29.1, 30.2 and 31.1 — 29.1 is the floor `Package-Requires`
+states — with PlantUML installed in every cell so the render tests run
+rather than skip.  `bin/eldev lint` runs once, on the newest of those.
 
 ### How to use the package interactively
 
@@ -335,9 +346,8 @@ Read the one you are about to contradict.
 
 ## Before finishing
 
-- `./tests/run-tests.sh DIR...` passes, and any new behaviour has a test
-  that goes through the tool boundary.
-- The source files byte-compile without warnings.
+- `bin/eldev check` passes — compile, tests, lint — and any new behaviour
+  has a test that goes through the tool boundary.
 - User-visible changes are in `README.md`; new or changed domain terms in
   `GLOSSARY.md`; a design decision in a new ADR.
 - No VFS changes are left pending: `vfs_diff`, then `file_sync` (or

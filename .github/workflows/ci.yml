@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Eldev keeps its global cache (dependencies, per-Emacs installs) in
+# ELDEV_DIR.  Pinned here so the cache action and Eldev agree on one path.
+env:
+  ELDEV_DIR: ${{ github.workspace }}/.eldev-cache
+
+jobs:
+  test:
+    name: Emacs ${{ matrix.emacs }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One version failing says nothing about the others, and knowing
+      # which ones still pass is most of the diagnosis.
+      fail-fast: false
+      matrix:
+        emacs: ['29.1', '30.2', '31.1']
+    steps:
+      - uses: actions/checkout@v7
+
+      # Installs Nix if needed and puts the requested Emacs on PATH.
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+
+      # So the diagram tests render instead of skipping.  nixpkgs' plantuml
+      # is wrapped with its own GraphViz, so nothing here has to set it up.
+      - name: Install PlantUML
+        run: nix profile install nixpkgs#plantuml
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.ELDEV_DIR }}
+          key: eldev-${{ runner.os }}-${{ matrix.emacs }}-${{ hashFiles('Eldev') }}
+          restore-keys: eldev-${{ runner.os }}-${{ matrix.emacs }}-
+
+      - name: Byte-compile
+        run: bin/eldev compile
+
+      - name: Test
+        run: bin/eldev test
+
+  lint:
+    name: Lint (Emacs 31.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: 31.1
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.ELDEV_DIR }}
+          key: eldev-${{ runner.os }}-31.1-${{ hashFiles('Eldev') }}
+          restore-keys: eldev-${{ runner.os }}-31.1-
+
+      - name: Lint
+        run: bin/eldev lint

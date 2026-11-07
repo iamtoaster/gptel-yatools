@@ -541,5 +541,22 @@ a newline falls between them."
       (setq rest (substring rest (match-end 0))))
     (nreverse found)))
 
+;;;; Running without a debugger attached
+
+;; The tool boundary re-signals while `debug-on-error' is set, so a user
+;; debugging a tool call sees the signal.  ERT on Emacs 29 and 30 binds that
+;; variable for every test, which turns a tested refusal into an escaped
+;; error; a test plays the part of a user, not of a debugging session.
+
+(defun gptel-yatools-test--without-debug (function &rest args)
+  "Call FUNCTION with ARGS and `debug-on-error' bound to nil."
+  (let ((debug-on-error nil))
+    (apply function args)))
+
+(advice-add 'gptel-yatools--call-tool :around
+            #'gptel-yatools-test--without-debug)
+(advice-add 'gptel-yatools--call-tool-async :around
+            #'gptel-yatools-test--without-debug)
+
 (provide 'gptel-yatools-test-lib)
 ;;; gptel-yatools-test-lib.el ends here

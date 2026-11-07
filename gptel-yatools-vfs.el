@@ -57,9 +57,10 @@
   "Buffer-local virtual filesystem.
 
 A hash table mapping absolute file paths to plists of the form
-\(:content STRING :baseline STRING-OR-NIL :coding CODING :baseline-coding CODING).
-A file present here shadows the corresponding file on disk for
-gptel's read tools.  The disk is only written by the `file_sync' tool.
+\(:content STRING :baseline STRING-OR-NIL :coding CODING
+:baseline-coding CODING).  A file present here shadows the corresponding
+file on disk for gptel's read tools.  The disk is only written by the
+`file_sync' tool.
 
 See `gptel-yatools-vfs--table'.")
 

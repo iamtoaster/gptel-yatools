@@ -729,14 +729,14 @@ session a child became."
           (setq gptel-yatools-subagent--settling nil)
           (let ((inhibit-read-only t))
             (goto-char (point-max))
-            (insert "my own words"))))
-      (should (gptel-yatools-subagent--record-detached record))
-      (should-not (gptel-yatools-subagent-buffer-p child))
-      ;; Let the take-over's rename timer fire here, with the prompt
-      ;; stubbed, rather than inside whatever test runs next.
-      (let ((deadline (+ (float-time) 1.0)))
-        (while (< (float-time) deadline)
-          (accept-process-output nil 0.01))))))
+            (insert "my own words")))
+        (should (gptel-yatools-subagent--record-detached record))
+        (should-not (gptel-yatools-subagent-buffer-p child))
+        ;; The take-over's rename timer fires while the prompt is stubbed;
+        ;; left to run later it would read stdin inside the next test.
+        (let ((deadline (+ (float-time) 1.0)))
+          (while (< (float-time) deadline)
+            (accept-process-output nil 0.01)))))))
 
 (ert-deftest gptel-yatools-test-hooks-see-a-child-start-and-settle ()
   "The started and settled hooks are called at the points they name.

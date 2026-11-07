@@ -7,9 +7,20 @@
 ;; gptel and yaml are on MELPA, not on MELPA Stable, which is the default.
 (eldev-use-package-archive 'melpa)
 
+;; GNU ELPA as well: `compat' lives only there, and gptel and transient
+;; both require it.  Eldev's default set is MELPA alone, so without this a
+;; lint tool or a dependency that GNU alone publishes is simply not found.
+(eldev-use-package-archive 'gnu)
+
 ;; A warning is a failure here: AGENTS.md promises a clean byte-compile, and
 ;; Eldev would otherwise print the warning and exit zero.
 (setf eldev-build-treat-warnings-as-errors t)
+
+;; Emacs 31.1 made this experimental check off by default; before that it is
+;; on, and it flags any docstring that happens to contain "reads" or "shows".
+;; Turned off here so that linting says the same thing on every version
+;; `Package-Requires` allows.
+(setq checkdoc-verb-check-experimental-flag nil)
 
 (defconst gptel-yatools--project-root
   (file-name-directory (or load-file-name buffer-file-name))

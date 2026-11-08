@@ -76,6 +76,16 @@ names, in `gptel-yatools-media--message-keys`.
 - An image is visible in the turn it was asked for, and in every turn
   after it, without the model having to ask again.  Removing it is a
   command, not a timeout.
+- **No header-line label of our own.**  Attaching puts an ordinary
+  `gptel-context` entry in place, which gptel already counts in its
+  `[N files]` label and already lists in the context buffer it opens.  A
+  second counter would be a rival to that label, and it would sit next to
+  gptel's own `[Media: No]` -- a different feature, `gptel-track-media`,
+  which is about following links in the buffer text.  Two adjacent labels
+  about "media", disagreeing, reads as a bug in both.  `M-x
+  gptel-yatools-media-forget` remains, because "all of the images this
+  package attached, and none of your own entries" is not something gptel's
+  context buffer can express.
 - The queue is a second buffer-local store next to the VFS, with the same
   "the chat owns it" rule, and the same consequence for a subagent: a child
   gets the in-turn delivery and not the persistence, because a child's

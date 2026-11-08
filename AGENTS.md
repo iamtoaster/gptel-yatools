@@ -312,6 +312,10 @@ answered and kept in `gptel-context` for the turns after it (ADR 0008).
 `gptel-yatools-media--head-from-text` `:104`,
 `gptel-yatools-media--pending` `:145`, and the defcustom at `:51`.
 
+It contributes no header-line label: gptel's own `[N files]` already counts
+these entries, and gptel's `[Media: ...]` label is a different feature
+(ADR 0008).
+
 ### Diagrams — `gptel-yatools-diagram.el`
 
 The `render_diagram` tool, the content-addressed cache and its age sweep,

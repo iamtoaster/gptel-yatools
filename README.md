@@ -333,9 +333,21 @@ of the two it was.
 
 An attached image is sent with the request being answered, and stays
 attached to the chat until you remove it, so the model can come back to it
-in a later turn.  That also means it is paid for again on every request;
-`M-x gptel-yatools-media-forget` stops that, and the `[Media: N]` label in
-the header line says how many are attached.
+in a later turn.  That also means it is paid for again on every request.
+
+Attaching is nothing more than a `gptel-context` entry, so gptel's own
+label already shows it: `[N files]` in the header line counts it, and
+clicking that label opens the context buffer, where each attached image is
+listed and can be removed one at a time.  `M-x
+gptel-yatools-media-forget` is the shortcut for "all the images this
+package attached, and nobody else's entries".
+
+Two things about the manual route are worth knowing, because both fail
+silently.  gptel only sends context media when `gptel-use-context` is
+non-nil (the default, `system`), so a buffer with it set to nil sends the
+text and drops the images.  And a model is only offered an image if gptel's
+own model table says it accepts that MIME type — a model served locally or
+through a proxy may not be in that table at all.
 
 ### The review UI
 

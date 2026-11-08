@@ -216,7 +216,13 @@ twice and be counted twice."
 BUFFER defaults to the current buffer.  Only this package's own entries
 are removed: a file the user added to the context themselves, even the
 same file, is left alone.  The images stay on disk -- what stops is
-paying for them again on every request."
+paying for them again on every request.
+
+This is gptel's context list being edited, so gptel shows and removes the
+same entries its own way: the `[N files]' label in the header line opens
+the context buffer, where each attached image is listed and can be removed
+one at a time.  This command is the same thing for \"all of the images this
+package attached, and nothing else\"."
   (interactive)
   (let ((paths (gptel-yatools-media-attached buffer)))
     (cond
@@ -416,28 +422,17 @@ Return non-nil when something was delivered."
       (gptel--inject-media backend (list message)))
     t))
 
-;;;; The header line
+;;;; No header-line label
 
-(defun gptel-yatools-media--header-line-label ()
-  "Return the header-line label for attached images, or nil.
-
-Clicking it echoes which images are attached; removing them is
-`gptel-yatools-media-forget', which is a decision and not a stray click."
-  (let ((paths (gptel-yatools-media-attached)))
-    (when paths
-      (let ((names (mapconcat #'gptel-yatools--display-path paths ", ")))
-        (propertize
-         (buttonize (format "[Media: %d]" (length paths))
-                    (lambda (&rest _)
-                      (message "Attached images (M-x gptel-yatools-media-forget removes them): %s"
-                               names)))
-         'mouse-face 'highlight
-         'help-echo (format "Attached images: %s" names))))))
-
-(unless (memq #'gptel-yatools-media--header-line-label
-              gptel-yatools-header-line-extra-functions)
-  (add-to-list 'gptel-yatools-header-line-extra-functions
-               #'gptel-yatools-media--header-line-label t))
+;; gptel already counts what is in `gptel-context', in a label of its own:
+;; `[1 file]', clickable, opening the context buffer where each entry can be
+;; inspected and removed.  Attaching an image puts an ordinary context entry
+;; there, so that label already says the image is attached, and adding a
+;; second counter for a subset of the same list would claim a concept gptel
+;; owns -- right next to gptel's own `[Media: No]', which is a different
+;; feature again (`gptel-track-media': whether links in the buffer text are
+;; followed).  Two neighbouring labels about "media", disagreeing, is worse
+;; than no label.
 
 (provide 'gptel-yatools-media)
 ;;; gptel-yatools-media.el ends here

@@ -452,23 +452,19 @@ it sent; a command named after this module must not take it away."
         (should-not gptel-yatools-media--pending)
         (should (gptel-yatools-media-test--context-props file))))))
 
-(ert-deftest gptel-yatools-test-media-header-line-counts-attached-images ()
-  "The label must appear with the images and go when they are forgotten."
-  (gptel-yatools-test--in-dir
-    (let ((file (gptel-yatools-test--root-file "shot.png")))
-      (gptel-yatools-test--write file gptel-yatools-media-test--png)
-      (gptel-yatools-media-test--with-buffer
-        (should-not (gptel-yatools-media--header-line-label))
-        (gptel-yatools-media-attach file)
-        (should (string-match-p "\\[Media: 1\\]"
-                                (gptel-yatools-media--header-line-label)))
-        (gptel-yatools-media-forget)
-        (should-not (gptel-yatools-media--header-line-label))))))
+(ert-deftest gptel-yatools-test-media-attaches-nothing-to-the-header-line ()
+  "This module must contribute no header-line label.
 
-(ert-deftest gptel-yatools-test-media-header-line-label-is-registered ()
-  "The label must be contributed through the registry, not drawn directly."
-  (should (memq #'gptel-yatools-media--header-line-label
-                gptel-yatools-header-line-extra-functions)))
+gptel already counts what is in `gptel-context', in a clickable label that
+opens the context buffer, and one of its own labels is about media too (a
+different feature: `gptel-track-media').  A second counter for a subset of
+the same list is a rival to both, so the module states the decision not to
+have one, and this fails if it quietly grows one back."
+  (should-not (seq-find (lambda (function)
+                          (string-prefix-p "gptel-yatools-media"
+                                           (symbol-name function)))
+                        gptel-yatools-header-line-extra-functions))
+  (should-not (fboundp 'gptel-yatools-media--header-line-label)))
 
 ;;;; 7. The queue belongs to one request
 

@@ -75,27 +75,13 @@
         (expand-file-name "skills" user-emacs-directory))
   "Where the `skill' tool looks for Agent Skills.
 
-Each element is either a directory name or a function of no arguments
-returning one.  The value as a whole may also be a function returning a
-list of them, which is the convenient way to make the roots depend on
-project-local state:
+Each element is a directory name or a function of no arguments returning
+one, and the value as a whole may be a function returning a list of them.
 
-  (setq gptel-yatools-skill-directories
-        (lambda () (list (if (project-current) \".agents/skills\"))))
-
-Relative names are resolved against the workspace root, so
-\".agents/skills\" means the root of the project being worked on;
-absolute names and names starting with \"~\" are used as they are.  The
-directories are scanned in order and each skill is listed once, even
-when two roots overlap.
-
-Skills need not sit directly inside a root: they are looked for at most
-`gptel-yatools-skill-search-depth' levels down, so a root can group
-them, as in `skills/engineering/code-review/SKILL.md'.
-
-`user-emacs-directory' is read when this file is loaded, which is after
-`early-init.el' has had its say, so the default value follows a
-relocated Emacs directory."
+Relative names are resolved against the workspace root; absolute names and
+names starting with \"~\" are used as they are.  Roots are scanned in
+order, and each skill is listed once even when two roots overlap.  Skills
+may sit up to `gptel-yatools-skill-search-depth' levels below a root."
   :type '(choice
           (repeat :tag "Directories" (choice string function))
           (function :tag "Function returning directories"))
@@ -104,15 +90,9 @@ relocated Emacs directory."
 (defcustom gptel-yatools-skill-search-depth 4
   "How many directory levels below a skill root the `skill' tool searches.
 
-A skill sitting directly inside a root is at level 1, so the default of
-4 finds `skills/engineering/code-review/SKILL.md' -- and would still
-find it in two more directories of grouping.  The cap keeps a root that
-accidentally points at something large from turning into a full tree
-walk on every tool call.
-
-A directory that is not a skill, has subdirectories, and sits at the
-limit is reported in the tool's response rather than skipped in
-silence, so a skill nested too deeply is visible instead of missing."
+A skill directly inside a root is at level 1.  A directory at the limit
+that is not a skill but has subdirectories is reported in the tool's reply
+rather than skipped."
   :type 'natnum
   :group 'gptel-yatools)
 
@@ -229,15 +209,10 @@ that possible: a view can render nil, not a list, where a string belongs."
 (defun gptel-yatools-skills--validate (frontmatter dirname)
   "Return a plist of :problems and :warnings for FRONTMATTER in DIRNAME.
 
-Problems make the skill unloadable: they are the specification's
-required fields, `name' and `description', missing or malformed.  The
-optional fields are only checked for their type and length, because
-refusing to load a skill over a 501-character `compatibility' line
-would cost more than the mistake does.
-
-A `name' that disagrees with the directory name is a warning, not a
-problem: the directory is what lookups use, and the mismatch is the
-most common authoring slip of all."
+Problems make the skill unloadable: the required fields `name' and
+`description' missing or malformed.  Optional fields are checked for type
+and length only, and a `name' that disagrees with the directory name is a
+warning rather than a problem."
   (let ((problems nil)
         (warnings nil))
     (cond
@@ -345,14 +320,12 @@ can never produce a wrong answer, only a slower next call.")
 (defun gptel-yatools-skills--parse (text)
   "Return the content-derived parts of a skill's TEXT, cached.
 
-The value is a plist of :frontmatter (the parsed YAML alist, or nil),
-:body (the Markdown after the frontmatter, or nil) and :problems (what
-is wrong with the text itself: no frontmatter block, invalid YAML).
+A plist of `:frontmatter' (the parsed YAML alist, or nil), `:body' (the
+Markdown after the frontmatter, or nil) and `:problems' (no frontmatter
+block, invalid YAML).
 
-Everything here is a fact about TEXT alone, which is what makes it safe
-to key on TEXT and share across buffers.  Validation and identity are
-not: they compare the text against the directory it sits in, and are
-computed per discovery."
+Keyed on TEXT alone, so it can be shared across buffers; validation and
+identity are not cached, being computed per discovery."
   (or (gethash text gptel-yatools-skills--parse-cache)
       (let* ((split (gptel-yatools-skills--frontmatter text))
              (frontmatter nil)
@@ -401,15 +374,13 @@ call.  Everything else is fair game -- see
 (defun gptel-yatools-skills--read (dir root)
   "Return a skill plist for the skill directory DIR, found under ROOT.
 
-The plist carries the parsed frontmatter, the body, the validation
-result, its handle, and where the `SKILL.md' came from.  It always
-comes from disk: a pending VFS copy is ignored, so instructions the
-model has written but nobody has approved cannot be in force.  The
-directory name, not the `name' field, is the skill's identity.
+The plist carries the parsed frontmatter, the body, the validation result,
+the handle, and where the `SKILL.md' came from.  It always comes from
+disk, never a pending VFS copy.  The directory name, not the `name' field,
+is the skill's identity.
 
-The parse is cached by content (see
-`gptel-yatools-skills--parse-cache'); the validation is not, because it
-compares the text against DIR's name and so belongs to this directory."
+The parse is cached by content; validation is not, since it compares the
+text against DIR's name."
   (let* ((dirname (file-name-nondirectory (directory-file-name dir)))
          (path (expand-file-name "SKILL.md" dir))
          (read (gptel-yatools-vfs-read path t))
@@ -474,14 +445,13 @@ every other skill."
 (defun gptel-yatools-skills--walk (root)
   "Return a plist of the skills found under ROOT.
 
-The walk descends at most `gptel-yatools-skill-search-depth' levels, a
-skill directly inside ROOT being level 1.  A directory that holds a
-`SKILL.md' is a skill and is not descended into: a skill ships whatever
-subdirectories it likes, and those are its own.
+Descends at most `gptel-yatools-skill-search-depth' levels, a skill
+directly inside ROOT being level 1.  A directory holding a `SKILL.md' is a
+skill and is not descended into.
 
-The plist holds :skills (directories), :pruned (directories that were
-not descended into because they hit the limit) and :notes (directories
-that could not be read)."
+The plist holds `:skills' (directories), `:pruned' (directories not
+descended into because they hit the limit) and `:notes' (directories that
+could not be read)."
   (let ((limit (max 0 gptel-yatools-skill-search-depth))
         (queue (list (cons root 0)))
         (skills nil)
@@ -509,23 +479,14 @@ that could not be read)."
 (defun gptel-yatools-skills--discover ()
   "Return a plist describing the skills found in the configured roots.
 
-The plist holds :skills (ordered by name), :notes (broken roots,
+The plist holds `:skills' (ordered by name), `:notes' (broken roots,
 unreadable directories and directories cut off by the depth limit),
-:missing (roots that do not exist) and :roots (every root considered).
-A missing root is ordinary -- most projects have no `.agents/skills' --
-so it is only mentioned when nothing was found at all, while a root that
-fails for another reason is always reported: silently dropping a set of
-skills is what makes an agent answer \"there is no skill for that\" with
-confidence.
+`:missing' (roots that do not exist, only reported when nothing was found
+at all) and `:roots'.
 
-A skill reachable through two roots that resolve to the same directory
-is read once; two *different* skills that happen to share a name are
-both kept, since with grouped skills that is a plausible arrangement.
-
-Each skill carries a `:handle' -- the name it is shown and loaded by.
-Deciding it here, once, is what lets every caller use it without
-re-deriving which names are ambiguous; see
-`gptel-yatools-skills--assign-handles'."
+A skill reachable through two roots resolving to the same directory is read
+once; two different skills sharing a name are both kept.  Each carries a
+`:handle', decided once here by `gptel-yatools-skills--assign-handles'."
   (let* ((collected (gptel-yatools-skills--roots))
          (roots (car collected))
          (notes (cdr collected))
@@ -564,21 +525,12 @@ re-deriving which names are ambiguous; see
   "Return SKILLS with each `:handle' set to the name it is addressed by.
 
 A handle is the skill's bare name, unless that name occurs more than once;
-then it is the skill's path relative to its root; and if that path occurs
-more than once too -- two roots each holding `grp/review' -- it is
-\"RELATIVE (ABSOLUTE ROOT)\".  A handle has to identify one skill and be
-loadable by itself, which is what the third tier buys when two roots
-present the same shape.
+then its path relative to its root; and if that path occurs more than once
+too, \"RELATIVE (ABSOLUTE ROOT)\".
 
-A skill sitting directly inside its root is the one case where the
-relative path *is* the bare name, so a root-qualified handle is also
-needed when the relative path holds no separator: without it the handle
-would spell the ambiguous name it was meant to disambiguate, and the
-lookup that refuses that name could never load this skill at all.
-
-The ambiguity tests are done against the whole list before any skill is
-rewritten, so assigning handles cannot change which names or paths are
-ambiguous."
+A skill sitting directly inside its root has no path of its own, so it
+takes the root-qualified form as well.  Ambiguity is tested against the
+whole list before any skill is rewritten."
   (let ((ambiguous (gptel-yatools-skills--duplicate-names skills))
         (ambiguous-paths (gptel-yatools-skills--duplicates skills :relative)))
     (mapcar (lambda (skill)
@@ -612,24 +564,16 @@ plist built by hand in a test, say -- falls back on its `name'."
 (defun gptel-yatools-skills--lookup (skills name)
   "Resolve NAME against SKILLS.
 
-NAME is what the index shows: a handle (a bare name, a path relative to a
-root, or a path followed by its root in parentheses), or a bare name or
-relative path typed by hand.  As a last resort it may be an absolute
-skill directory, which is what a payload's `Directory:' line and a shell
-listing hand the model.
+NAME is a handle, a path relative to a root, or an absolute skill
+directory.
 
 Returns (:skill SKILL) for a single match, (:ambiguous MATCHES) when the
-text identifies more than one skill, or nil when nothing matches.
+text identifies more than one, or nil when nothing matches.
 
-A bare name that occurs more than once is ambiguous *before* anything
-else is tried.  Handles are unique, so a lookup order of handle, then
-path, then name would let the one skill whose handle happened to spell an
-ambiguous name (the skill sitting directly in its root, whose path is
-that name) answer for all of them.
-
-An ambiguous name is never resolved to \"the first one\": with skills
-grouped into directories, one name in two groups is a reasonable
-arrangement, and picking silently would hide a whole skill."
+A bare name occurring more than once is ambiguous before anything else is
+tried, so the one skill whose handle happens to spell that name cannot
+answer for all of them.  An ambiguous name is never resolved to the first
+match."
   (let* ((wanted (string-trim name))
          (by-handle (cl-remove-if-not
                      (lambda (skill)
@@ -789,23 +733,17 @@ identifies one skill on its own."
 FOUND is what `gptel-yatools-skills--discover' returned.  The value is a
 plist:
 
-  :kind     `:loaded' (exactly one skill, and it can be loaded),
-            `:ambiguous' (the name identifies more than one skill),
-            `:unknown' (it identifies none), or `:invalid' (it identifies
-            one, but its `SKILL.md' does not satisfy the specification).
+  :kind     `:loaded' (exactly one skill, loadable), `:ambiguous' (the
+            name identifies more than one), `:unknown' (none), or
+            `:invalid' (one, but its `SKILL.md' does not satisfy the
+            specification).
   :skill    the skill, for `:loaded' and `:invalid'.
   :matches  the candidates, for `:ambiguous'.
   :summary  one line, for an echo area.
   :detail   the full text, for a tool reply.
 
-Deciding loadability here is the point: an outcome of `loaded',
-`ambiguous', `unknown' or `invalid', so no caller asks a second question
-about the same name.  A caller that resolved a name and then tested it
-itself could answer the same name differently from another caller.
-
-The two renderings exist because the two callers need different lengths,
-not different wording, so neither invents its own sentence about an
-ambiguous or invalid skill."
+Loadability is decided here, so no caller asks a second question about the
+same name."
   (pcase (gptel-yatools-skills--lookup (plist-get found :skills) name)
     (`(:skill ,skill)
      (if (plist-get skill :problems)
@@ -919,13 +857,9 @@ pending write to its `SKILL.md' is not in force."
 (defun gptel-yatools-skills--resolve-file (skill file)
   "Return FILE's absolute path inside SKILL, or nil if it escapes it.
 
-FILE has to be relative and has to land inside the skill directory:
-`..' segments and symlinks that point elsewhere are refused.  Absolute
-names are refused too, since they can only be a mistake about what the
-path is relative to.  A pending VFS copy is not accepted: like
-`SKILL.md' itself, a file presented as part of a skill is one that
-exists on disk, so nothing the model wrote reaches it before the write
-has been reviewed."
+FILE must be relative and land inside the skill directory: `..' segments,
+symlinks pointing elsewhere and absolute names are refused.  A pending VFS
+copy is not accepted; the file must exist on disk."
   (let* ((dir (file-name-as-directory (expand-file-name (plist-get skill :directory))))
          (full (expand-file-name file dir)))
     (cond
@@ -1146,18 +1080,14 @@ the list is allowed: the caller resolves it the way the tool does."
 (defun gptel-yatools-skills-add (names &optional insert)
   "Send Agent Skills to the model with the next request.
 
-With no prefix argument the skills are attached to the gptel context,
-so they travel with every request until removed with
-`gptel-yatools-skills-remove' or gptel's own context commands.
+NAMES is a list of skill names, completed from every root in
+`gptel-yatools-skill-directories'.  INSERT, when non-nil, inserts them at
+point for one request instead of attaching them to the gptel context,
+which is useful when `gptel-use-context' is off.
 
-With a prefix argument they are inserted at point instead: the text
-becomes part of the conversation and is sent once, which is useful when
-you want to see and edit exactly what is being sent, or when
-`gptel-use-context' is off.
-
-NAMES is a list of skills, completed from everything
-`gptel-yatools-skill-directories' holds.  INSERT, when non-nil, puts them
-at point for one request instead of attaching them to the context."
+Attached skills travel with every request until
+`gptel-yatools-skills-remove' or gptel's own context commands remove
+them."
   (interactive
    (let* ((skills (plist-get (gptel-yatools-skills--discover) :skills))
           (candidates (gptel-yatools-skills--candidates skills))

@@ -398,18 +398,10 @@ correct or extend it without touching the package."
 (defun gptel-yatools-diagram--hash (source)
   "Return the cache name of SOURCE, without a directory or extension.
 
-The digest covers the SOURCE and nothing else -- not the PlantUML
-executable, its version, the GraphViz layout engine or
-`gptel-yatools-plantuml-security-profile'.  So the name addresses the
-*request*, not the picture: it answers \"is this source's render here?\"
-and not \"is this picture the one this PlantUML would draw today?\".
-
-Those other inputs are configuration, not something the model can vary per
-call, so folding them in would change the token every time a setting moved
-and break the one property the design rests on.  The cost is that
-upgrading PlantUML or changing the profile can leave an older picture in
-place for a source already rendered;
-`gptel-yatools-diagram-clear-cache' is the cure (ADR 0003)."
+The digest covers SOURCE alone, not the PlantUML executable, its version,
+the layout engine or `gptel-yatools-plantuml-security-profile': the name
+addresses the request.  Changing those settings can leave an older picture
+in place; `gptel-yatools-diagram-clear-cache' clears it (ADR 0003)."
   (substring (gptel-yatools-diagram--digest source)
              0 gptel-yatools-diagram--hash-length))
 
@@ -436,21 +428,13 @@ mapping one to the other."
   (gptel-yatools-diagram--cache-file (gptel-yatools-diagram--hash source) "puml"))
 
 (defun gptel-yatools-diagram--resolve-token (token)
-  "Return what TOKEN names in the cache.
+  "Return what TOKEN names in the cache, as a plist.
 
-The answer is a plist whose `:kind' is one of:
+The `:kind' is one of:
 
-  found      `:file' is the one cache SVG the digits name.
-  missing    nothing in the cache matches.  Not an error: a token whose
-             diagram was never rendered, or whose cache was emptied, is
-             an ordinary thing to find in a buffer.
-  ambiguous  `:files' are the several entries the digits match.  More
-             than one is astronomically unlikely and is reported rather
-             than resolved by guesswork.
-
-The glob happens once, here, so drawing and opening cannot disagree about
-whether a token names a file; only what each does with the answer
-differs."
+  found      `:file' is the cache SVG the digits name.
+  missing    nothing in the cache matches; not an error.
+  ambiguous  `:files' are the several entries the digits match."
   (let ((files (file-expand-wildcards
                 (expand-file-name (concat token "*.svg")
                                   gptel-yatools-diagram-cache-directory)
@@ -491,16 +475,8 @@ short `timeout' argument cannot be outlived by the layout engine."
 (defun gptel-yatools-diagram--run-directory ()
   "Return the directory PlantUML runs in: where the cache is.
 
-A subprocess runs where its artifacts live, not where the chat's workspace
-happens to be (ADR 0006).  For the renderer those are the same directory,
-because PlantUML writes the SVG beside the source it was given.
-
-Inheriting the workspace instead is wrong twice over: the renderer is found
-on this machine, and the cache is a directory on this machine, so a remote
-workspace handed a local executable path to the host's shell and got
-`exec: /usr/local/bin/plantuml: not found', exit 127.  A user who points
-`gptel-yatools-diagram-cache-directory' at a remote path gets a render on
-that host instead -- which needs PlantUML there."
+A subprocess runs where its artifacts live (ADR 0006), and PlantUML writes
+the SVG beside the source it was given."
   (gptel-yatools-diagram--ensure-cache-directory))
 
 (defun gptel-yatools-diagram--run (files)
@@ -599,13 +575,9 @@ which reports rather than signals."
 (defun gptel-yatools-diagram--ensure-many (sources)
   "Put every one of SOURCES in the cache, in a single process.
 
-Return `(:rendered N :failed M :reason STRING)'.  What is missing is
-rendered in one process, because a JVM start dominates a render: reopening
-a chat with twelve diagrams should cost one start rather than twelve.
-
-A failure is reported, never signalled.  The caller is a hook or a command,
-not a tool call, so there is no envelope waiting for a condition; one
-sentence is the right size for it, and `:reason' carries it."
+Returns `(:rendered N :failed M :reason STRING)'.  A JVM start dominates a
+render, hence one process for all.  A failure is reported in `:reason',
+never signalled: the caller is a hook or a command, not a tool call."
   (let* ((sources (delete-dups sources))
          (missing (cl-remove-if #'gptel-yatools-diagram--cached sources))
          (failed nil)
@@ -907,13 +879,9 @@ before the scan, so a second pass draws the same picture once."
 (defun gptel-yatools-diagram--sources-in-buffer ()
   "Return the PlantUML source of every `render_diagram' call in the buffer.
 
-gptel writes each tool call into the buffer as its printed plist --
-`(:name \"render_diagram\" :args (:source \"...\"))' -- so the source is
-recoverable text.  Org buffers escape it with `org-escape-code-in-string'
-to keep the block intact, and that prefixing is undone here; Markdown
-buffers do not escape, so they are read as written.
-
-This is the reason a diagram survives its cache being deleted."
+gptel writes each call into the buffer as its printed plist, so the source
+is recoverable text.  Org escapes it with `org-escape-code-in-string',
+which is undone here; Markdown does not escape."
   (let ((sources nil))
     (save-excursion
       (goto-char (point-min))

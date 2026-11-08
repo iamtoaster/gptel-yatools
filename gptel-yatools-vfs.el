@@ -57,23 +57,18 @@
 (defvar-local gptel-yatools-vfs nil
   "Buffer-local virtual filesystem.
 
-A hash table mapping absolute file paths to plists of the form
+A hash table mapping absolute file paths to entry plists of the form
 \(:content STRING :baseline STRING-OR-NIL :coding CODING
-:baseline-coding CODING).  A file present here shadows the corresponding
-file on disk for gptel's read tools.  The disk is only written by the
-`file_sync' tool.
+:baseline-coding CODING).  An entry shadows the corresponding file on disk
+for the read tools; only `file_sync' writes disk.
 
-See `gptel-yatools-vfs--table'.")
+Created by `gptel-yatools-vfs--table'.")
 
 (defvar-local gptel-yatools-vfs--header-line-cache nil
   "Cached (PATHS . TIME) for the header line, or nil when invalidated.
 
-The header line is re-evaluated on every redisplay, and computing the
-pending list reads every pending file from disk.  Caching keeps
-redisplay free of I/O; the cache is cleared whenever the VFS changes,
-and expires after `gptel-yatools-vfs--header-line-cache-seconds' so that
-changes made outside Emacs (a git checkout, another editor) are
-picked up too.")
+Invalidated when the VFS changes, and stale after
+`gptel-yatools-vfs--header-line-cache-seconds'.")
 
 
 ;;-------------------------------------------------------------------------
@@ -83,21 +78,15 @@ picked up too.")
 ;;   (:content  STRING          ; current VFS content
 ;;    :baseline STRING-OR-NIL)  ; disk content when the VFS first captured it
 ;;
-;; The baseline is what enables conflict detection: if the file on disk no
-;; longer matches the baseline, we know somebody else (execute_command, an
-;; external editor, etc.) has changed it, and file_sync will refuse to
-;; overwrite it without an explicit overwrite=true.
-;;
-;; The variables `gptel-yatools-vfs' and `gptel-yatools-vfs--header-line-cache' are
-;; declared at the top of this file, see the comment there.
+;; The baseline is what conflict detection compares against: if disk no
+;; longer matches it, somebody else changed the file, and `file_sync'
+;; refuses to overwrite it without an explicit overwrite=true.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs--table ()
   "Return this buffer's VFS hash table, creating it if needed.
 
-Also installs the `kill-buffer' guard, so a buffer holding unsynced
-changes cannot be killed by accident.  The guard is (re)installed on
-every call because the table may already exist from an earlier call, and
-`add-hook' is idempotent."
+Also installs the `kill-buffer' guard in
+`kill-buffer-query-functions'."
   (unless gptel-yatools-vfs
     (setq gptel-yatools-vfs (make-hash-table :test #'equal)))
   (unless (memq #'gptel-yatools-vfs--query-kill-buffer kill-buffer-query-functions)
@@ -108,9 +97,8 @@ every call because the table may already exist from an earlier call, and
 (defun gptel-yatools-vfs--query-kill-buffer ()
   "Ask before killing a buffer that still holds unsynced VFS changes.
 
-In a non-interactive Emacs there is nobody to ask (and
-`yes-or-no-p' would read from stdin and fail), so let the kill
-proceed instead of breaking batch cleanup."
+Returns non-nil when the kill may proceed.  Always non-nil in batch, where
+`yes-or-no-p' would read from stdin."
   (let ((paths (gptel-yatools-vfs--changed-paths)))
     (or noninteractive
         (null paths)
@@ -120,15 +108,10 @@ proceed instead of breaking batch cleanup."
                  (mapconcat #'gptel-yatools--display-path paths ", "))))))
 
 (defun gptel-yatools-vfs--key (path)
-  "Return PATH as a VFS table key, insisting that it is absolute.
+  "Return PATH as an absolute VFS table key.
 
-The VFS interface takes resolved paths only.  A tool turns the model's
-text into an absolute path once, at its own edge, through
-`gptel-yatools--resolve-path'; past that point a path is a fact, not an
-interpretation.  A relative path arriving here is a bug in this
-package, so it is reported as one instead of being silently resolved
-against whichever buffer is current -- the failure that made
-`write_file' and `read_path' disagree about what \"p.txt\" names."
+Signals an error when PATH is relative: callers must resolve paths with
+`gptel-yatools--resolve-path' first."
   (if (file-name-absolute-p path)
       (expand-file-name path)
     (error "Error: internal error: the VFS was given the relative path %S; tool functions must resolve paths with `gptel-yatools--resolve-path' before calling the VFS"
@@ -137,53 +120,31 @@ against whichever buffer is current -- the failure that made
 ;;-------------------------------------------------------------------------
 ;; The pending-change module
 ;;
-;; One answer to one question: which VFS entries still differ from disk.
-;; The two questions the VFS table can answer are different ones and are
-;; spelled differently:
+;; Two questions, spelled differently:
 ;;
 ;;   entry    "is there an entry here?"  No disk I/O, no reaping.
 ;;   pending  "...and does it still differ?"  One disk read; an entry disk
 ;;            has caught up with is dropped on the way.
 ;;
-;; A path with an entry is *shadowed*, not necessarily *pending*: three
-;; structural checks (can this be written?, is an ancestor a file?, does
-;; this path hold pending children?) and the two skill-file checks need
-;; the cheap answer and must not pay a disk read for a comparison they do
-;; not use.  See docs/adr/0001-pending-ness-keeps-a-cheap-predicate.md.
-;;
-;; Reaping is a consequence of asking, not a separate sweep.  `pending'
-;; and `pending-paths' are the only things that read disk to compare, so
-;; they are the only places that can notice.
+;; A path with an entry is *shadowed*, not necessarily *pending*.  Structural
+;; checks need the cheap answer.  See
+;; docs/adr/0001-pending-ness-keeps-a-cheap-predicate.md.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs-entry (path)
   "Return PATH's VFS entry plist, or nil when there is no entry.
 
-This is the cheap question -- \"is there an entry here?\" -- and it
-never reads disk and never drops anything.  A caller that also needs to
-know whether the entry still differs from disk wants
-`gptel-yatools-vfs-pending'; a caller that needs only the structural
-fact (is this ancestor a file in the VFS? may I insert under it?) wants
-this one, and gets it without a disk read.
+This is the cheap question: no disk read, no reaping.  For \"and does it
+still differ?\" use `gptel-yatools-vfs-pending'.
 
-The plist is the entry itself: `:content', `:baseline', `:coding' and
-`:baseline-coding'.  It is read-only; do not `plist-put' into it, since
-it is the table's own value."
+The plist is the table's own value (`:content', `:baseline', `:coding',
+`:baseline-coding'); do not modify it in place."
   (gethash (gptel-yatools-vfs--key path) (gptel-yatools-vfs--table)))
 
 (defun gptel-yatools-vfs-pending (path)
   "Return PATH's VFS entry if it still differs from disk, else nil.
 
-This is the question every tool actually asks, so the value is the
-entry rather than a boolean: a caller that wants the content, the
-baseline and both codings needs all three, and a predicate would make
-it look every one of them up a second time.
-
-Comparing an entry with disk costs one disk read, and the entry disk has
-caught up with is dropped as a side effect: it is no longer pending, so
-leaving it in the table would make every later reader believe the file
-differs from disk when it does not.  Reaping here rather than in a
-separate sweep is what keeps that rule in one place -- see the section
-comment above."
+Costs one disk read.  An entry disk has caught up with is dropped from the
+table as a side effect, and nil is returned."
   (let ((entry (gptel-yatools-vfs-entry path)))
     (cond
      ((null entry) nil)
@@ -193,12 +154,10 @@ comment above."
       nil))))
 
 (defun gptel-yatools-vfs--reap (paths)
-  "Drop PATHS from the table: disk has caught up with what they held.
+  "Remove PATHS from the table, having found that disk caught up with them.
 
-Only the walk in `gptel-yatools-vfs--changed-paths' needs this as a
-separate step, because it must not change the table while `maphash' is
-iterating it.  Every other caller reaps by asking
-`gptel-yatools-vfs-pending'."
+For callers that must not mutate the table while iterating it, such as
+`gptel-yatools-vfs--changed-paths'."
   (dolist (path paths)
     (gptel-yatools-vfs-remove path)))
 
@@ -210,22 +169,16 @@ iterating it.  Every other caller reaps by asking
 (defun gptel-yatools-vfs-put (path content &optional reset-baseline coding)
   "Store CONTENT at PATH in the VFS.
 
-If CONTENT equals the file's current disk content, the entry is
-removed (a write that produces no change is a no-op) -- unless
-CODING asks for a different encoding than the file has on disk, in
-which case an entry is kept so the sync re-encodes the file.
+No entry is kept when CONTENT and CODING match what is on disk, so a
+write that changes nothing leaves nothing pending.
 
-When RESET-BASELINE is non-nil, the recorded baseline is refreshed
-to the current disk content, discarding any prior conflict.  Use
-this only when the caller has explicitly accepted the on-disk
-version of the file (e.g. `overwrite' in `write_file'); that tool
-asks the user before it comes here, because discarding the conflict
-is the user's work being discarded.
+RESET-BASELINE non-nil refreshes the baseline to the current disk content,
+discarding any pending conflict.  The caller is responsible for having
+obtained the user's consent.
 
-When CODING is non-nil it becomes the encoding the file will be
-written with on sync, which is how a caller converts a file from
-one coding system to another.  The baseline coding is left alone,
-since it describes what the disk had when the VFS captured it."
+CODING, when non-nil, is the coding system the file will be written with
+on sync, which converts the file to another encoding.  The baseline coding
+is left as it was."
   (let* ((full (gptel-yatools-vfs--key path))
          (disk-info (gptel-yatools-vfs--disk-content-with-coding full))
          (disk (car-safe disk-info))
@@ -259,19 +212,13 @@ since it describes what the disk had when the VFS captured it."
   (force-mode-line-update t))
 
 (defun gptel-yatools-vfs--disk-content-with-coding (path)
-  "Return (CONTENT . CODING) for PATH, or nil if PATH is not a regular file.
+  "Return (CONTENT . CODING) for the regular file PATH, or nil.
 
-CONTENT is PATH decoded from disk and CODING is the coding system
-that performed the decoding, so re-encoding CONTENT with CODING
-reproduces the file's bytes exactly.  Recording it is what keeps a
-sync from silently transcoding line endings (CRLF) or legacy 8-bit
-encodings (ISO-8859-1, Shift-JIS, ...) to UTF-8/unix.
+CODING is the coding system that decoded CONTENT, so re-encoding CONTENT
+with it reproduces the file's bytes.
 
-Only regular files are considered: reading a FIFO blocks forever and
-reading /dev/zero or /dev/urandom never ends.  An unreadable file such as
-one refused by permissions, or an I/O error, yields nil instead of
-signalling, so a single unreadable pending file cannot break every tool
-call and every redisplay of the header line."
+Nil for anything that is not a readable regular file: a FIFO would block,
+and an unreadable file must not break its callers."
   (when (file-regular-p path)
     (condition-case nil
         (with-temp-buffer
@@ -285,13 +232,12 @@ call and every redisplay of the header line."
   (car-safe (gptel-yatools-vfs--disk-content-with-coding path)))
 
 (defun gptel-yatools-vfs--resolve-coding (coding)
-  "Return a concrete coding system suitable for writing with CODING.
+  "Return a coding system from CODING that can be written with.
 
-CODING is a value previously recorded from `last-coding-system-used'.
-Auto-detected (\"undecided\") coding systems are replaced by their
-UTF-8 equivalent with the same end-of-line convention: a file that
-was decoded successfully as `undecided' is by definition valid UTF-8, or
-plain ASCII, so re-encoding it as UTF-8 is lossless."
+CODING is a value recorded from `last-coding-system-used'.  Nil becomes
+`utf-8-unix', and an auto-detected (\"undecided\") coding becomes UTF-8
+with the same end-of-line convention, which is lossless for a file that
+decoded cleanly."
   (cond
    ((null coding) 'utf-8-unix)
    ((eq (coding-system-base coding) 'undecided)
@@ -307,19 +253,16 @@ plain ASCII, so re-encoding it as UTF-8 is lossless."
    (t coding)))
 
 (defun gptel-yatools-vfs--target-coding (path)
-  "Return the coding a sync of PATH would use, or nil if unknown.
+  "Return the coding system a sync of PATH will use, or nil if unknown.
 
-A pending VFS entry wins over the disk, because that is what the
-sync will write.  For a file that does not exist yet, nil is
-returned and `gptel-yatools-vfs--resolve-coding' turns that into UTF-8."
+A pending entry wins over disk, since that is what the sync writes."
   (or (gptel-yatools-vfs--entry-coding path)
       (cdr-safe (gptel-yatools-vfs--disk-content-with-coding path))))
 
 (defun gptel-yatools-vfs--first-unencodable (string coding)
-  "Return the first character of STRING that CODING cannot represent.
+  "Return the first distinct character of STRING that CODING cannot encode.
 
-Only distinct characters are tried, so this stays cheap on large
-input.  Returns nil when every character is representable."
+Nil when every character can be encoded."
   (let ((seen (make-hash-table :test #'eq))
         (result nil)
         (i 0))
@@ -333,14 +276,10 @@ input.  Returns nil when every character is representable."
     result))
 
 (defun gptel-yatools-vfs--changed-p (path)
-  "Return non-nil if PATH differs between the VFS and disk.
+  "Return non-nil if PATH's entry differs from disk, in text or encoding.
 
-The pure comparison behind `gptel-yatools-vfs-pending', with no side
-effects: a caller that wants the entry too asks that function, which
-reaps an entry this returns nil for.
-
-Both the text and the encoding are compared, so a pending
-encoding conversion is a change even when the text is identical."
+No side effects.  Use `gptel-yatools-vfs-pending' when the entry is
+wanted too."
   (let ((entry (gptel-yatools-vfs-entry path)))
     (when entry
       (let ((disk-info (gptel-yatools-vfs--disk-content-with-coding path)))
@@ -350,20 +289,12 @@ encoding conversion is a change even when the text is identical."
                         (gptel-yatools-vfs--resolve-coding (cdr-safe disk-info)))))))))
 
 (defun gptel-yatools-vfs--conflict-p (path)
-  "Return non-nil if PATH's disk content has changed since the VFS baseline.
+  "Return non-nil if PATH's disk content changed since the VFS baseline.
 
-Only meaningful for paths that have a pending VFS entry.  A
-conflict means the file was modified on disk outside the VFS
-after the VFS first captured it, and syncing would overwrite
-those external changes.  Both the decoded text and the coding
-system are compared, so a pure re-encoding (for example CRLF
-turned into LF) also counts as a change.
+Only meaningful for paths with an entry.  Both the decoded text and the
+coding system are compared, so a pure re-encoding counts as a change.
 
-This is the boolean form of one `gptel-yatools-vfs-refusal' kind, and
-exists only because that function asks it first.  Every other caller
-asks `gptel-yatools-vfs-refusal', so that the answer \"is this a
-conflict?\" has one source and the review and the report cannot
-disagree about which files are conflicts."
+Boolean form of one `gptel-yatools-vfs-refusal' kind."
   (let ((entry (gptel-yatools-vfs-entry path)))
     (when entry
       (let ((disk-info (gptel-yatools-vfs--disk-content-with-coding path)))
@@ -373,18 +304,9 @@ disagree about which files are conflicts."
                         (cdr-safe disk-info))))))))
 
 (defun gptel-yatools-vfs--changed-paths ()
-  "Return a list of paths whose VFS content differs from disk.
+  "Return the sorted paths whose VFS content differs from disk.
 
-Entries that no longer differ are dropped on the way: disk caught up
-with the pending copy, so there is nothing left to sync.  This is the
-one place that already reads every pending file to answer, which is why
-the reaping is here and not in the callers -- and why `vfs_discard' does
-not rely on this list to find entries, only `gptel-yatools-vfs-entry'
--- the cheap \"is there an entry?\" question -- still answers about them.
-
-The removal happens after the walk: `maphash' must not see its table
-change underneath it, so this is the one caller that reaps through
-`gptel-yatools-vfs--reap' instead of asking `gptel-yatools-vfs-pending'."
+Entries disk has caught up with are removed from the table on the way."
   (let (result stale)
     (maphash (lambda (path _entry)
                (if (gptel-yatools-vfs--changed-p path)
@@ -409,42 +331,20 @@ change underneath it, so this is the one caller that reaps through
 (defun gptel-yatools-vfs--directory-listing (full)
   "Return a listing of directory FULL, merging disk and VFS entries.
 
-Every VFS path under FULL contributes its first path component, so
-intermediate virtual directories appear correctly.
+Each line is TYPE, a tab, the name, and, for an entry that differs from
+disk, a tab and a note: `(pending)' when the entry exists only in the VFS,
+`(pending change)' when it shadows disk content.
 
-Each line is TYPE, a tab, the name, and -- when the entry is not simply
-what disk holds -- a third tab-separated note saying so: `(pending)' for
-an entry that exists only in the VFS, `(pending change)' for one whose
-disk content a pending write shadows.  Without the note the listing is
-indistinguishable from one of a directory that is entirely on disk.
-
-An entry that disk has caught up with is neither: it shadows nothing, so
-it contributes no note and is dropped on the way out, exactly as
-`gptel-yatools-vfs-pending' drops it when it is asked about one file.  A
-listing that kept such an entry would tell the model a change was pending
-while `vfs_diff' said there was none.
-
-Returns a plist of :text and :pending (non-nil when any line carries a
-note), so the caller can say which provenance the reply has instead of
-guessing."
+Returns a plist of :text, the listing, and :pending, non-nil when any line
+carries a note."
   (let* ((full-dir (file-name-as-directory (expand-file-name full)))
          (entries (make-hash-table :test #'equal))
          (pending nil)
          (stale nil))
-    ;; Disk entries.  `directory-files' signals a raw `file-error'
-    ;; for an unreadable directory or one deleted between the checks
-    ;; above; turn that into a readable tool error instead.
-    ;;
-    ;; One `file-name-all-completions' answers the whole listing: the
-    ;; names, and whether each is a directory (a trailing "/" says so).
-    ;; The obvious spelling -- `directory-files' plus a `file-directory-p'
-    ;; per entry -- costs one TRAMP command per *entry*: measured at
-    ;; thirty-seven round trips for a directory of forty files, with 97%
-    ;; of the run inside `tramp-sh-handle-file-directory-p'.
-    ;;
-    ;; `directory-files-and-attributes' looks like the answer and is not:
-    ;; over TRAMP it falls back to one `stat' per entry, measured at
-    ;; thirty-seven round trips for the same listing.
+    ;; One `file-name-all-completions' lists the directory and says which
+    ;; entries are directories, in one TRAMP round trip.  `directory-files'
+    ;; plus a `file-directory-p' per entry, and
+    ;; `directory-files-and-attributes', both cost one round trip each.
     (when (file-directory-p full)
       (condition-case err
           (dolist (entry (file-name-all-completions "" full))
@@ -499,9 +399,9 @@ guessing."
 ;;-------------------------------------------------------------------------
 ;; The VFS label for the header line
 ;;
-;; The drawing lives in `gptel-yatools.el', with the rest of the gptel
-;; adaptation.  This module contributes one label and caches the number it
-;; shows, because recomputing it reads every pending file from disk.
+;; The drawing lives in `gptel-yatools.el'.  This module contributes the
+;; label and caches the number it shows, because recomputing it reads every
+;; pending file from disk.
 ;;-------------------------------------------------------------------------
 (defconst gptel-yatools-vfs--header-line-cache-seconds 1.0
   "How long the header-line pending list may be reused before recomputing.")
@@ -525,8 +425,7 @@ guessing."
 (defun gptel-yatools-vfs--header-line-label ()
   "Return the header-line text for pending VFS changes, or nil.
 
-Clicking the label echoes the pending paths; the actual review
-happens through the `vfs_diff' and `file_sync' tools."
+Clicking the label echoes the pending paths."
   (let ((paths (gptel-yatools-vfs--header-line-paths)))
     (when paths
       (propertize
@@ -541,7 +440,7 @@ happens through the `vfs_diff' and `file_sync' tools."
                           (mapconcat #'gptel-yatools--display-path paths ", "))))))
 
 ;; Registered like any other module's label: the drawer in
-;; `gptel-yatools.el' asks the registry, so the VFS is not a special case.
+;; `gptel-yatools.el' asks the registry.
 (unless (memq #'gptel-yatools-vfs--header-line-label
               gptel-yatools-header-line-extra-functions)
   (add-to-list 'gptel-yatools-header-line-extra-functions
@@ -551,19 +450,13 @@ happens through the `vfs_diff' and `file_sync' tools."
 ;; Unified diff via external `diff'
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs--unified-diff (old new &optional labels)
-  "Return a unified diff between strings OLD and NEW.
+  "Return a unified diff from string OLD to string NEW.
 
-OLD is the \"before\" side, NEW is the \"after\" side.  Lines
-prefixed with `-' are present only in OLD (removed when going from
-OLD to NEW); lines prefixed with `+' are present only in NEW (added
-when going from OLD to NEW).
+LABELS is nil, a string used as both file names (as \"a/LABEL\" and
+\"b/LABEL\"), or a cons of (OLD-LABEL . NEW-LABEL).
 
-LABELS is either nil, a string LABEL (in which case the `---'/`+++'
-headers are set to \"a/LABEL\" and \"b/LABEL\" respectively), or a
-cons (OLD-LABEL . NEW-LABEL) for arbitrary header text.
-
-Returns the empty string when OLD and NEW are identical, or an
-error string if `diff' fails."
+Returns the empty string when OLD and NEW are equal, and a description of
+the failure when `diff' exits with anything but 0 or 1."
   (if (equal old new)
       ""
     (let* ((old-label (pcase labels
@@ -576,14 +469,10 @@ error string if `diff' fails."
            (new-file (make-temp-file "gptel-yatools-vfs-new-")))
       (unwind-protect
           (progn
-            ;; Pin the coding: without it `write-region' sees content that
-            ;; its default coding cannot represent (binary data, or text
-            ;; read with `no-conversion') and asks the USER to choose a
-            ;; coding system -- a modal prompt in the middle of a diff.
-            ;; Emacs's utf-8 writes raw eight-bit characters through
-            ;; unchanged, so this reproduces the bytes exactly for both
-            ;; text and binary, and keeps `diff' free to decide whether
-            ;; the files are binary.
+            ;; Pin the coding: otherwise `write-region' asks the user to
+            ;; choose one for content its default coding cannot represent
+            ;; (binary data, or text read with `no-conversion').  UTF-8
+            ;; passes raw eight-bit characters through unchanged.
             (let ((coding-system-for-write 'utf-8-unix))
               (with-temp-file old-file (insert old))
               (with-temp-file new-file (insert new)))
@@ -610,12 +499,11 @@ error string if `diff' fails."
         (ignore-errors (delete-file new-file))))))
 
 (defun gptel-yatools-vfs--format-one-diff (path)
-  "Return a display string describing the pending diff for PATH.
+  "Return a display string for PATH's pending change.
 
-For non-conflicting files, this is a plain unified diff from disk
-to VFS.  For conflicting files, both the external change (baseline
-to disk) and what file_sync would apply (disk to VFS) are shown so
-the caller can see what would be lost."
+A plain unified diff from disk to VFS, or, for a conflicting file, both the
+external change (baseline to disk) and what `file_sync' would apply (disk
+to VFS)."
   (let* ((label (gptel-yatools--display-path path))
          (entry (gptel-yatools-vfs-entry path))
          (disk-info (gptel-yatools-vfs--disk-content-with-coding path))
@@ -625,12 +513,10 @@ the caller can see what would be lost."
          (baseline (plist-get entry :baseline))
          (baseline-coding (plist-get entry :baseline-coding)))
     (cond
-     ;; Conflict is checked first: a pending file that was deleted from
-     ;; disk and rewritten to "" would otherwise be reported as a new
-     ;; empty file, hiding the deletion.  The question is asked of
-     ;; `gptel-yatools-vfs-refusal', not of the private predicate, so that
-     ;; the diff header and the sync partition cannot disagree about
-     ;; which files are conflicts.
+     ;; Checked first: a file deleted from disk and rewritten to "" would
+     ;; otherwise look like a new empty file, hiding the deletion.  Asked
+     ;; of `gptel-yatools-vfs-refusal' so the diff header and the sync
+     ;; partition agree.
      ((eq (plist-get (gptel-yatools-vfs-refusal path) :kind) :conflict)
       (let ((external
              (gptel-yatools-vfs--unified-diff
@@ -669,8 +555,7 @@ with overwrite=true to force the VFS version (the user is asked to confirm).\n\n
      (t
       (format "===== %s =====\n%s%s%s\n"
               label
-              ;; Say up front when file_sync will refuse this file, so
-              ;; vfs_diff and the sync review buffer never disagree.
+              ;; State the refusal here, so the diff and the review agree.
               (let ((refusal (gptel-yatools-vfs-refusal path)))
                 (if refusal
                     (format "NOT SYNCED: %s\n" (plist-get refusal :reason))
@@ -679,10 +564,7 @@ with overwrite=true to force the VFS version (the user is asked to confirm).\n\n
               (gptel-yatools-vfs--unified-diff (or disk "") (or vfs "") label))))))
 
 (defun gptel-yatools-vfs--coding-change-note (path)
-  "Return a one-line note if syncing PATH will change its encoding, else \"\".
-
-The note is empty when the encoding is unchanged, so callers can
-concatenate it unconditionally."
+  "Return a note that syncing PATH will change its encoding, or \"\"."
   (let* ((disk-coding (cdr-safe (gptel-yatools-vfs--disk-content-with-coding path)))
          (target (gptel-yatools-vfs--resolve-coding (gptel-yatools-vfs--entry-coding path)))
          (current (gptel-yatools-vfs--resolve-coding disk-coding)))
@@ -694,44 +576,29 @@ concatenate it unconditionally."
 ;;-------------------------------------------------------------------------
 ;; The VFS interface
 ;;
-;; What the rest of the package may call.  Everything else in this file --
-;; the entry plists, the coding bookkeeping, the baseline comparisons -- is
-;; implementation, and stays private so a change to the shape of an entry
-;; cannot ripple out to the tools.
-;;
-;; The two write entry points are where a pending change is decided on:
-;; they validate the target, settle the encoding, refuse content the
-;; encoding cannot carry, and record the baseline conflicts are detected
-;; against.  Both the tools and the skill code go through them, which is
-;; why a rule can only be changed in one place.
+;; What the rest of the package may call.  The two write entry points are
+;; where a pending change is decided on: they validate the target, settle
+;; the encoding, refuse content the encoding cannot carry, and record the
+;; baseline conflicts are detected against.
 ;;-------------------------------------------------------------------------
 ;;-------------------------------------------------------------------------
 ;; Reading a text file
 ;;
 ;; One reader answers "what text is at this path, and where did it come
-;; from?" for every tool that reads one: `read_path',
-;; `read_file-from-offset', `fetch_lines_from_file_using_regex' and the
-;; skill file reader.  It owns the binary policy too.
+;; from?" for `read_path', `read-file-from-offset',
+;; `fetch-lines-from-file-using-regex' and the skill file reader, and owns
+;; the binary policy with it.
 ;;
-;; The answer is a value with a `:kind', not a signal and not a rendered
-;; string: a tool has to be able to turn a missing path into *its own*
-;; message, and the skill reader needs the text before deciding how to
-;; frame it.  The wording of a refusal is a separate function below, so
-;; four tools share one voice without the reader deciding what a tool says.
+;; The answer is a value with a `:kind': a tool has to be able to turn a
+;; missing path into its own message, and the skill reader needs the text
+;; before deciding how to frame it.  Refusal wording is separate, below.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs--binary-p (text)
-  "Return non-nil if TEXT looks like binary content.
-
-The test is the conventional one: presence of a NUL byte.  Text files
-essentially never contain one, while images, PDFs, archives and
-compiled artifacts almost always do."
+  "Return non-nil if TEXT contains a NUL byte."
   (and (stringp text) (string-match-p "\0" text)))
 
 (defun gptel-yatools-vfs--text-size (text)
-  "Return the number of bytes TEXT occupies when written unchanged.
-
-A pending copy is sized by the bytes it will be written as, not by the
-disk file it will replace, so both sides of a read report the same way."
+  "Return the number of bytes TEXT occupies when written unchanged."
   (or (condition-case nil
           (string-bytes (encode-coding-string text 'no-conversion))
         (error nil))
@@ -740,9 +607,8 @@ disk file it will replace, so both sides of a read report the same way."
 (defun gptel-yatools-vfs--binary-notice (read)
   "Return a Result reporting that READ found binary content.
 
-READ is what `gptel-yatools-vfs-read' returned.  Its `:size' is the
-size of the bytes the model would have been shown, and its
-`:provenance' says which side of the VFS they came from."
+READ is what `gptel-yatools-vfs-read' returned; its `:size' and
+`:provenance' are passed on."
   (let ((size (plist-get read :size)))
     (gptel-yatools-ok
      (format "\
@@ -770,11 +636,8 @@ without reading it first."
 (defun gptel-yatools-vfs--read-problem (read)
   "Return a sentence saying why READ is not text, or nil when it is.
 
-This is the shared wording for the three kinds that are not text and
-are not binary: a missing path, a path that is not a regular file, and
-a file that could not be decoded.  A tool that has something more
-useful to say -- `read_path' lists a directory -- branches on `:kind'
-itself instead of calling this."
+Shared wording for `:missing', `:directory', `:special' and `:unreadable'.
+A tool with something more useful to say branches on `:kind' itself."
   (pcase (plist-get read :kind)
     (:missing
      (format "Error: no such file: %s"
@@ -794,38 +657,23 @@ itself instead of calling this."
 (defun gptel-yatools-vfs-read (path &optional disk-only)
   "Return the text at PATH, and say what kind of answer it is.
 
-PATH must be absolute: resolution happens at the tool's edge, in
-`gptel-yatools--resolve-path'.
+PATH must be absolute.  DISK-ONLY non-nil ignores a pending entry and
+answers from disk.
 
-DISK-ONLY, when non-nil, ignores a pending VFS entry and answers from
-disk.  A skill file uses it: instructions the model has written but
-nobody has approved must not be in force yet, which is exactly what a
-pending entry would make them.
+The value is a plist carrying `:path' and a `:kind':
 
-The value is a plist whose `:kind' is one of:
-
-  :text        `:text' holds the file's contents, `:provenance' where
-               they came from (`:disk' or `:vfs').
-  :binary      `:text' holds the raw contents, `:size' the bytes,
-               `:provenance' where they came from.  The contents are
-               not returned to the model -- see
-               `gptel-yatools-vfs--binary-notice'.
+  :text        `:text' holds the contents, `:provenance' where they came
+               from (`:disk' or `:vfs').
+  :binary      `:text' holds the raw bytes, `:size' their count,
+               `:provenance' where they came from.
   :missing     nothing exists at PATH.
   :directory   PATH is a directory.
-  :special     PATH exists but is not a regular file.
-  :unreadable  PATH is a regular file that could not be decoded;
-               `:why' says why.
+  :special     PATH is not a regular file.
+  :unreadable  PATH is a regular file that could not be read; `:why'
+               says why.
 
-Every answer carries `:path', the key the VFS resolved.
-
-A pending VFS entry wins over disk, exactly as it does for every other
-read.  Only regular files are read from disk: reading a FIFO blocks
-forever and reading /dev/zero never ends.
-
-Ordinary outcomes do not signal.  A tool that can do something about
-one branches on `:kind'; one that cannot renders it with
-`gptel-yatools-vfs--read-problem'.  Signalling here would force every
-caller to wrap the call in `ignore-errors' and lose the reason."
+A pending entry wins over disk.  Ordinary outcomes do not signal; render
+them with `gptel-yatools-vfs--read-problem' or branch on `:kind'."
   (let* ((full (gptel-yatools-vfs--key path))
          (entry (and (not disk-only) (gptel-yatools-vfs-pending full)))
          (vfs (plist-get entry :content)))
@@ -839,27 +687,16 @@ caller to wrap the call in `ignore-errors' and lose the reason."
       (gptel-yatools-vfs--read-from-disk full)))))
 
 (defun gptel-yatools-vfs--read-from-disk (full)
-  "Return the answer for the file at FULL, asking disk about it once.
+  "Return the attributes of the file at FULL in one round trip.
 
-One `file-attributes' call answers what three predicates would otherwise
-be asked separately -- does it exist, is it a directory, is it a regular
-file -- and it answers them in one round trip.  That matters over TRAMP,
-where each question is a separate command and a separate wait for the
-reply: measured, reading ten files cost sixty-five round trips.
+The value is the plist `gptel-yatools-vfs-read' documents, minus any
+`:text': one `:kind', the `:path', and `:text', `:size', `:provenance' or
+`:why' where that kind carries one.
 
-Readability is not asked at all.  The read itself is the only question
-that matters, and its failure already means \"unreadable\", which is what
-the fourth predicate was approximating.
-
-A symbolic link is the one case that needs asking again: `file-attributes'
-does not follow it, so the answer says \"a link\" and not what it links to.
-Only then is `file-directory-p' asked, which does follow.
-
-A file that is neither a directory nor a link gets `file-regular-p' --
-not because the check is free of meaning, but because it is free of cost:
-`file-attributes' has just filled TRAMP's cache, and the follow-up
-question is answered from it rather than from the host: zero extra round
-trips, which keeps a FIFO or a device refused instead of read."
+One `file-attributes' call answers existence, directory-ness and
+regularity at once, which matters over TRAMP where each question is a
+command and a wait.  A symlink is asked about again, since
+`file-attributes' does not follow it."
   (let* ((attrs (condition-case nil (file-attributes full) (file-error nil)))
          (type (and attrs (file-attribute-type attrs))))
     (cond
@@ -887,37 +724,24 @@ trips, which keeps a FIFO or a device refused instead of read."
      (t (list :kind :text :path full :text content :provenance :disk)))))
 
 (defun gptel-yatools-vfs--read-refusal (read)
-  "Return READ's reason as the Result a tool can hand to the model.
+  "Return READ's reason as a Result, keeping READ's provenance.
 
-READ is what `gptel-yatools-vfs-read' returned for a kind that is not
-text.  The provenance is READ's where it has one, because the answer is
-about where the bytes came from; a path that does not exist has none,
-and the refusal is then about disk by default."
+READ is what `gptel-yatools-vfs-read' returned.  Provenance defaults to
+`:disk' when READ has none."
   (gptel-yatools-ok
    (gptel-yatools-vfs--read-problem read)
    :provenance (or (plist-get read :provenance) :disk)
    :comment "Nothing was read."))
 
 (defun gptel-yatools-vfs-with-text (read function)
-  "Call FUNCTION with READ's text and provenance, or return its refusal.
+  "Call FUNCTION with READ's text and provenance, or return READ's refusal.
 
-READ is what `gptel-yatools-vfs-read' returned.  FUNCTION is the tool's
-own framing: it is called with the text and where it came from, and
-returns the Result the tool wants to send.  When READ holds no text --
-binary content, a missing path, a directory, a special file, undecodable
-bytes -- FUNCTION is not called at all, and the ready refusal is
-returned instead.
+FUNCTION is called as (FUNCTION TEXT PROVENANCE) and returns a Result.
+It is not called when READ holds no text -- binary content, a missing
+path, a directory, a special file, unreadable bytes -- in which case the
+refusal is returned instead.
 
-This is the seam the four reading tools cross, and it exists because
-they were each writing the same three-way dispatch: `:text' builds a
-reply, `:binary' calls the binary notice, everything else re-signals the
-read problem.  The dispatch is one answer here; what each tool says
-about the text it got stays its own, which is what makes `read_path'
-able to list a directory instead of refusing it.
-
-Refusals travel as Results rather than as signals so that provenance
-survives them: a binary file that exists only in the VFS is a VFS reply,
-and the error channel the boundary renders hardcodes `vfs=\"false\"'."
+A Result is returned rather than a signal so that provenance survives."
   (pcase (plist-get read :kind)
     (:text (funcall function (plist-get read :text)
                     (plist-get read :provenance)))
@@ -927,19 +751,12 @@ and the error channel the boundary renders hardcodes `vfs=\"false\"'."
 (defun gptel-yatools-vfs--media-result (read)
   "Return a Result attaching READ's file as media, or nil.
 
-READ is what `gptel-yatools-vfs-read' returned.  Only content that is on
-disk is considered, and only for a path that was read as a file: a pending
-VFS entry holds text, so it can never be the image a model is shown.
+Only disk content is considered, and only for a path read as a file: a
+pending entry holds text.  The bytes READ already holds decide the type,
+so no second disk read is made.
 
-What the file is comes from the bytes READ already holds, so an ordinary
-text read costs nothing extra -- in particular not a second round trip to
-a remote host -- and only a file that begins like an image is asked about
-again at all.
-
-A nil value means \"this is not an image the model can be shown\", which is
-the whole of this function's contribution -- what a tool says instead
-stays the tool's own business, so `read_path' falls back to the text and
-binary answers it gives for everything else."
+Nil means this is not an image the model can be shown; the caller supplies
+its own answer."
   (when (and (eq (plist-get read :provenance) :disk)
              (memq (plist-get read :kind) '(:text :binary)))
     (when-let* ((outcome (gptel-yatools-media-attach
@@ -966,15 +783,9 @@ the file already has."
 ;;-------------------------------------------------------------------------
 ;; What a write is not allowed to touch
 ;;
-;; A model that can write this package's own code or the user's init files
-;; has a way around every control this package offers -- not by defeating
-;; the review, but by changing the code that performs it.
-;;
-;; The directory list holds the package's own directory.  It deliberately
-;; does not hold all of `user-emacs-directory': repositories are commonly
-;; cloned inside it, and refusing to edit those would make the tool useless
-;; exactly where it was started.  What runs on the next start is named
-;; instead, file by file, below.
+;; The directory list holds the package's own directory, and not all of
+;; `user-emacs-directory', since repositories are commonly cloned inside
+;; it.  What runs on the next start is named file by file instead.
 ;;-------------------------------------------------------------------------
 (defcustom gptel-yatools-write-denied-directories
   (delq nil
@@ -984,14 +795,9 @@ the file already has."
                    ""))))
   "Directories that the writing tools refuse to put files in.
 
-The default is this package's own directory: the code that runs tool
-calls, decides what the review lists and writes the file is not
-something the model should be able to change, because the next call
-would run the change.
-
-Matching is by `file-truename' on the target's directory, so a symlink
-into one of these directories is caught too.  Set this to nil to let
-the agent edit the harness deliberately."
+Defaults to this package's own directory.  Matching is by `file-truename'
+on the target's directory, so a symlink into one of these is caught too.
+Nil lets the agent edit the harness deliberately."
   :type '(repeat directory)
   :group 'gptel-yatools)
 
@@ -1008,11 +814,7 @@ the agent edit the harness deliberately."
                                               user-emacs-directory)))))
   "Files that the writing tools refuse to write, whatever directory they are in.
 
-These are the files Emacs loads at startup, so a change to one is not
-a change to a repository: it is a change to what every future Emacs
-runs.  That is a different decision from the one the sync review asks
-the user to make, and it is not one a tool call may take on their
-behalf."
+Defaults to the files Emacs loads at startup."
   :type '(repeat file)
   :group 'gptel-yatools)
 
@@ -1034,9 +836,8 @@ code execution -- including the visit that would review the write."
 (defun gptel-yatools-vfs--write-policy-refusal (full)
   "Return a one-line reason why FULL may not be written, or nil.
 
-Asks the three lists above -- denied directories, forbidden file names
-and startup files -- in that order, so the message names the rule that
-actually applied and the user can change that one rule."
+Asks the three denied lists in order -- file names, startup files,
+directories -- so the message names the rule that applied."
   (let* ((true (gptel-yatools-vfs--truename-or-path full))
          (dir (file-name-directory true))
          (name (file-name-nondirectory true))
@@ -1063,15 +864,10 @@ actually applied and the user can change that one rule."
      (t nil))))
 
 (defun gptel-yatools-vfs--confirm-overwrite (full)
-  "Ask the user to accept discarding FULL's external changes, or signal.
+  "Ask the user to accept discarding FULL's external changes.
 
-`write_file' exposes `overwrite' to the model, which makes the conflict
-check -- the control the package's own description advertises -- turn
-off on the model's word alone.  The baseline is refreshed and the
-conflict disappears from the review, so the user's uncommitted work is
-overwritten with nothing but an argument to show for it.  Asking here
-puts the decision back with the person who would lose the work; the
-escape hatch survives, it just is not the model's to pull."
+Signals an error, so nothing is written, unless the user agrees.  Always
+signals in batch."
   (let ((name (gptel-yatools--display-path full)))
     (unless (and (not noninteractive)
                  (y-or-n-p
@@ -1083,20 +879,18 @@ escape hatch survives, it just is not the model's to pull."
 (defun gptel-yatools-vfs-write (path content &optional overwrite coding)
   "Store CONTENT at PATH in the VFS, and return what changed.
 
-The disk is not touched.  OVERWRITE accepts the current disk content as
-the baseline, discarding a pending conflict; CODING converts the file to
+Disk is not touched.  OVERWRITE accepts the current disk content as the
+baseline, discarding a pending conflict.  CODING converts the file to
 another encoding on sync.
 
-The value is a plist with :full (the resolved path), :changed (nil when
-the write was a no-op, so nothing is pending), :bytes (what the file will
-occupy on disk) and :coding (what it will be written with).
+Returns a plist of `:full' (the resolved path), `:changed' (nil when the
+write was a no-op), `:bytes' (what the file will occupy on disk) and
+`:coding' (what it will be written with).
 
-Signals an error, having changed nothing, when PATH cannot be written --
-a name holding a control character, a target the write policy denies (see
-`gptel-yatools-write-denied-directories' and its siblings), an ancestor
-that is a file, a directory, a device -- or when CODING cannot represent
-CONTENT.  OVERWRITE on a file that changed on disk since the VFS captured
-it also asks the user before the baseline is refreshed."
+Signals, having changed nothing, when PATH cannot be written -- see
+`gptel-yatools-write-denied-directories' and its siblings, and the checks
+in the body -- or when CODING cannot encode CONTENT.  OVERWRITE on a
+conflicting file asks the user first."
   (let* ((full (gptel-yatools-vfs--key path))
          ;; The same walk the review's refusal makes, so the write and the
          ;; sync cannot disagree about whether a target is reachable.
@@ -1106,9 +900,7 @@ it also asks the user before the baseline is refreshed."
     (cond
      ((not (stringp content))
       (error "Error: content must be a string"))
-     ;; The remedy differs by where the blocking file lives, and only the
-     ;; caller of a write can act on either: a pending entry goes away with
-     ;; `vfs_discard', a file on disk does not.
+     ;; The remedy differs by where the blocking file lives.
      (ancestor
       (error "Error: cannot write %s: ancestor %s is a file %s"
              (gptel-yatools--display-path full)
@@ -1116,12 +908,8 @@ it also asks the user before the baseline is refreshed."
              (if (gptel-yatools-vfs-entry ancestor)
                  "in the VFS. Use vfs_discard to remove it first."
                "on disk.")))
-     ;; A path is shown to the user as a line of a review heading and to
-     ;; the model as a line of a reply.  A newline in the name would add
-     ;; lines of its own, and the review would describe a change set that
-     ;; is not the one on offer, so such a target is refused rather than
-     ;; escaped: there is no legitimate reason to create one, and the
-     ;; refusal is one place that covers every writing tool.
+     ;; A newline in the name would forge a line of a review heading, so
+     ;; such a target is refused rather than escaped.
      ((string-match-p gptel-yatools--control-char-regexp full)
       (error "Error: cannot write %s: the path contains a control or invisible character.  Rename the file, or write it from the shell if you really mean it.  Nothing was written"
              (gptel-yatools--display-path full)))
@@ -1132,13 +920,12 @@ it also asks the user before the baseline is refreshed."
      ((file-directory-p full)
       (error "Error: cannot write %s: it is a directory on disk"
              (gptel-yatools--display-path full)))
-     ;; Writing a file over a virtual directory would make every pending
-     ;; child unsyncable ("File exists"), so reject it at write time.
+     ;; A file over a virtual directory would make every pending child
+     ;; unsyncable ("File exists").
      ((gptel-yatools-vfs--has-children-p full)
       (error "Error: cannot write %s: it is a directory in the VFS because pending file(s) are stored under it.  Discard those entries first"
              (gptel-yatools--display-path full)))
-     ;; Writing to a FIFO blocks until a reader appears, and to a device it
-     ;; may fail or scribble on hardware.
+     ;; A FIFO blocks until a reader appears; a device may fail or scribble.
      ((and (file-exists-p full) (not (file-regular-p full)))
       (error "Error: cannot write %s: it is not a regular file (device, FIFO or socket)"
              (gptel-yatools--display-path full)))
@@ -1163,19 +950,10 @@ it also asks the user before the baseline is refreshed."
             :coding target)))))
 
 (defun gptel-yatools-vfs--replace-once (content old new)
-  "Replace the one occurrence of OLD in CONTENT with NEW.
+  "Return CONTENT with its one occurrence of OLD replaced by NEW.
 
-Signals unless OLD occurs exactly once, which is what makes an edit
-unambiguous.  The search runs over the decoded text the caller already
-has, so it sees the same characters the model saw -- where an external
-grep would only ever see bytes -- and it runs in a temp buffer, so
-`search-forward' does the scanning at C speed instead of walking the
-string in Lisp.
-
-The match is literal: `case-fold-search' is bound to nil, so `old_string'
-either occurs in CONTENT as written or it does not.  Left ambient it
-defaults to t, and an edit for \"hello\" would silently land on \"Hello\"
--- the opposite of the exact match this function promises."
+Signals when OLD occurs zero or more than once.  The match is literal:
+`case-fold-search' is nil, so OLD occurs as written or not at all."
   (with-temp-buffer
     (let ((case-fold-search nil))
       (insert content)
@@ -1200,17 +978,12 @@ defaults to t, and an edit for \"hello\" would silently land on \"Hello\"
 (defun gptel-yatools-vfs-edit (path old new &optional overwrite coding)
   "Replace the one occurrence of OLD with NEW in PATH, and return what changed.
 
-The edit applies to PATH's effective content -- a pending VFS copy if
-there is one -- and is stored through `gptel-yatools-vfs-write', so the
-encoding rules and the baseline bookkeeping are the same as a write.
-OLD must occur exactly once; otherwise nothing is changed and an error
-says why.
+Applies to PATH's effective content, pending copy included, and stores
+through `gptel-yatools-vfs-write'.  OVERWRITE and CODING are passed there.
 
-OLD and NEW must be strings.  The write interface owns the write rules,
-so the check is made here and not only at the tool's edge: `insert'
-accepts a character, and a JSON number reaching it would replace the
-match with that character, while nil is not a way to spell \"delete\" --
-\"\" is."
+Returns the same plist `gptel-yatools-vfs-write' does.  Signals, having
+changed nothing, when OLD does not occur exactly once, when PATH is not
+text, or when OLD or NEW is not a string."
   (unless (stringp old)
     (error "Error: old_string must be a string"))
   (unless (stringp new)
@@ -1240,11 +1013,9 @@ match with that character, while nil is not a way to spell \"delete\" --
           (gptel-yatools-vfs-write path new-content overwrite coding)))))))
 
 (defun gptel-yatools-vfs-pending-paths ()
-  "Return the paths whose VFS content differs from disk, sorted.
+  "Return the sorted paths whose VFS content differs from disk.
 
-This is the exact list, not the header line's cached copy: a tool that
-reports what `file_sync' would write must read disk now, not up to a
-second ago.  Entries disk has caught up with are dropped on the way."
+Reads disk now, rather than the header line's cached list."
   (gptel-yatools-vfs--changed-paths))
 
 (defun gptel-yatools-vfs-diff-text (paths)
@@ -1252,31 +1023,18 @@ second ago.  Entries disk has caught up with are dropped on the way."
   (mapconcat #'gptel-yatools-vfs--format-one-diff paths ""))
 
 (defun gptel-yatools-vfs-disk-moved-externally ()
-  "Note that the disk changed underneath the VFS, so cached answers are stale.
+  "Invalidate the header line's cached pending list.
 
-Called by something that wrote to disk behind the VFS's back -- a shell
-command, typically.  It drops the cached pending list so the header line
-recomputes it, since the cache is what keeps redisplay free of I/O and
-cannot know that the disk moved.
-
-This must not redraw.  Only `force-mode-line-update' runs here, which
-flags the mode line and lets Emacs repaint when it next goes idle; an
-explicit `redisplay' belongs to the announcement path in
-`gptel-yatools.el' and nowhere else.  A stray redisplay here would draw
-mid-tool-call and break the invariant that a command announces itself
-exactly once -- `gptel-yatools-test-announcement-redraws-the-frame'
-counts redisplays and would fail."
+For callers that wrote to disk behind the VFS's back, such as
+`execute_command'.  Does not redraw: an explicit `redisplay' belongs to
+the announcement path in `gptel-yatools.el'."
   (gptel-yatools-vfs--invalidate-header-line))
 
 (defun gptel-yatools-vfs-discard-pending (&optional path)
-  "Drop PATH's pending change, or every VFS entry when PATH is nil.
+  "Drop PATH's pending change, or every entry when PATH is nil.
 
-With no PATH the table is emptied rather than filtered through the
-pending-change list: an entry that disk has caught up with is still an
-entry, and \"discard everything\" is the one command that must leave
-nothing behind to surprise a later reader.
-
-PATH must be absolute when given: resolution happens at the tool's edge."
+Returns the paths dropped.  With no PATH the table is emptied, which also
+removes entries that disk has caught up with.  PATH must be absolute."
   (let ((paths (if path
                    (let ((full (gptel-yatools-vfs--key path)))
                      (and (gptel-yatools-vfs-entry full) (list full)))
@@ -1288,11 +1046,10 @@ PATH must be absolute when given: resolution happens at the tool's edge."
     paths))
 
 (defun gptel-yatools-vfs-reset-buffer-state ()
-  "Forget every buffer-local VFS variable in the current buffer.
+  "Kill the buffer-local VFS variables in the current buffer.
 
-Used when a buffer is reused for something that has nothing to do with
-the VFS any more, and by the tool-call inspection buffer, whose entries
-would otherwise outlive the chat they came from."
+For a buffer reused for something unrelated, and for the tool-call
+inspection buffer."
   (when (local-variable-p 'gptel-yatools-vfs)
     (kill-local-variable 'gptel-yatools-vfs))
   (when (local-variable-p 'gptel-yatools-vfs--header-line-cache)
@@ -1322,10 +1079,8 @@ One of `accept', `reject', or nil while still pending.")
 (defun gptel-yatools-write-diff--visible-glyphless-display ()
   "Return a `glyphless-char-display' that draws invisible characters as hex.
 
-By default a bidi control or a zero-width character is drawn as a
-thin space, which is to say drawn as nothing worth noticing.  In a
-buffer whose whole job is to show the user the exact text a sync will
-write, \"invisible\" is the one thing a character may not be."
+Default drawing shows a bidi control or a zero-width character as a thin
+space, which is indistinguishable from nothing."
   (let ((table (copy-sequence glyphless-char-display)))
     (when (char-table-p table)
       (set-char-table-range table (cons #x200b #x200f) 'hex-code)
@@ -1339,13 +1094,8 @@ write, \"invisible\" is the one thing a character may not be."
 (define-minor-mode gptel-yatools-write-diff-mode
   "Review a gptel file-write diff.
 
-The buffer is made immune to the display tricks a diff can carry:
-bidi reordering is off, so each line is drawn in the order it is
-stored, and characters that are normally a hairline -- bidi controls,
-zero-width characters -- are drawn as their code points instead.  The
-user approves the logical text, so the user must see the logical text.
-Outside this buffer the same characters are escaped as <U+XXXX> in
-every tool reply, and a write whose target name holds one is refused.
+Disables bidi reordering, so each line is drawn in stored order, and draws
+bidi controls and zero-width characters as their code points.
 
 \\{gptel-yatools-write-diff-mode-map}"
   :lighter " gptel-diff"
@@ -1393,9 +1143,8 @@ every tool reply, and a write whose target name holds one is refused.
 ;;   section would look stuck open, so `cursor-intangible' goes on the
 ;;   same overlay.
 ;;
-;; A section is a struct, not a text property, because the buffer is
-;; static: nothing is edited in it, so the ranges recorded during
-;; insertion stay right.
+;; A section is a struct, not a text property: the buffer is never edited,
+;; so the ranges recorded during insertion stay right.
 ;;-------------------------------------------------------------------------
 (defface gptel-yatools-diff-file-heading
   '((t :inherit diff-file-header :weight bold))
@@ -1444,8 +1193,8 @@ the body is folded.  CHILDREN are the hunks belonging to a file."
 (defvar-local gptel-yatools-write-diff--sections nil
   "The sections of the current review buffer, in buffer order.
 
-Files come before their own hunks, so scanning the list and keeping the
-last match finds the innermost section containing a position.")
+Files precede their own hunks, so the last match for a position is the
+innermost section containing it.")
 
 (defun gptel-yatools-write-diff--line-face ()
   "Return the face for the review-buffer line at point."
@@ -1462,8 +1211,8 @@ last match finds the innermost section containing a position.")
 (defun gptel-yatools-write-diff--paint (start end)
   "Attach faces to the lines between START and END.
 
-The face goes on as `font-lock-face', so it is part of the text before
-anything is displayed and no fontification pass can be late."
+The face goes on as `font-lock-face', so it is in place before the buffer
+is displayed."
   (save-excursion
     (goto-char start)
     (while (< (point) end)
@@ -1472,10 +1221,9 @@ anything is displayed and no fontification pass can be late."
       (forward-line 1))))
 
 (defun gptel-yatools-write-diff--summary (body)
-  "Return a one-line summary of the diff text BODY.
+  "Return a one-line summary of the diff text BODY, for a folded heading.
 
-The heading stays useful when the section is folded, which is most of
-the point of folding it: a folded file still says how much moved."
+Of the form \"2 hunks, +12 -3\", or \"no text change\"."
   (let ((added 0) (removed 0) (hunks 0))
     (dolist (line (split-string body "\n"))
       (cond
@@ -1663,22 +1411,17 @@ This is `S-TAB', as in a magit buffer."
 ;; Sync helpers
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs--build-sync-diff-buffer (paths &optional skipped)
-  "Build and return the review buffer for PATHS, a list of pending paths.
+  "Build and return the review buffer for the pending PATHS.
 
-Only non-conflicting, non-blocked paths should be passed in PATHS;
-anything that will not be synced is listed separately in SKIPPED, an
-alist of (PATH . REASON).
+Anything that will not be synced is listed separately in SKIPPED, an alist
+of (PATH . REASON).
 
-The buffer is a `diff-mode' buffer -- for `diff-hunk-next' and the rest
-of its navigation -- but its faces come from the painting above, not
-from `diff-mode''s keywords."
-  ;; Generate every diff HERE, in the caller's buffer, and only then switch.
-  ;; `gptel-yatools-vfs' is buffer-local, so rendering inside the new buffer
-  ;; would run every VFS lookup against a fresh, empty table: files would
-  ;; render as an all-`-' hunk (disk -> empty) or as a bare
-  ;; `===== path =====' header with no hunk at all (empty -> empty), and
-  ;; conflicts would never be marked.  The sync itself would still write the
-  ;; right bytes, so the preview, not the disk, is what silently lies.
+A `diff-mode' buffer, for `diff-hunk-next' and the rest of its
+navigation, whose faces come from the painting above rather than from
+`diff-mode''s keywords."
+  ;; Generate every diff here, in the caller's buffer: `gptel-yatools-vfs' is
+  ;; buffer-local, so rendering inside the new buffer would read a fresh,
+  ;; empty table and preview the wrong bytes.
   (let ((texts (mapcar (lambda (path)
                          (cons path (gptel-yatools-vfs--format-one-diff path)))
                        paths))
@@ -1712,43 +1455,15 @@ from `diff-mode''s keywords."
 (defun gptel-yatools-vfs-refusal (full)
   "Return nil if FULL can be synced now, or say why it cannot.
 
-The value is a plist of :kind and :reason.  :kind is `:conflict' when
-disk has moved on since the VFS captured its baseline -- the case where
-syncing would destroy somebody else's work -- and `:blocked' for every
-other refusal.
+The value is a plist of `:kind' and `:reason'.  `:kind' is `:conflict'
+when disk has moved on since the VFS captured its baseline, and
+`:blocked' for every other refusal.
 
-This is the single answer to \"can this file be written right now?\".
-It is asked by the partition that decides what the user is shown, by the
-diff header that says so file by file, and again by the write itself
-immediately before it writes.  Asking one function is what keeps the
-review honest: the set of files the user approves is the set that will
-be applied, because there is no second opinion to disagree with.  The
-write still re-asks, because the review sits in `recursive-edit' for as
-long as the user likes and a file can become a FIFO while they read.
-
-The order is the order in which the reasons matter: a conflict is
-reported as a conflict even when the file would also fail an encoding
-test, and a target that is no longer a regular file is caught before
-`write-region' blocks on it forever.
-
-This is not, and must not become, the only list of checks in the module.
-`gptel-yatools-vfs-write' asks its own question and refuses things this
-function does not.  A check belongs to whichever of the two can still be
-wrong when it runs:
-
-- The write's checks are about the content being handed in, and they are
-  settled at the moment the entry is made: a control character in a path
-  and a subtree of pending files cannot change while the review sits
-  open.
-- This function's checks are about the world moving on -- the baseline,
-  the policy, a visiting buffer, a file that became a directory or a FIFO
-  -- which is why it is asked again immediately before writing.
-
-The one check both could claim, \"is the target a regular file\", is
-asked here and not there, because the target can change kind between the
-write and the sync and cannot change during the write.  A write that
-refused a conflict would make a conflicted file impossible to edit, which
-is the whole point of holding a baseline.  See ADR 0007."
+Asked by the partition that decides what the user is shown, by the diff
+header, and again by the write immediately before it writes, so the files
+the user approves are the files applied.  Checks that belong to the
+content being handed in stay in `gptel-yatools-vfs-write'; what is here
+is what can change while the review sits open.  See ADR 0007."
   (let ((entry-coding (gptel-yatools-vfs--entry-coding full))
         (content (or (plist-get (gptel-yatools-vfs-entry full) :content) ""))
         (existing (get-file-buffer full))
@@ -1758,10 +1473,8 @@ is the whole point of holding a baseline.  See ADR 0007."
       (list :kind :conflict
             :reason "changed on disk since the VFS captured it"))
      ;; Asked again here, and not only when the write was buffered: the
-     ;; review can sit open for minutes, and it is this function's answer
-     ;; the write itself acts on.  Without it a pending entry created
-     ;; before its target was protected would be written to disk by a
-     ;; sync the policy had already lost the chance to refuse.
+     ;; review can sit open for minutes, and this answer is what the write
+     ;; acts on.
      (policy
       (list :kind :blocked :reason policy))
      ((let ((ancestor (gptel-yatools-vfs--file-ancestor full)))
@@ -1770,11 +1483,8 @@ is the whole point of holding a baseline.  See ADR 0007."
                    :reason (format "ancestor %s is a file, not a directory"
                                    (gptel-yatools--display-path ancestor))))))
      ((let ((exists (file-exists-p full)))
-        ;; `file-regular-p' is false for a directory and for a FIFO alike,
-        ;; so the kind is asked for once more before it is named: the
-        ;; reason is the only description of what to fix, and telling
-        ;; somebody to expect a device where a directory now sits sends
-        ;; them looking for the wrong thing.
+        ;; The kind is asked once more before it is named: the reason is
+        ;; the only description of what to fix.
         (and exists
              (not (file-regular-p full))
              (list :kind :blocked
@@ -1793,21 +1503,11 @@ is the whole point of holding a baseline.  See ADR 0007."
      (t nil))))
 
 (defun gptel-yatools-vfs--ancestors (full)
-  "Return FULL's ancestor directories, nearest first, top-most last.
+  "Return FULL's ancestor directories, nearest first.
 
-Every structural check about a path's parents asks this, so the walk is
-written once, and the write and the review cannot disagree about when to
-stop.
-
-The stop test is \"the name stopped getting shorter\", not \"we reached
-/\".  A remote (TRAMP) name's top-most directory is \"/ssh:host:/\",
-which `file-name-directory' returns unchanged: a test for \"/\" alone
-never fires there, so the walk never ends -- and because each pass asks
-`file-regular-p' about that root, it is an endless round trip to the
-host.
-
-A plain \"/\" and the empty string are skipped, and so is FULL itself:
-walking up from a path never yields that path."
+Stops when the name stops getting shorter, which is what makes it
+terminate on a TRAMP name: \"/ssh:host:/\" is its own parent.  FULL
+itself, \"/\" and \"\" are not included."
   (let ((ancestor (directory-file-name (file-name-directory full)))
         (ancestors nil)
         (next nil))
@@ -1825,34 +1525,23 @@ walking up from a path never yields that path."
 (defun gptel-yatools-vfs--file-ancestor (full)
   "Return FULL's nearest ancestor that is a file, or nil.
 
-An ancestor that is a file -- on disk or as a VFS entry -- makes the
-target unwritable without deleting it first.  Checked here so that the
-review never offers a file whose write is certain to fail.
-
-The walk itself is `gptel-yatools-vfs--ancestors', which knows when to
-stop; this function only says what it is looking for."
+A file ancestor, on disk or in the VFS, makes the target unwritable
+without removing it first."
   (cl-find-if (lambda (ancestor)
                 (or (gptel-yatools-vfs-entry ancestor)
                     (file-regular-p ancestor)))
               (gptel-yatools-vfs--ancestors full)))
 
 (defun gptel-yatools-vfs--confirm-sync (paths &optional skipped)
-  "Show a diff of PATHS (VFS vs disk) and ask the user to accept or reject.
+  "Show a diff of PATHS against disk and ask the user to accept it.
 
-SKIPPED is an alist of (PATH . REASON) for pending files that will
-NOT be synced (conflicts, blocked files).  They are listed in the
-review buffer so the user sees the full picture instead of approving
-a change set that is not the one that will be applied.
+SKIPPED is an alist of (PATH . REASON) for pending files that will not be
+synced; they are listed in the review buffer so the user sees the whole
+change set.
 
-Return non-nil if the user accepted, nil otherwise.  This is the
-interactive adapter for the review; whether a review happens at all is
-`gptel-yatools-vfs-sync''s decision, not this function's.
-
-The caller's window layout and current buffer are restored afterwards:
-the caller keeps using buffer-local state (its VFS, its
-`default-directory') and the review buffer is killed, so leaving the
-user -- and the tool -- in whatever buffer replaced it in a window
-would be a correctness problem, not just a cosmetic one."
+Returns non-nil when the user accepted.  The caller's window layout and
+current buffer are restored afterwards.  Time spent in the review does not
+count against the tool's deadline."
   (let ((diff-buf (gptel-yatools-vfs--build-sync-diff-buffer paths skipped))
         (decision nil))
     (unwind-protect
@@ -1884,19 +1573,14 @@ would be a correctness problem, not just a cosmetic one."
     (eq decision 'accept)))
 
 (defun gptel-yatools-vfs--encodable-p (string coding)
-  "Return non-nil if STRING survives a round trip through CODING.
+  "Return non-nil if STRING round-trips through CODING unchanged.
 
-Encoding a character that CODING cannot represent does not signal an
-error in Emacs: the character is silently written as raw bytes or
-replaced, so the file on disk ends up corrupted (for example a
-non-Latin-1 character written into an ISO-8859-1 file).  Detect that
-by encoding and decoding again and comparing with the original.
+Encoding an unrepresentable character does not signal in Emacs: it is
+written as raw bytes or replaced, so the file would land corrupted.
 
-Both sides are normalised with `string-to-multibyte' first: a binary
-file read with `no-conversion' gives multibyte text made of raw
-eight-bit characters, while decoding returns the equivalent unibyte
-string.  The bytes are identical, so comparing the strings directly
-would wrongly call such content unrepresentable."
+Both sides are normalised with `string-to-multibyte', because content read
+with `no-conversion' is multibyte text of raw eight-bit characters while
+decoding returns the equivalent unibyte string."
   (equal (string-to-multibyte
           (condition-case nil
               (decode-coding-string (encode-coding-string string coding) coding)
@@ -1904,24 +1588,20 @@ would wrongly call such content unrepresentable."
          (string-to-multibyte string)))
 
 (defun gptel-yatools-vfs--encodable-bytes (string coding)
-  "Return the number of bytes STRING will occupy when written with CODING.
+  "Return the bytes STRING will occupy when written with CODING.
 
-Unlike `string-bytes' this accounts for the coding system, so it
-matches the file size that will land on disk (including CRLF
-expansion for DOS-style codings)."
+Unlike `string-bytes', this accounts for the coding system, including CRLF
+expansion."
   (string-bytes (encode-coding-string string coding)))
 
 (defun gptel-yatools-vfs--sync-one (full)
   "Sync FULL from VFS to disk.
 
-FULL is expected to have a pending VFS entry.  `--refusal' is asked
-again here, immediately before the write: the review buffer sits in
-`recursive-edit' for as long as the user likes, and anything that
-changes the file meanwhile must not be silently overwritten.  Callers
-may pre-filter for a nicer message, but correctness does not depend on
-them doing so.
+FULL is expected to have a pending entry.  `gptel-yatools-vfs-refusal' is
+asked again here, immediately before the write: the review can sit open
+for as long as the user likes.
 
-Returns (STATUS MESSAGE) where STATUS is `:ok' or `:failed'."
+Returns (STATUS MESSAGE), STATUS being `:ok' or `:failed'."
   (let ((content (plist-get (gptel-yatools-vfs-entry full) :content)))
     (cond
      ((null content)
@@ -1959,52 +1639,36 @@ Returns (STATUS MESSAGE) where STATUS is `:ok' or `:failed'."
 ;;-------------------------------------------------------------------------
 ;; The sync operation
 ;;
-;; What a sync does, as opposed to how it reads to the model or how the
-;; review looks to a human: partition the pending files, ask for approval,
-;; write the ones that can be written, and report what happened to the rest.
-;; Both callers are adapters over this -- `file_sync' renders the outcome as
-;; a tool response, and the review buffer renders it as a diff -- which is
-;; why nothing here formats a sentence for the model.
+;; Partition the pending files, ask for approval, write the ones that can
+;; be written, report the rest.  Both callers are adapters over this:
+;; `file_sync' renders the outcome as a tool response, the review buffer
+;; renders it as a diff.
 ;;
 ;; The partition is computed once, before anything is written, so the diff
-;; the user approves is the change set that is applied.  `--sync-one' still
-;; re-checks each file immediately before writing it: the review runs inside
+;; the user approves is the change set applied.  `--sync-one' still
+;; re-checks each file before writing it: the review runs inside
 ;; `recursive-edit', and a file can change while someone reads a diff.
 ;;-------------------------------------------------------------------------
 (defcustom gptel-yatools-sync-without-review nil
   "If non-nil, `file_sync' writes without showing a diff for review.
 
-For unattended use -- a script, org-babel, a batch Emacs -- where nobody is
-present to press a key.  The files are still checked: a file that changed
-on disk since the VFS captured it, one whose visiting buffer has unsaved
-changes, and content the file's encoding cannot represent are all refused
-and reported exactly as they are when a review is shown.  This waives the
-review, not the checks.
+For unattended use -- a script, org-babel, a batch Emacs.  The checks
+still run: a file that changed on disk, a visiting buffer with unsaved
+changes, and content the encoding cannot represent are all refused and
+reported as they are when a review is shown.
 
-It does not make writes automatic: the model still has to call `file_sync'.
-Nothing is written because `write_file' was called.
-
-The model is never told about this option and no tool description mentions
-it, so switching it on cannot change what the model does; it only changes
-what you are asked."
+Writes still only happen when the model calls `file_sync'.  No tool
+description mentions this option, so it cannot change what the model does."
   :type 'boolean
   :group 'gptel-yatools)
 
 (defun gptel-yatools-vfs--sync-partition (targets)
   "Split TARGETS into what can be synced and what cannot.
 
-TARGETS is a list of paths with pending changes.  Returns a plist of
-:conflicts (alist of PATH . REASON, for files that changed on disk since
-the VFS captured them), :blocked (alist of PATH . REASON for files that
-cannot be written right now) and :syncable (the rest, in their original
-order).
-
-Every file is classified by `--refusal', and the reason it gives is
-carried out of here rather than asked for again: the set shown to the
-user, the reason printed beside each file, and the set the write will
-accept all come from one answer.  Conflicts are an alist rather than a
-bare list of paths so that a caller wanting to say why need not re-read
-the disk to find out."
+Returns a plist of `:conflicts' (alist of PATH . REASON), `:blocked' (the
+same, for files that cannot be written) and `:syncable' (the rest, in
+order).  Each file is classified once, by `gptel-yatools-vfs-refusal', and
+that reason is carried out, never asked for again."
   (let (conflicts blocked syncable)
     (dolist (file targets)
       (let ((refusal (gptel-yatools-vfs-refusal file)))
@@ -2019,15 +1683,9 @@ the disk to find out."
 (defun gptel-yatools-vfs--sync-approve (syncable skipped review)
   "Return `:approved', `:rejected' or `:noninteractive' for SYNCABLE.
 
-SKIPPED is shown alongside the diff so the user approves the change set
-that will actually be applied.  `gptel-yatools-sync-without-review'
-answers for the user, and does so before anything else.
-
-REVIEW, when non-nil, is the adapter that asks the user; it is
-authoritative, including in a non-interactive Emacs, because a caller
-that passes one is not a user at a keyboard.  Only the *default* review
-needs refusing in batch: `recursive-edit' would block forever there, so
-nothing is written without the option or an explicit adapter."
+SKIPPED is shown alongside the diff.  REVIEW, when non-nil, is
+authoritative, including in batch.  Only the default review is refused in
+batch, where `recursive-edit' would block forever."
   (cond
    (gptel-yatools-sync-without-review :approved)
    (review (if (funcall review syncable skipped) :approved :rejected))
@@ -2036,12 +1694,10 @@ nothing is written without the option or an explicit adapter."
    (t :rejected)))
 
 (defun gptel-yatools-vfs--sync-write (syncable)
-  "Write SYNCABLE from the VFS to disk and return (SYNCED . FAILED).
+  "Write SYNCABLE from the VFS to disk, returning (SYNCED . FAILED).
 
-SYNCED is the list of paths written, in order; FAILED is an alist of
-PATH . REASON.  Also tells the user, when anything was left behind: the
-model's reply is not the only reader, and it is the one that may be
-skipped."
+SYNCED is the paths written, in order; FAILED is an alist of PATH .
+REASON."
   (let (synced failed)
     (dolist (file syncable)
       (pcase-let ((`(,status ,message) (gptel-yatools-vfs--sync-one file)))
@@ -2053,29 +1709,23 @@ skipped."
 (defun gptel-yatools-vfs-sync (&optional path review)
   "Sync the VFS to disk, and return what happened as a plist.
 
-PATH, when non-nil, limits the sync to that one file and must be
-absolute: resolution happens at the tool's edge.  REVIEW is the
-adapter that asks the user to approve the change set; when non-nil it is
-authoritative, and when nil the interactive review is used, or the sync is
-refused in a non-interactive Emacs.  Nothing is written without either an
-accepted review or `gptel-yatools-sync-without-review'.
+PATH, when non-nil, limits the sync to that file and must be absolute.
+REVIEW is the adapter that asks the user to approve the change set; nil
+uses the interactive review, or refuses the sync in batch.
 
 Returns a plist:
 
   :status     `:nothing' (nothing pending at all), `:no-target' (PATH has
-              no pending change), `:declined' (the review was not
-              approved) or `:done'.
+              no pending change), `:declined' (not approved) or `:done'.
   :requested  PATH as given, or nil.
-  :reason     for `:declined', either `:noninteractive' or `:user'.
+  :reason     for `:declined', `:noninteractive' or `:user'.
   :synced     paths written, in order.
   :conflicts  paths changed on disk since the VFS captured them.
   :blocked    alist of PATH . REASON for files that cannot be written.
   :failed     alist of PATH . REASON for files that could not be written.
 
-The vfs-buffer the operation started in is re-entered before anything is
-written: the review shows a buffer of its own, and a killed buffer leaves
-its window showing whatever Emacs falls back to, so a VFS lookup after the
-review could otherwise run against a fresh, empty table and sync nothing."
+The buffer the operation started in is re-entered before writing, since
+the review shows a buffer of its own."
   (let* ((vfs-buffer (current-buffer))
          (all (gptel-yatools-vfs-pending-paths))
          (targets (if path
@@ -2093,18 +1743,15 @@ review could otherwise run against a fresh, empty table and sync nothing."
              (blocked (plist-get partition :blocked))
              (syncable (plist-get partition :syncable))
              ;; Both halves of what will not be synced, as the alist the
-             ;; review wants: the reasons came out of the partition, so
-             ;; nothing here asks the refusal a second question about a
-             ;; file it has already answered for.
+             ;; review wants.  The reasons came out of the partition.
              (skipped (append blocked conflict-entries))
              (approval (and syncable
                             (gptel-yatools-vfs--sync-approve
                              syncable skipped review))))
         (cond
          ((eq approval :noninteractive)
-          ;; The hint names the option, so it goes to the user and not to
-          ;; the model: `gptel-yatools-sync-without-review' must stay
-          ;; invisible to the model, which cannot set it anyway.
+          ;; The hint names the option, so it goes to the user: the model
+          ;; cannot set it.
           (message "gptel: cannot show the sync review in a non-interactive Emacs; nothing synced. Set `gptel-yatools-sync-without-review' to sync unattended.")
           (list :status :declined :reason :noninteractive :requested path
                 :conflicts conflicts :blocked blocked))
@@ -2120,7 +1767,7 @@ review could otherwise run against a fresh, empty table and sync nothing."
                                 :synced synced :conflicts conflicts
                                 :blocked blocked :failed failed)))
             ;; Someone is watching this happen, and the tool reply is the
-            ;; one report they may never read.
+            ;; report they may never read.
             (when-let* ((line (gptel-yatools-vfs--sync-message outcome)))
               (message "%s" line))
             outcome))))))))
@@ -2129,17 +1776,10 @@ review could otherwise run against a fresh, empty table and sync nothing."
 ;;-------------------------------------------------------------------------
 ;; The sync report: one composition, two adapters
 ;;
-;; `gptel-yatools-vfs-sync' decides what happens; what happened is a
-;; four-part answer (synced, conflicts, blocked, failed) with a count in
-;; each part.  Two things read that answer -- the reply the model gets and
-;; the line the user sees in the echo area -- and they need different
-;; amounts of it, not different versions of it.
-;;
-;; So the outcome is composed once into sections, and each reader adapts
-;; the sections: the reply renders every section in full, the echo area
-;; renders the counts.  A section added here reaches both without either
-;; one being taught about it, and the two cannot disagree about what
-;; happened, because there is only one account of what happened.
+;; A sync outcome is a four-part answer (synced, conflicts, blocked,
+;; failed).  It is composed once into sections, and each reader adapts the
+;; sections: the reply renders every section in full, the echo area renders
+;; the counts.
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-vfs--sync-report (outcome)
   "Return OUTCOME's four parts as sections, in the order they are read.
@@ -2208,19 +1848,11 @@ section and not as four with three blanks."
                (gptel-yatools-vfs--sync-reason-list entries))))))
 
 (defun gptel-yatools-vfs--sync-message (outcome)
-  "Return what OUTCOME means for the user, as one echo-area line.
+  "Return what OUTCOME means for the user, as one echo-area line, or nil.
 
-The tool reply is not the only reader of a sync, and it is the reader
-that may be skipped: in a chat the user sees the line, and the model sees
-the reply.  Both are built from the same report, so this cannot say
-\"2 blocked\" while the reply says \"1 blocked\".  The value is nil when
-there is nothing to say -- a sync where everything landed has no news in
-it, and a line that announced it anyway would train the user to ignore
-the line that does matter.
-
-The counts are numbers, so every question here is asked with `zerop' or
-`>'; asking whether they are nil answers \"no\" when the answer is
-\"zero\", which read as \"something went wrong\" on every clean sync."
+Nil when everything landed: a line announcing a clean sync would train the
+user to ignore the line that matters.  Built from the same report as the
+tool reply, so the two cannot disagree."
   (let* ((sections (gptel-yatools-vfs--sync-report outcome))
          (synced (gptel-yatools-vfs--sync-count sections :synced))
          (conflicts (gptel-yatools-vfs--sync-count sections :conflicts))
@@ -2229,8 +1861,8 @@ The counts are numbers, so every question here is asked with `zerop' or
          (not-synced (+ conflicts blocked failed)))
     (cond
      ((zerop not-synced) nil)
-     ;; Nothing could even be attempted, and it was for one reason: say
-     ;; that reason instead of a four-part total with three zeroes in it.
+     ;; Nothing could be attempted, for one reason: say that reason rather
+     ;; than a four-part total with three zeroes.
      ((and (zerop synced) (zerop failed) (zerop conflicts))
       (format "gptel: nothing synced — %d file(s) blocked." blocked))
      ((and (zerop synced) (zerop failed) (zerop blocked))
@@ -2271,8 +1903,8 @@ The counts are numbers, so every question here is asked with `zerop' or
                                 (plist-get outcome :blocked)
                                 (plist-get outcome :failed))))
          (cond
-          ;; One kind of problem and nothing else: say it plainly, instead
-          ;; of a four-part report with three empty sections.
+          ;; One kind of problem and nothing else: say it plainly, rather
+          ;; than a four-part report with three empty sections.
           ((equal kinds '(:blocked))
            (gptel-yatools-ok
             (format "These files could not be synced:\n%s\n"

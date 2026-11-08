@@ -28,10 +28,8 @@
 (defun gptel-yatools-shell--command-result (output)
   "Return the result for a finished command whose combined output is OUTPUT.
 
-When any VFS entries are pending, the envelope's comment warns the model
-that the command ran against disk, not the VFS: a file it expected to
-find may only exist in the pending changes, and one it read may be
-stale."
+When VFS entries are pending, the envelope's comment warns that the command
+ran against disk."
   (let ((changed (gptel-yatools-vfs-pending-paths)))
     (gptel-yatools-ok
      output
@@ -46,9 +44,7 @@ stale."
 (defun gptel-yatools-shell--refusal (sentence)
   "Return the result for a call refused before any command was started.
 
-SENTENCE is what the model is told.  The comment is not the command
-runner's: nothing ran, so nothing was read from disk and there is no
-output for a VFS warning to qualify."
+SENTENCE is what the model is told."
   (gptel-yatools-ok sentence
                    :provenance :disk
                    :comment "No command was run."))
@@ -59,10 +55,8 @@ output for a VFS warning to qualify."
 (defun gptel-yatools-shell--where (directory)
   "Return DIRECTORY as a command report should name it.
 
-A local directory reads as a workspace-relative path.  A remote one names
-the host as well: the command ran *there*, not on the machine Emacs is
-running on, and a report that says only \".\" cannot be told apart from
-the local case."
+A local directory reads as a workspace-relative path; a remote one names
+the host, as `gptel-yatools--connection-label' reports it."
   (let ((label (gptel-yatools--connection-label directory)))
     (if label
         (format "%s on the remote host %s"
@@ -73,9 +67,8 @@ the local case."
 (defun gptel-yatools-shell--shell (directory)
   "Return the shell a command in DIRECTORY is handed to, as (PROGRAM . SWITCH).
 
-`shell-file-name' and `shell-command-switch' describe the shell on *this*
-machine.  A remote workspace has its own, and a local path there names
-nothing: it is `exec: /path/on/this/machine: not found' and exit 127."
+`shell-file-name' and `shell-command-switch' describe this machine's shell;
+a remote workspace has its own."
   (if (file-remote-p directory)
       (cons (gptel-yatools--remote-shell directory) "-c")
     (cons shell-file-name shell-command-switch)))
@@ -90,15 +83,9 @@ nothing: it is `exec: /path/on/this/machine: not found' and exit 127."
 (defun gptel-yatools-shell--elsewhere (root target)
   "Return why TARGET is not on the same machine as ROOT, or nil.
 
-A command is approved for a workspace, so it has to run where that
-workspace is.  Two paths are on the same machine when their connections
-are `equal' -- see `gptel-yatools--connection' -- or when neither is
-remote at all; anything else would run the command somewhere the user did
-not approve it for.
-
-The check runs before anything asks whether DIRECTORY exists: asking that
-of a path on another host would open a connection to a machine the user
-never named."
+Two paths are on the same machine when `gptel-yatools--connection' reports
+the same connection for both.  Asked before anything tests whether TARGET
+exists, since that would open a connection to a host the user never named."
   (unless (equal (gptel-yatools--connection root)
                  (gptel-yatools--connection target))
     (let ((here (gptel-yatools-shell--machine root))
@@ -110,25 +97,16 @@ never named."
               here))))
 
 (defun gptel-yatools-shell--run-command (command directory)
-  "Run COMMAND (in DIRECTORY if non-empty) and return a result.
+  "Start COMMAND in DIRECTORY and return a job for it.
 
-The result always carries a body: the command's exit code and combined
-output, or a description of why it could not be started.
+DIRECTORY is resolved against the workspace root when non-empty; empty or
+nil means the root itself.  A DIRECTORY on another machine is refused
+rather than run there.
 
-The command is killed once it outlives the current tool timeout
-\(the call's deadline, or `gptel-yatools-timeout').  The spawner, the
-kill and the reap belong to `gptel-yatools--spawn-process' in
-`gptel-yatools-common.el'; this function only turns an outcome into the
-sentence the model reads.
-
-The command is started, not waited for: the job goes back to the
-boundary, which either waits for it or hands the answer to gptel's
-callback.
-
-A DIRECTORY on a different machine is refused rather than quietly run
-there: `expand-file-name' lets an absolute path replace the workspace
-root, and a command approved for a workspace would then touch a file
-system nobody named."
+The result always carries a body: the exit code and combined output, or
+why the command could not be started.  The command is killed when it
+outlives the current tool deadline.  It is started, not waited for: the
+job goes back to the boundary."
   (let* ((root (gptel-yatools--workspace-root))
          (timeout (gptel-yatools--call-deadline))
          (target-directory (if (and directory (not (string-empty-p directory)))
@@ -155,9 +133,8 @@ system nobody named."
          :result
          (lambda (outcome)
            ;; Runs when the command has finished, in the buffer that owns
-           ;; the call -- minutes later, for an asynchronous one.  The
-           ;; pending-VFS warning is computed now, because it explains the
-           ;; output the model is about to read.
+           ;; the call.  The pending-VFS warning is computed now, because
+           ;; it explains the output the model is about to read.
            ;;
            ;; The command may have changed files on disk, so the cached
            ;; header-line count must not outlive it.
@@ -169,9 +146,7 @@ system nobody named."
   "Return the model-facing text for a finished command's OUTCOME.
 
 SHOWN-DIRECTORY is where the command ran, as it should be named, and
-TIMEOUT the budget it was given.  Every sentence here says what happened
-rather than what was hoped for: a killed command is not a failed one, and
-a command that never started says why."
+TIMEOUT the budget it was given."
   (let ((output (plist-get outcome :output))
         (exit (plist-get outcome :exit)))
     (pcase (plist-get outcome :status)
@@ -228,11 +203,8 @@ a command that never started says why."
 ;;-------------------------------------------------------------------------
 ;; What the user is asked to approve
 ;;
-;; gptel truncates every string argument at 256 characters, which for
-;; `execute_command' would let a long command be approved on a harmless
-;; prefix.  The `:preview' line of the definition above is what replaces
-;; that, and it declares the argument order it reads -- see
-;; `gptel-yatools--preview-line' in `gptel-yatools-common.el'.
+;; gptel truncates every string argument at 256 characters, so the `:preview'
+;; of the definition above names the arguments to show instead.
 ;;-------------------------------------------------------------------------
 
 (provide 'gptel-yatools-shell)

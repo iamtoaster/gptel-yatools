@@ -51,31 +51,21 @@
 (defcustom gptel-yatools-media-size-limit (* 5 1024 1024)
   "Largest image, in bytes, that a read tool will attach to the conversation.
 
-A provider rejects an image it considers too large, and it rejects it as a
-failed request: the whole turn is lost, and the tool call that read the
-file looks like it succeeded.  Refusing here instead costs the model one
-sentence and keeps the conversation alive.
+A provider rejects an image it considers too large by failing the whole
+request, so the size is refused here instead.
 
-Zero, or nil, removes the limit.  That is the setting to choose on a
-backend whose image limits are enforced on its own side, or when the
-model accepts a format whose size cannot be predicted."
+Zero or nil removes the limit."
   :type '(choice (const :tag "No limit" 0) integer)
   :group 'gptel-yatools)
 
 (defconst gptel-yatools-media--head-bytes 16
-  "How many bytes of a file are examined to decide whether it is an image.
-
-Sixteen covers the longest signature below -- \"RIFF\", a four-byte size
-and \"WEBP\" -- with room to spare, and it is small enough that asking for
-it over a remote connection is one short command.")
+  "How many bytes of a file are examined to decide whether it is an image.")
 
 (defun gptel-yatools-media--head (path)
   "Return the first `gptel-yatools-media--head-bytes' bytes of PATH.
 
-The bytes are returned as a unibyte string, exactly as stored: a
-signature is a sequence of bytes, and decoding it as text would turn a
-JPEG header into `raw-text' soup that no `string-prefix-p' can match.
-An unreadable file yields the empty string, which matches no signature."
+A unibyte string, exactly as stored.  An unreadable file yields \"\", which
+matches no signature."
   (condition-case nil
       (with-temp-buffer
         (set-buffer-multibyte nil)
@@ -86,10 +76,8 @@ An unreadable file yields the empty string, which matches no signature."
 (defun gptel-yatools-media--signature-type (head)
   "Return the MIME type the bytes in HEAD begin, or nil for none of them.
 
-This is the whole of the format policy, in one place: the four formats
-every multimodal provider accepts, recognized by their own first bytes.
-The name of the file is not consulted -- a screenshot has none worth
-trusting, and a renamed text file has one that lies."
+PNG, JPEG, GIF and WebP, recognized by their first bytes.  The file name
+is not consulted."
   (when head
     (cond
      ((string-prefix-p "\211PNG\r\n\032\n" head) "image/png")
@@ -102,14 +90,11 @@ trusting, and a renamed text file has one that lies."
       "image/webp"))))
 
 (defun gptel-yatools-media--head-from-text (text)
-  "Return the first bytes of TEXT, or nil when they cannot be bytes.
+  "Return the first bytes of TEXT as a unibyte string, or nil.
 
-TEXT is what a read returned, and the point of this function is that a
-caller which has just read a file should not read it again to find out
-what it is -- over TRAMP that is a second command and a second wait.
-Note that \"nil\" here means \"not an image\" and not \"unknown\": an
-image's first bytes are a byte sequence, so a string whose first
-characters are not representable as bytes cannot begin with one."
+For a caller that has already read a file and should not read it again.
+Nil means the characters cannot be bytes, so TEXT cannot begin with an
+image signature."
   (let ((head (substring text 0 (min gptel-yatools-media--head-bytes
                                      (length text)))))
     (if (multibyte-string-p head)
@@ -119,19 +104,16 @@ characters are not representable as bytes cannot begin with one."
 (defun gptel-yatools-media-type (path &optional head)
   "Return the MIME type of the image at PATH, or nil when it is not one.
 
-HEAD, when given, is PATH's first bytes as the caller already has them;
-without it they are read from disk.  See
-`gptel-yatools-media--head-from-text'."
+HEAD, when given, is PATH's first bytes from
+`gptel-yatools-media--head-from-text'; otherwise they are read from disk."
   (gptel-yatools-media--signature-type
    (or head (gptel-yatools-media--head path))))
 
 (defun gptel-yatools-media-supported-p (mime &optional model)
   "Return non-nil when MODEL can be shown media of MIME type MIME.
 
-MODEL defaults to the backend in use.  Both questions are gptel's own and
-are asked of gptel's model metadata: can the model take media at all, and
-does it list this MIME type.  A model that would have to be told about an
-image it cannot see is better answered with the text a binary file gets."
+MODEL defaults to the current `gptel-model'.  Asks gptel's model metadata
+whether the model takes media at all and whether it lists MIME."
   (and (fboundp 'gptel--model-capable-p)
        (gptel--model-capable-p 'media model)
        (gptel--model-mime-capable-p mime model)))
@@ -145,29 +127,17 @@ image it cannot see is better answered with the text a binary file gets."
 (defvar-local gptel-yatools-media--pending nil
   "Images attached to this buffer's conversation, not yet delivered.
 
-Each entry is a `gptel-context' media spec, (PATH :mime MIME ...).  The
-list belongs to one request: it is drained when that request is sent
-again (`gptel-yatools-media-deliver') and cleared when a new request is
-built from this buffer, so an image can be delivered in at most one
-place.
-
-Buffer-local for the same reason the VFS is: a chat's images are the
-chat's, and a subagent is a different conversation that happens to run in
-the same Emacs.")
+Each entry is a `gptel-context' media spec, (PATH :mime MIME ...).  Drained
+by `gptel-yatools-media-deliver' into the request being answered, and
+cleared when a new request is built from this buffer.")
 
 (defconst gptel-yatools-media--tag :gptel-yatools-media
-  "Key marking a `gptel-context' entry as one this package attached.
-
-A user's own media entries are theirs: `gptel-yatools-media-forget'
-removes only the tagged ones, and the header-line label counts only
-them.")
+  "Key marking a `gptel-context' entry as one this package attached.")
 
 (defun gptel-yatools-media--tagged-entries ()
   "Return the buffer's `gptel-context' entries that this package attached.
 
-The entries themselves are returned, not their paths: they are what has to
-be removed, and rebuilding one from a path would be a guess at the MIME
-type it was attached with."
+The entries themselves, since they are what has to be removed."
   (seq-filter (lambda (source)
                 (plist-get (cdr-safe (ensure-list source))
                            gptel-yatools-media--tag))
@@ -176,10 +146,9 @@ type it was attached with."
 (defun gptel-yatools-media-attached (&optional buffer)
   "Return the paths of the images this package attached in BUFFER.
 
-BUFFER defaults to the current buffer.  The entries are read out of the
-buffer's effective `gptel-context', so what is reported is what gptel will
-actually send -- removing an entry through gptel's own commands removes it
-from this list too."
+BUFFER defaults to the current buffer.  Read from the buffer's effective
+`gptel-context', so entries removed through gptel's own commands are not
+listed."
   (with-current-buffer (or buffer (current-buffer))
     (mapcar (lambda (entry) (car (ensure-list entry)))
             (gptel-yatools-media--tagged-entries))))
@@ -187,17 +156,9 @@ from this list too."
 (defun gptel-yatools-media--remember (path mime)
   "Attach PATH, of MIME type MIME, to this buffer's conversation.
 
-Two things are recorded, for the two lifetimes in the Commentary: the
-pending queue, which delivers the image to the request being answered,
-and the `gptel-context' entry, which keeps it visible to the turns after
-that.
-
-The context is made buffer-local on the way, so an image read in one chat
-does not appear in every other one.  gptel's own commands mutate whichever
-binding is in effect, so a later `gptel-add' in this buffer still lands
-where the user can see it.  An existing entry for the same path is
-replaced rather than duplicated: two entries for one file would send it
-twice and be counted twice."
+Records the image twice: in `gptel-yatools-media--pending' for the request
+being answered, and in a tagged buffer-local `gptel-context' entry for the
+turns after it.  An existing entry for PATH is replaced, not duplicated."
   (let ((entry (list path :mime mime gptel-yatools-media--tag t)))
     (setq-local gptel-context
                 (cons entry
@@ -213,16 +174,10 @@ twice and be counted twice."
 (defun gptel-yatools-media-forget (&optional buffer)
   "Remove the images this package attached from BUFFER's conversation.
 
-BUFFER defaults to the current buffer.  Only this package's own entries
-are removed: a file the user added to the context themselves, even the
-same file, is left alone.  The images stay on disk -- what stops is
-paying for them again on every request.
-
-This is gptel's context list being edited, so gptel shows and removes the
-same entries its own way: the `[N files]' label in the header line opens
-the context buffer, where each attached image is listed and can be removed
-one at a time.  This command is the same thing for \"all of the images this
-package attached, and nothing else\"."
+BUFFER defaults to the current buffer.  Leaves entries the user added
+themselves alone.  gptel's `[N files]' label lists the same entries and
+removes them one at a time; this command takes all of this package's and
+nothing else."
   (interactive)
   (let ((paths (gptel-yatools-media-attached buffer)))
     (cond
@@ -243,12 +198,10 @@ package attached, and nothing else\"."
 ;;;; Attaching
 
 (defun gptel-yatools-media--too-large (path size mime)
-  "Return the outcome plist for an image too large to attach.
+  "Return the :refused outcome for an image larger than the limit.
 
-PATH, SIZE and MIME describe the file; SIZE is in bytes.  The message
-names the file, its size and the limit, so the model can report the
-decision rather than guess at it, and points at the tools that can still
-say something useful about the file."
+PATH, SIZE (in bytes) and MIME describe the file.  The message names the
+file, its size and the limit."
   (let ((name (gptel-yatools--display-path path)))
     (list :kind :refused
           :mime mime
@@ -269,11 +222,10 @@ about it without the image itself, use execute_command, for example:
                   name mime size gptel-yatools-media-size-limit name name))))
 
 (defun gptel-yatools-media--unsupported (path mime)
-  "Return the outcome plist for an image this model cannot be shown.
+  "Return the :refused outcome for an image this model cannot be shown.
 
-PATH and MIME describe the file.  The refusal is honest about which side
-said no -- the model, not the file -- because the remedy is different: the
-file is fine, and a model that accepts MIME can see it."
+PATH and MIME describe the file, which is a valid image; the model is what
+does not accept it."
   (let ((name (gptel-yatools--display-path path)))
     (list :kind :refused
           :mime mime
@@ -289,12 +241,10 @@ cannot be shown.  Use execute_command if its metadata would help:
                   name mime name))))
 
 (defun gptel-yatools-media--attached-outcome (path size mime)
-  "Return the outcome plist for the image at PATH now attached.
+  "Return the :attached outcome for the image at PATH.
 
-PATH, SIZE and MIME describe the file; SIZE is in bytes.  The message
-says what happened in terms the model can act on: the image is visible
-from now on, it is not text, and it will keep being visible until it is
-removed -- which is also a warning that its cost recurs."
+PATH, SIZE (in bytes) and MIME describe the file.  The message says the
+image is visible from now on, and that it stays attached until removed."
   (let ((name (gptel-yatools--display-path path)))
     (list :kind :attached
           :mime mime
@@ -314,28 +264,18 @@ out not to be what was needed, so that it is not paid for twice."
 (defun gptel-yatools-media-attach (path &optional head size)
   "Attach the image at PATH to this buffer's conversation, if it is one.
 
-PATH must be absolute; resolution belongs at the tool's edge.
+PATH must be absolute.  HEAD and SIZE, when given, are its first bytes
+\(`gptel-yatools-media--head-from-text') and its length, which spares a
+caller that has just read the file a second disk read.
 
-HEAD and SIZE, when given, are what the caller already knows about PATH --
-its first bytes and its length in bytes.  A read tool has both, having
-just read the file, and they are worth passing: in a remote workspace
-every question is a command and a wait, and asking what the file starts
-with once more would be a second one for an answer already in hand.
+Returns nil when PATH is not an image this model can be shown, and
+otherwise a plist:
 
-The value is nil when PATH is not an image this model can be shown -- not
-an image at all, or one whose MIME type the model does not accept -- and
-a plist saying what happened otherwise:
-
-  :kind     `:attached', or `:refused' when the image was found but not
-            attached (its size, or the model's limits).
+  :kind     `:attached', or `:refused' (size limit or model limits).
   :mime     the type the bytes were recognized as.
-  :size     the file's size in bytes, when it could be asked.
-  :message  what to tell the model, in the envelope's terms.
-  :comment  the envelope's one-line comment.
-
-A nil value is not an error: \"this is not an image\" is the caller's
-answer to give, and `read_path' gives it by falling back to the text and
-binary paths it already has."
+  :size     the file's size in bytes.
+  :message  what to tell the model.
+  :comment  the envelope's one-line comment."
   (let* ((head (or head
                    (and (file-regular-p path) (gptel-yatools-media--head path))))
          (mime (gptel-yatools-media--signature-type head))
@@ -361,12 +301,8 @@ binary paths it already has."
 (defconst gptel-yatools-media--message-keys '(:messages :input :contents)
   "Keys a backend keeps its array of turns under, in the order tried.
 
-Each is one gptel backend's name for the same thing: `:messages' for the
-chat-completions shape (OpenAI, Anthropic, Ollama), `:input' for the
-Responses API, `:contents' for Gemini.  Nothing here writes a content
-block itself -- the backend's own `gptel--inject-media' method is asked to,
-so the shape of the block and where the media goes inside the message
-remain gptel's business.")
+`:messages' for the chat-completions shape, `:input' for the Responses API,
+`:contents' for Gemini.")
 
 (defun gptel-yatools-media--conversation (data)
   "Return the array of turns in DATA, a gptel request payload, or nil."
@@ -375,9 +311,8 @@ remain gptel's business.")
 (defun gptel-yatools-media--tool-results-p (message)
   "Return non-nil when MESSAGE carries tool results rather than a prompt.
 
-The Anthropic API requires a message holding tool results to start with
-them, so media prepended to one would be a malformed request.  A message
-like that is not the user's prompt anyway; the prompt it answers is."
+The Anthropic API requires a tool-result message to start with them, so
+media must not be prepended to one."
   (let ((content (or (plist-get message :content) (plist-get message :parts))))
     (and (vectorp content)
          (seq-some (lambda (part)
@@ -386,11 +321,9 @@ like that is not the user's prompt anyway; the prompt it answers is."
                    content))))
 
 (defun gptel-yatools-media--first-message (data)
-  "Return the first message from the user in DATA that is a prompt, or nil.
+  "Return the first user message in DATA that is a prompt, or nil.
 
-Skipping the tool-result messages is what keeps the image out of a place
-the provider would reject; when every user message in DATA is one, the
-image waits for the next request, where `gptel-context' delivers it."
+Tool-result messages are skipped."
   (let ((messages (gptel-yatools-media--conversation data)))
     (seq-find (lambda (message)
                 (and (listp message)
@@ -399,19 +332,14 @@ image waits for the next request, where `gptel-context' delivers it."
               (append messages nil))))
 
 (defun gptel-yatools-media-deliver (backend data entries)
-  "Add ENTRIES to DATA, the payload of a request built for BACKEND.
+  "Add the media ENTRIES to DATA, the payload built for BACKEND.
 
-ENTRIES is a list of `gptel-context' media specs, (PATH :mime MIME).
-DATA is what `gptel--request-data' built; it is the one thing a tool call
-can still reach, since gptel builds it before the request is sent and
-sends the same payload again after tool results come back.
+ENTRIES is a list of `gptel-context' media specs, (PATH :mime MIME).  The
+media goes into the first user prompt in DATA, through BACKEND's own
+`gptel--inject-media', so the content block is the shape the backend
+expects.
 
-The media is prepended to the first message the user wrote, which is
-where gptel itself puts the media it carries in `gptel-context'.  Appending
-it as a message of its own would be easier and would put the image after
-a tool result, separated from the call it answers.
-
-Return non-nil when something was delivered."
+Returns non-nil when something was delivered."
   (when-let* ((entries)
               (message (gptel-yatools-media--first-message data)))
     (require 'gptel-context)
@@ -424,15 +352,9 @@ Return non-nil when something was delivered."
 
 ;;;; No header-line label
 
-;; gptel already counts what is in `gptel-context', in a label of its own:
-;; `[1 file]', clickable, opening the context buffer where each entry can be
-;; inspected and removed.  Attaching an image puts an ordinary context entry
-;; there, so that label already says the image is attached, and adding a
-;; second counter for a subset of the same list would claim a concept gptel
-;; owns -- right next to gptel's own `[Media: No]', which is a different
-;; feature again (`gptel-track-media': whether links in the buffer text are
-;; followed).  Two neighbouring labels about "media", disagreeing, is worse
-;; than no label.
+;; gptel's own `[N files]' label already counts these entries and opens the
+;; context buffer where they can be removed, and its `[Media: ...]' label is
+;; a different feature.  See ADR 0008.
 
 (provide 'gptel-yatools-media)
 ;;; gptel-yatools-media.el ends here

@@ -188,9 +188,9 @@ scanned for, off the right edge."
                (:constructor gptel-yatools--make-subagent))
   "One child agent, from the call that started it to its last answer.
 
-ID         the number in the child's buffer name, and nothing else.
+ID         the number in the child's buffer name.
 PARENT     the chat buffer whose tool call is waiting for the answer.
-BUFFER     the child's own buffer, or nil once it has been killed.
+BUFFER     the child's own buffer, or nil once killed.
 TASK       the parent model's instruction, verbatim.
 STATE      `running', `done', `failed', `aborted', `timed out',
            `turn cap' or `call cap'.
@@ -198,22 +198,16 @@ STARTED    `float-time' at which the child started.
 FINISHED   `float-time' at which it settled, or nil.
 TURNS      model responses received so far.
 CALLS      tool calls made so far.
-PATHS      paths the child read, deduplicated, in the order it first named
-           them -- as it wrote them, never resolved (see
-           `gptel-yatools-subagent--path-recorded-p').
+PATHS      paths the child read, deduplicated, as it wrote them.
 ANSWER     the child's last message, when it settled with one.
-LAST-TEXT  the most recent message the child sent, whatever state it is in;
-           what a cap message quotes.
-ERROR      the sentence explaining a failure, when it failed.
+LAST-TEXT  the most recent message the child sent.
+ERROR      the sentence explaining a failure.
 FSM        the child's request state machine.
-INFO       the plist gptel hands the callback, reused so that successive
+INFO       the plist gptel hands the callback, reused so successive
            replies are inserted as one conversation.
-STOP-REASON why the provider says the child's reply ended -- `length' when
-           it hit its output limit, and so on.  Recorded because gptel
-           does not read it, and an answer cut off mid-sentence must not
-           look like a finished one.
+STOP-REASON why the provider says the reply ended, such as `length'.
 JOB        the job the parent's tool call is waiting on.
-READ-ONLY  non-nil while the child is running: its buffer is read-only.
+READ-ONLY  non-nil while the child is running.
 DETACHED   non-nil once the user has taken the child over."
   id parent buffer task state started finished turns calls paths
   answer error fsm info job read-only detached last-text stop-reason)
@@ -221,17 +215,11 @@ DETACHED   non-nil once the user has taken the child over."
 (defvar gptel-yatools-subagent--records nil
   "Every live child agent, newest first.
 
-One list rather than one per parent: the picker shows every child, a chat
-buffer's label filters this list by `parent', and there is no second
-structure to fall out of step with it.  A record leaves the list when its
-buffer dies or when the user takes it over.")
+One list rather than one per parent.  A record leaves it when its buffer
+dies or the user takes the child over.")
 
 (defvar-local gptel-yatools-subagent--record nil
-  "The record of the child this buffer runs, or nil for any other buffer.
-
-Set on a child buffer, and the thing `--child-label' reads: a child is a
-`gptel-mode' chat too, so the label function needs to know which chat it
-is looking at without searching the record list by buffer.")
+  "The record of the child this buffer runs, or nil for any other buffer.")
 
 (defun gptel-yatools-subagent--records-for (parent)
   "Return the live records whose parent is PARENT, newest first."
@@ -253,19 +241,14 @@ is looking at without searching the record list by buffer.")
 ;; Naming
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-subagent--parent-label (buffer)
-  "Return BUFFER's name, which is how the user knows it.
-
-`*DeepSeek*' stays `*DeepSeek*': a child's name then reads
-` *gptel-yatools-subagent-*DeepSeek*-1', so the parent is recognisable
-without a decoding step."
+  "Return BUFFER's name, which is how the user knows it."
   (if (buffer-live-p buffer) (buffer-name buffer) "unknown"))
 
 (defun gptel-yatools-subagent--next-id (parent)
   "Return the next free child number for PARENT.
 
-Counted from the records that still exist, so the number in a buffer name
-is never reused while its child is alive.  It is a label, not an identity:
-a name that collides anyway gets a suffix from `generate-new-buffer'."
+Counted from the records that still exist, so a number is not reused while
+its child is alive."
   (let ((used nil))
     (dolist (record gptel-yatools-subagent--records)
       (when (eq (gptel-yatools-subagent--record-parent record) parent)
@@ -755,19 +738,11 @@ boundary, which may not have attached its conclusion yet."
 (defun gptel-yatools-subagent--abort (record cause)
   "Stop RECORD's child because of CAUSE, and settle it.
 
-CAUSE comes from two places and is named in the sentence the parent reads,
-because \"aborted\" alone leaves the parent model guessing whether it did
-something wrong.  From the child's own buffer come `by-hand', the reason
-set by \\[gptel-yatools-cancel-tool-calls] there, and `buffer-killed';
-from the job's CANCEL function come the kit's
-two reasons, `cancelled' (the chat is going away, or the user cancelled the
-call) and `timed-out' (the deadline passed).  A timeout is settled as
-`timed-out' rather than as an abort, and says how long the child had.
+CAUSE is `by-hand' or `buffer-killed' from the child's own buffer, or
+`cancelled' or `timed-out' from the job's CANCEL function.  It is named in
+the sentence the parent reads.  A timeout settles the child as `timed-out'.
 
-A failure while stopping the request does not stop the child being
-settled: the timing-out path reaches here from a timer, where a signal is
-only logged, and a child left running with nothing watching it is worse
-than an answer that says the host had gone."
+A failure while stopping the request does not prevent settling."
   (when (gptel-yatools-subagent--running-p record)
     ;; First, so that gptel's own state machine stops asking the model for
     ;; more: the abort looks the request up harmlessly if it cannot.
@@ -824,18 +799,12 @@ than an answer that says the host had gone."
 (defun gptel-yatools-subagent--insert-response (record response info)
   "Insert RESPONSE into RECORD's child buffer as gptel would draw it.
 
-RESPONSE is one of the shapes gptel's inserter understands: a reply, a
-reasoning block, or a `(tool-result . RESULTS)' turn.  INFO is the request
-plist, whose `:callback' is redirected for the duration -- see the
-commentary above -- and whose `:tracking-marker' is updated in place, so
-the next insertion continues where this one stopped.
+RESPONSE is a reply, a reasoning block, or a `(tool-result . RESULTS)'
+turn.  INFO is the request plist, whose `:callback' is redirected for the
+duration and whose `:tracking-marker' is updated in place.
 
-A failure here is swallowed on purpose.  gptel's drawing code can signal
-\(`gptel--display-tool-results' has been seen to raise \"Args out of
-range\" for an ordinary short tool result), and this function runs inside
-the child's callback, where an escaping error would end the run.  Losing a
-rendering of the transcript is a nuisance; losing the child's answer,
-because its display was broken, is not."
+A failure here is swallowed: this runs inside the child's callback, and
+losing a rendering of the transcript is better than losing the answer."
   (let ((buffer (gptel-yatools-subagent--record-buffer record)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -857,25 +826,16 @@ because its display was broken, is not."
 (defun gptel-yatools-subagent--callback (record response info)
   "Handle RESPONSE, one event of RECORD's child request.
 
-The shapes gptel uses are the whole contract.  A string is the model's
-message for this turn -- but a turn that also made tool calls sends its
-text first and then `(tool-result ...)', so a string only *ends* the child
-when the turn made no calls (`:tool-use' is empty).  A nil response is a
-failure, and gptel only sends one for a failed request: a successful 200
-with no body is a pure tool-call turn and is not reported at all.  `abort'
-is the user stopping it, and `(tool-call . CALLS)' is a confirmation
-nobody here can answer.
+INFO is the request plist.  The response shapes are gptel's: a string is
+the model's message for this turn, and only ends the child when the turn
+made no tool calls (`:tool-use' empty); nil is a failed request; `abort'
+is the user stopping it; `(tool-call . CALLS)' is a confirmation nobody
+here can answer.
 
-Everything is wrapped, because gptel calls this from a process sentinel:
-an error escaping here does not become a tool result, it breaks the
-request's state machine and the child is left running with nothing
-watching it.  A failure is reported as the child failing, which is the
-truth and is recoverable.
-
-`quit' is caught separately from `error' because `condition-case' does
-not treat it as one: a `C-g' while the child's answer was being handled
-would otherwise escape every handler here, leaving the child running and
-its parent's tool call waiting for a result that never arrives."
+Everything is wrapped: gptel calls this from a process sentinel, where an
+escaping error breaks the request's state machine and leaves the child
+running unwatched.  `quit' is caught separately, since `condition-case'
+does not treat it as an error."
   (setf (gptel-yatools-subagent--record-info record) info)
   (condition-case err
       (gptel-yatools-subagent--dispatch record response info)
@@ -1042,14 +1002,8 @@ half-finished investigation for a negative result."
 OUTCOME is the plist the child's job settled with: `:turns', `:calls',
 `:paths' and `:elapsed'.
 
-The metadata is not decoration: without the paths, \"no problems found\"
-cannot be told apart from \"did not look\", and the parent has no way to
-decide whether to trust the answer.
-
-The paths are printed as the child named them -- no resolving, no
-`project-current', no display-path lookup -- because this runs while the
-child's job is being delivered, which is still inside gptel's process
-sentinel.  See `gptel-yatools-subagent--path-recorded-p'."
+The paths are printed as the child named them, since this runs inside
+gptel's process sentinel."
   (let ((paths (plist-get outcome :paths))
         (elapsed (plist-get outcome :elapsed)))
     (concat
@@ -1250,23 +1204,14 @@ both."
   "Run RECORD's child again, in place, after it stopped.
 
 CONTINUATION, when it is a non-empty string, is appended to the child's
-transcript as a new instruction before the request is re-sent -- \"your
-reply was cut off, carry on from where it stopped\" is the usual one.  The
-partial reply stays where it is and is still marked as a response, so the
-next request reads it as an assistant turn and the model continues it
-instead of starting over.
+transcript as a new instruction before the request is re-sent, so the model
+continues its partial reply instead of starting over.
 
-The job is left alone.  It stays live, its deadline keeps running, and the
-answer is delivered to the parent exactly as it would have been, which is
-what lets a retry from `gptel-yatools-subagent-failed-functions' be
-invisible to the parent: its tool call goes on waiting inside the budget it
-was given, and only running out of that budget makes the retry a timeout.
+The job is left alone: it stays live, its deadline keeps running, and the
+answer is delivered to the parent as it would have been.
 
-Signals a `user-error' for a child that is already running (nothing to
-retry), one the user has detached (it is theirs now) or one whose buffer
-has been killed.  A child whose failure was claimed counts as ready to
-retry even though nothing has settled it: see
-`gptel-yatools-subagent--request-failed-p'."
+Signals a `user-error' for a child that is already running, one the user
+has detached, or one whose buffer was killed."
   (let ((buffer (gptel-yatools-subagent--record-buffer record)))
     (cond
      ((not (buffer-live-p buffer))

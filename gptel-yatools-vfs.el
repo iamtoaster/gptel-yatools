@@ -48,6 +48,7 @@
 (require 'gptel)
 (require 'subr-x)
 (require 'gptel-yatools-common)
+(require 'gptel-yatools-media)
 
 ;; The tools defined here use `gptel-yatools-define-tool', which lives in
 ;; `gptel-yatools-common.el' and is available because this file requires it.
@@ -922,6 +923,33 @@ and the error channel the boundary renders hardcodes `vfs=\"false\"'."
                     (plist-get read :provenance)))
     (:binary (gptel-yatools-vfs--binary-notice read))
     (_ (gptel-yatools-vfs--read-refusal read))))
+
+(defun gptel-yatools-vfs--media-result (read)
+  "Return a Result attaching READ's file as media, or nil.
+
+READ is what `gptel-yatools-vfs-read' returned.  Only content that is on
+disk is considered, and only for a path that was read as a file: a pending
+VFS entry holds text, so it can never be the image a model is shown.
+
+What the file is comes from the bytes READ already holds, so an ordinary
+text read costs nothing extra -- in particular not a second round trip to
+a remote host -- and only a file that begins like an image is asked about
+again at all.
+
+A nil value means \"this is not an image the model can be shown\", which is
+the whole of this function's contribution -- what a tool says instead
+stays the tool's own business, so `read_path' falls back to the text and
+binary answers it gives for everything else."
+  (when (and (eq (plist-get read :provenance) :disk)
+             (memq (plist-get read :kind) '(:text :binary)))
+    (when-let* ((outcome (gptel-yatools-media-attach
+                          (plist-get read :path)
+                          (gptel-yatools-media--head-from-text
+                           (plist-get read :text))
+                          (plist-get read :size))))
+      (gptel-yatools-ok (plist-get outcome :message)
+                        :provenance :disk
+                        :comment (plist-get outcome :comment)))))
 
 (defun gptel-yatools-vfs--coding (path coding)
   "Return the coding system a write to PATH should use, given CODING.
@@ -2281,35 +2309,40 @@ The counts are numbers, so every question here is asked with `zerop' or
   :name "read_path"
   :category "filesystem"
   :description
-  "Read a path relative to the workspace root. If PATH is a directory, return a listing (merged with VFS entries). If PATH is a file, return its contents. Pending VFS changes take precedence over disk contents; the reply says whether it describes pending changes or disk."
+  "Read a path relative to the workspace root. If PATH is a directory, return a listing (merged with VFS entries). If PATH is a file, return its contents. An image the model can see (PNG, JPEG, GIF or WebP, recognized by its bytes rather than its name) is attached to the conversation instead, so it can be looked at rather than described: the reply says so, and the image stays attached to later turns until the user removes it. Anything else binary is reported, not returned. Pending VFS changes take precedence over disk contents; the reply says whether it describes pending changes or disk."
   :args '((:name "path"
                  :type string
                  :description "Path to read, relative to the workspace root or absolute."))
   (let* ((full (gptel-yatools--resolve-path path))
          (read (gptel-yatools-vfs-read full)))
-    (pcase (plist-get read :kind)
-      ;; A directory is the one kind this tool answers differently from
-      ;; every other reader, which is why the branch stays here and the
-      ;; rest goes through `gptel-yatools-vfs-with-text'.
-      (:directory
-       (let* ((listing (gptel-yatools-vfs--directory-listing full))
-              (text (plist-get listing :text)))
-         (gptel-yatools-ok
-          (if (string-empty-p text) "(empty directory)" text)
-          :provenance (if (plist-get listing :pending) :mixed :disk))))
-      (:missing
-       ;; A directory can exist in the VFS alone, when pending files are
-       ;; stored under it and nothing was ever created on disk.
-       (if (gptel-yatools-vfs--has-children-p full)
-           (gptel-yatools-ok
-            (plist-get (gptel-yatools-vfs--directory-listing full) :text)
-            :provenance :vfs)
-         (gptel-yatools-vfs--read-refusal read)))
-      (_
-       (gptel-yatools-vfs-with-text
-        read
-        (lambda (text provenance)
-          (gptel-yatools-ok text :provenance provenance)))))))
+    ;; An image is not text, but a model that can see one does not need it
+    ;; read out: it is attached to the conversation.  This is checked before
+    ;; the read is interpreted, because the image path and the binary path
+    ;; both start from the same bytes and only one of them can answer.
+    (or (gptel-yatools-vfs--media-result read)
+        (pcase (plist-get read :kind)
+          ;; A directory is the one kind this tool answers differently from
+          ;; every other reader, which is why the branch stays here and the
+          ;; rest goes through `gptel-yatools-vfs-with-text'.
+          (:directory
+           (let* ((listing (gptel-yatools-vfs--directory-listing full))
+                  (text (plist-get listing :text)))
+             (gptel-yatools-ok
+              (if (string-empty-p text) "(empty directory)" text)
+              :provenance (if (plist-get listing :pending) :mixed :disk))))
+          (:missing
+           ;; A directory can exist in the VFS alone, when pending files are
+           ;; stored under it and nothing was ever created on disk.
+           (if (gptel-yatools-vfs--has-children-p full)
+               (gptel-yatools-ok
+                (plist-get (gptel-yatools-vfs--directory-listing full) :text)
+                :provenance :vfs)
+             (gptel-yatools-vfs--read-refusal read)))
+          (_
+           (gptel-yatools-vfs-with-text
+            read
+            (lambda (text provenance)
+              (gptel-yatools-ok text :provenance provenance))))))))
 
 (gptel-yatools-define-tool gptel-yatools-read-file-from-offset
   :name "read_file_from_offset"

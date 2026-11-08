@@ -177,6 +177,7 @@ config wins.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `gptel-yatools-sync-without-review` | `nil` | Skip the sync review, for batch or scripted use.  See below. |
+| `gptel-yatools-media-size-limit` | 5 MiB | Largest image `read_path` will attach to the conversation.  `0` removes the limit. |
 | `gptel-yatools-write-denied-files` | your Emacs startup files | Files no writing tool may touch, whatever directory they are in. |
 | `gptel-yatools-write-denied-file-names` | `(".dir-locals.el" ".dir-locals-2.el")` | File names no writing tool may touch, in any directory. |
 | `gptel-yatools-write-denied-directories` | this package's own directory | Directories no writing tool may put files in.  Matched by `file-truename`, so a symlink into one is caught too. |
@@ -305,7 +306,7 @@ child running until its deadline, so either retry it or stop it.
 
 | Tool | Category | Purpose |
 | --- | --- | --- |
-| `read_path` | filesystem | Read a file, or list a directory; pending VFS copies win over disk. |
+| `read_path` | filesystem | Read a file, or list a directory; pending VFS copies win over disk.  An image the model can see is attached to the conversation instead of being read as text. |
 | `read_file_from_offset` | filesystem | Read `lines` lines starting at a 1-based `offset`. |
 | `fetch_lines_from_file_using_regex` | filesystem | Return matching lines, each prefixed with its line number. |
 | `write_file` | filesystem | Replace a file's contents **in the VFS**; the disk is not touched until `file_sync`. |
@@ -318,6 +319,23 @@ child running until its deadline, so either retry it or stop it.
 | `skill` | skills | List the installed [Agent Skills](https://agentskills.io), load one, or read a file it references. |
 | `render_diagram` | diagram | Render PlantUML source to an image the chat buffer draws inline, and return the token to show it. |
 | `subagent` | agents | Hand one self-contained task to a child agent that reads files and reports back. Asynchronous: the call returns while it works. |
+
+### Images
+
+A model that can see images does not need a screenshot described to it, so
+`read_path` on a PNG, JPEG, GIF or WebP attaches the file to the
+conversation instead of reading it as text.  The format is decided by the
+file's own bytes, not its name: a screenshot saved without an extension
+works, and a text file renamed to `.png` is still text.  Anything the model
+does not claim to accept — or that is larger than
+`gptel-yatools-media-size-limit` — is refused with a sentence saying which
+of the two it was.
+
+An attached image is sent with the request being answered, and stays
+attached to the chat until you remove it, so the model can come back to it
+in a later turn.  That also means it is paid for again on every request;
+`M-x gptel-yatools-media-forget` stops that, and the `[Media: N]` label in
+the header line says how many are attached.
 
 ### The review UI
 

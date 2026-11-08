@@ -28,6 +28,8 @@
 ;; `gptel-yatools-shell.el' for the shell and workspace tools,
 ;; `gptel-yatools-skills.el' for Agent Skills, `gptel-yatools-diagram.el'
 ;; for diagrams and `gptel-yatools-agents.el' for child agents.
+;; `gptel-yatools-media.el' has no tools: it is how a read tool shows a
+;; model an image it cannot be told about in text.
 ;;
 ;; What is left here belongs to gptel rather than to any tool: a tool call
 ;; must run in the buffer that owns the request, so that a chat's
@@ -478,6 +480,60 @@ from `gptel-abort' itself."
               #'gptel-yatools-cancel-tool-calls))
 
 ;;-------------------------------------------------------------------------
+;; An attached image reaches the request that asked for it
+;;
+;; gptel builds a request's payload once, before sending it, and the loop
+;; that runs tool calls sends that same payload again.  So an image attached
+;; during a tool call is in no request at all until the buffer is parsed for
+;; the next one -- the model would be told the image is attached and see
+;; nothing.  The images attached during a request are therefore added to its
+;; payload just before it is sent again.
+;;
+;; The queue is cleared as each request starts: an image that was never
+;; delivered -- the request died between the call and the send -- is already
+;; in `gptel-context', which the build reads, and leaving it queued would
+;; put the same image in the payload twice.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools--media-queue-cleared (&rest _)
+  "Forget images left queued by a request that never delivered them."
+  (setq gptel-yatools-media--pending nil))
+
+(defun gptel-yatools--deliver-attached-media (fsm)
+  "Add the buffer's attached images to FSM's request before it is sent.
+
+Run before gptel sends a request on the way round the tool loop, which is
+the only moment a tool call can still reach the payload.  Nothing is
+delivered to a model that cannot take media, or once the queue is empty.
+
+A failure here is logged and dropped rather than signalled: this runs
+inside gptel's state machine, where an error would leave the request in
+WAIT for ever.  The image is still in `gptel-context', so the worst case
+is that the model sees it one request later than it should."
+  (let* ((info (ignore-errors (gptel-fsm-info fsm)))
+         (buffer (plist-get info :buffer))
+         (backend (plist-get info :backend))
+         (data (plist-get info :data)))
+    (when (and (buffer-live-p buffer) backend (listp data))
+      (let ((entries (buffer-local-value 'gptel-yatools-media--pending buffer)))
+        (when (and entries
+                   (fboundp 'gptel--model-capable-p)
+                   (gptel--model-capable-p 'media (plist-get info :model)))
+          (condition-case err
+              (progn
+                (gptel-yatools-media-deliver backend data entries)
+                (with-current-buffer buffer
+                  (setq gptel-yatools-media--pending nil)))
+            (error (gptel-yatools--trace "media delivery failed: %S" err))))))))
+
+(unless (advice-member-p #'gptel-yatools--deliver-attached-media
+                         'gptel--handle-wait)
+  (advice-add 'gptel--handle-wait :before
+              #'gptel-yatools--deliver-attached-media))
+
+(unless (advice-member-p #'gptel-yatools--media-queue-cleared 'gptel-request)
+  (advice-add 'gptel-request :before #'gptel-yatools--media-queue-cleared))
+
+;;-------------------------------------------------------------------------
 ;; Drawing the header line
 ;;
 ;; gptel builds `header-line-format' as (BACKEND STATUS INFO), and INFO
@@ -572,7 +628,12 @@ below the length the replacement is guarded on."
 ;; registers them as it defines them, so there is no list to assemble here.
 ;; The modules are required at this point and not earlier: they build on
 ;; `gptel-yatools-common.el'.
+;;
+;; `gptel-yatools-media' has no tools of its own -- it is what `read_path'
+;; reaches for when the file it was given is an image -- and is required
+;; first so that the read is defined with it in place.
 ;;-------------------------------------------------------------------------
+(require 'gptel-yatools-media)
 (require 'gptel-yatools-vfs)
 (require 'gptel-yatools-shell)
 (require 'gptel-yatools-skills)

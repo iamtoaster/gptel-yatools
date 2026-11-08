@@ -226,6 +226,26 @@ model reads, generated from it.  The same argument list is what the
 boundary checks values against, and what the preview reads positions
 from, so a tool's arguments are stated once and every half follows.
 
+### Images
+
+**Attached image**:
+An image file given to the conversation instead of being read as text, so
+the model sees the picture rather than a description of its bytes.
+Whether a file is one is decided by its first bytes, never by its name,
+and whether it may be attached at all is the model's own answer -- it
+must claim both media and that MIME type.
+_Avoid_: Media context, vision input, binary read
+
+**Media delivery**:
+Getting an attached image into the request that is already being
+answered.  A `gptel-context` entry reaches only requests built *after* it
+is added, and the tool loop republishes the payload rather than rebuilding
+it, so the image is also queued and added to that payload as it is sent
+again.  An attached image therefore exists in two places with two
+lifetimes -- the queue, which delivers it once, and the context, which
+keeps it for later turns -- and neither alone is enough.
+_Avoid_: Media injection, image upload
+
 ### Pending changes
 
 **VFS write interface**:

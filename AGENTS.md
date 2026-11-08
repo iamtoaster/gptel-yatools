@@ -208,6 +208,12 @@ changing the rule.
   to discovery, so the model cannot author instructions that are
   authoritative before review.  `allowed-tools` is advisory and stays
   labelled as such.
+- **An image is delivered twice, on purpose.**  A `gptel-context` entry
+  carries it to later requests; the pending queue reaches the request that
+  asked, because gptel builds a payload once and the tool loop re-sends it
+  (ADR 0008).  Neither alone works: the queue alone forgets, the context
+  alone is one request late.  The queue is cleared as each request starts,
+  so an image cannot arrive twice in one payload.
 - **A child agent is a reader.**  `gptel-yatools-subagent-tools` lists
   read-only tools, and nothing else in the agent module needs reviewing
   because of it.  Adding a writing or shell tool there invalidates its
@@ -226,7 +232,8 @@ changing the rule.
 - Names use the `gptel-yatools-test-` prefix.  Suites are split by
   subject: package glue and shell in `gptel-yatools-tests.el`, filesystem
   in `-vfs-tests.el`, skills in `-skills-tests.el`, diagrams in
-  `-diagram-tests.el`, children in `-agents-tests.el`.
+  `-diagram-tests.el`, children in `-agents-tests.el`, images in
+  `-media-tests.el`.
 - Call tools through `gptel-yatools-test--tool`, which returns the
   generated boundary, so assertions see the envelope the model would.
   `gptel-yatools-test--should-be-enveloped` checks both tags and JSON
@@ -292,6 +299,19 @@ skill browser.  `gptel-yatools-skills--discover` `:509`,
 `gptel-yatools-skills-resolve` `:786`, `gptel-yatools-skills-add` `:1146`,
 `gptel-yatools-skills` `:1283`.
 
+### Images — `gptel-yatools-media.el`
+
+Turns a file the read tools would refuse as binary into an image the model
+is shown: the format is decided by the file's first bytes — taken from the
+read that already happened, so an ordinary read costs nothing more — the
+model's acceptance is asked of gptel's model metadata, and an accepted image
+is attached to the conversation twice over: queued for the request being
+answered and kept in `gptel-context` for the turns after it (ADR 0008).
+`gptel-yatools-media-type` `:119`, `gptel-yatools-media-attach` `:308`,
+`gptel-yatools-media-deliver` `:395`, `gptel-yatools-media-forget` `:213`,
+`gptel-yatools-media--head-from-text` `:104`,
+`gptel-yatools-media--pending` `:145`, and the defcustom at `:51`.
+
 ### Diagrams — `gptel-yatools-diagram.el`
 
 The `render_diagram` tool, the content-addressed cache and its age sweep,
@@ -310,12 +330,15 @@ answer and its failures, the `[Subagents]` label and the picker.
 ### gptel glue — `gptel-yatools.el`
 
 Runs a tool call in the buffer that owns the request, defers calls in a
-busy remote workspace, draws the header-line extras, binds `C-c C-k`,
-loads the tool modules.  `gptel-yatools--accept-tool-calls-in-owner`
+busy remote workspace, delivers attached images, draws the header-line
+extras, binds `C-c C-k`, loads the tool modules.
+`gptel-yatools--accept-tool-calls-in-owner`
 `:83`, `gptel-yatools--tool-call-running` `:193`,
 `gptel-yatools--deferred-tool-calls` `:214`,
 `gptel-yatools--tool-calls-outside-the-sentinel` `:356`,
-`gptel-yatools--extend-header-line` `:530`.
+`gptel-yatools--deliver-attached-media` `:501`,
+`gptel-yatools--media-queue-cleared` `:497`,
+`gptel-yatools--extend-header-line` `:594`.
 
 ### Seams, and who crosses them
 
@@ -343,6 +366,8 @@ Read the one you are about to contradict.
   cancellation had to be built here.
 - `0006` — a subprocess runs where its artifacts live.
 - `0007` — why there are two lists of write/sync checks.
+- `0008` — why an image is delivered twice: once to the request that asked
+  for it, and once to the conversation.
 
 ## Before finishing
 

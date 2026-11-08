@@ -269,7 +269,7 @@ tools, so adding or removing one would fail a test about something else."
   "Every gptel symbol this package reaches for must still be there.
 
 gptel has no stability promise for its private functions, and this
-package advises six of them and reads about twenty variables besides, so
+package advises eight of them and reads about twenty variables besides, so
 a gptel upgrade is the one event that can break the package without
 touching a line of it.  Renaming one symbol would otherwise surface as a
 `void-function' in the middle of a tool call -- in the buffer of someone
@@ -284,6 +284,9 @@ assertion would duplicate the tests that already exercise these paths
 and would fail for a gptel change that is merely different, not broken."
   (let ((missing nil))
     (dolist (function '(gptel--accept-tool-calls gptel--handle-tool-use
+                        gptel--handle-wait gptel--inject-media
+                        gptel--base64-encode gptel--model-capable-p
+                        gptel--model-mime-capable-p gptel-context--collect-media
                         gptel--inspect-tool-calls gptel--insert-response
                         gptel--display-tool-results gptel--map-tool-args
                         gptel--format-tool-call gptel--update-status
@@ -306,11 +309,13 @@ and would fail for a gptel change that is merely different, not broken."
                         gptel-send--handlers gptel-send--transitions))
       (unless (boundp variable)
         (push (format "%s (variable)" variable) missing)))
-    ;; The five seams this package hooks into, one advice each.
+    ;; The eight seams this package hooks into, one advice each.
     (dolist (pair '((gptel--accept-tool-calls
                      . gptel-yatools--accept-tool-calls-in-owner)
                     (gptel--handle-tool-use
                      . gptel-yatools--tool-calls-outside-the-sentinel)
+                    (gptel--handle-wait . gptel-yatools--deliver-attached-media)
+                    (gptel-request . gptel-yatools--media-queue-cleared)
                     (gptel--inspect-tool-calls
                      . gptel-yatools--forget-inspection-vfs)
                     (gptel-abort . gptel-yatools--abort-accepts-no-argument)
@@ -348,6 +353,7 @@ the just-compiled modules rather than the source ones."
              (let* ((dir (make-temp-file "gptel-yatools-elc-" t))
                     (package-dir (file-name-directory ,gptel-yatools-test--file))
                     (files '("gptel-yatools-common.el"
+                             "gptel-yatools-media.el"
                              "gptel-yatools-vfs.el"
                              "gptel-yatools-shell.el"
                              "gptel-yatools-skills.el"
@@ -1533,9 +1539,10 @@ kill, and a whole-group kill -- cannot be got wrong one module at a time.
 A module that calls `make-process' itself has reached past that seam."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
-         (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
-                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
-                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
+         (files '("gptel-yatools.el" "gptel-yatools-media.el"
+                  "gptel-yatools-vfs.el" "gptel-yatools-shell.el"
+                  "gptel-yatools-skills.el" "gptel-yatools-diagram.el"
+                  "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))
@@ -1579,9 +1586,10 @@ in `gptel-yatools-common.el', so that is the only file allowed to mention
 the registry, a job's timer or the kill hook at all."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
-         (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
-                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
-                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
+         (files '("gptel-yatools.el" "gptel-yatools-media.el"
+                  "gptel-yatools-vfs.el" "gptel-yatools-shell.el"
+                  "gptel-yatools-skills.el" "gptel-yatools-diagram.el"
+                  "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))
@@ -2612,9 +2620,10 @@ stops holding for that tool.  `gptel-yatools-page' is the stated exception:
 the budget is offered because `vfs_diff' has to page its own output."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
-         (files '("gptel-yatools.el" "gptel-yatools-vfs.el"
-                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
-                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
+         (files '("gptel-yatools.el" "gptel-yatools-media.el"
+                  "gptel-yatools-vfs.el" "gptel-yatools-shell.el"
+                  "gptel-yatools-skills.el" "gptel-yatools-diagram.el"
+                  "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))

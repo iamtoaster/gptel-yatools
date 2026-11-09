@@ -460,4 +460,17 @@ this is the tree the script sees when it walks \"\"."
                               (gptel-yatools-search-test--glob "deep/*.c"
                                                                "sub"))))))
 
+(ert-deftest gptel-yatools-test-a-cut-transfer-yields-no-phantom-record ()
+  "A stream that stops mid-record ends the parse, and invents nothing."
+  (gptel-yatools-test--in-dir
+    (let* ((base gptel-yatools-test--root)
+           ;; a.txt arrives whole; b.txt is cut after its flag field.
+           (whole (concat "./a.txt\0" "5\0" "17\0" "1\0" "tokz\n\0"
+                          "./b.txt\0" "5\0" "17\0" "1\0"))
+           (parsed (gptel-yatools-search--remote-parse whole base)))
+      (should (= 1 (length (plist-get parsed :records))))
+      (should-not (plist-get parsed :complete))
+      (should (string-match-p "a\\.txt\\'"
+                              (plist-get (car (plist-get parsed :records)) :path))))))
+
 (provide 'gptel-yatools-search-tests)

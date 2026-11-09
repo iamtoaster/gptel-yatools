@@ -80,7 +80,7 @@ rather than silently matching nothing."
       ;; so these assertions name the lines and not their positions.
       (let ((body (gptel-yatools-search-test--glob "*.el")))
         (should (string-match-p "\\(?:\\`\\|\n\\)a\\.el\t" body))
-        (should (string-match-p "\nsub/deep/b\\.el\t" body))
+        (should (string-match-p "\\(?:\\`\\|\n\\)sub/deep/b\\.el\t" body))
         (should-not (string-match-p "notes\\.txt" body))))))
 
 (ert-deftest gptel-yatools-test-glob-double-star-crosses-directories ()
@@ -154,5 +154,67 @@ rather than silently matching nothing."
         (should (= 1 (length (split-string body "\n"))))
         (should (string-match-p "\\`a\\.el\t.*(pending)" body))))))
 
+;;;; 2. grep finds lines, in a tree nobody named
+
+(ert-deftest gptel-yatools-test-grep-finds-lines-across-the-tree ()
+  "Every matching line is reported with its file and 1-based line number."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "one\nneedle here\n")
+                                       ("sub/b.el" . "nothing\n")
+                                       ("sub/deep/c.el" . "also a needle\n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep "needle")))
+        (should (string-match-p "a\\.el:2:needle here" body))
+        (should (string-match-p "sub/deep/c\\.el:1:also a needle" body))
+        (should-not (string-match-p "b\\.el" body))))))
+
+(ert-deftest gptel-yatools-test-grep-is-case-insensitive-unless-the-pattern-is-not ()
+  "A lowercase pattern matches any case; one with a capital is exact."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "Needle\nneedle\nNEEDLE\n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep "needle")))
+        (should (string-match-p "3 matching line(s) in 1 file(s)" body))
+        (should (string-match-p "a\\.el:3:NEEDLE" body)))
+      (let ((body (gptel-yatools-search-test--grep "Needle")))
+        (should (string-match-p "1 matching line(s) in 1 file(s)" body))
+        (should (string-match-p "a\\.el:1:Needle" body))
+        (should-not (string-match-p "a\\.el:2:" body))))))
+
+(ert-deftest gptel-yatools-test-grep-caps-the-lines-one-file-may-contribute ()
+  "One busy file cannot crowd every other file out of the reply."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree
+     `(("busy.el" . ,(mapconcat (lambda (n) (format "hit %d" n))
+                                (number-sequence 1 30) "\n"))
+       ("quiet.el" . "hit once\n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep "hit")))
+        (should (string-match-p "quiet\\.el:1:hit once" body))
+        (should (string-match-p "busy\\.el: more than 20 matching lines" body))
+        (should-not (string-match-p "busy\\.el:21:" body))))))
+
+(ert-deftest gptel-yatools-test-grep-reads-pending-text-not-disk ()
+  "A line written to the VFS is found, and the disk line it shadows is not."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "on disk\n")))
+    (gptel-yatools-test--vfs
+      (gptel-yatools-vfs-put (gptel-yatools-test--root-file "a.el")
+                             "in the vfs needle\n")
+      (let ((body (gptel-yatools-search-test--grep "needle")))
+        (should (string-match-p "a\\.el:1:in the vfs needle\t(pending)" body)))
+      (let ((body (gptel-yatools-search-test--grep "on disk")))
+        (should-not (string-match-p "a\\.el" body))))))
+
+(ert-deftest gptel-yatools-test-grep-leaves-binary-files-alone ()
+  "A file with a NUL byte is skipped rather than searched."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.txt" . "needle\n")))
+    (gptel-yatools-test--write (gptel-yatools-test--root-file "bin.dat")
+                               "needle\0needle")
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep "needle")))
+        (should (string-match-p "a\\.txt:1:" body))
+        (should-not (string-match-p "bin\\.dat" body))))))
+
 (provide 'gptel-yatools-search-tests)
-;;; gptel-yatools-search-tests.el ends here

@@ -522,9 +522,8 @@ grown its own copy again."
           (let* ((read (funcall (gptel-yatools-test--tool "read_path") file))
                  (offset (funcall (gptel-yatools-test--tool
                                    "read_file_from_offset") file 1 1))
-                 (regexp (funcall (gptel-yatools-test--tool
-                                   "fetch_lines_from_file_using_regex")
-                                  file "PNG")))
+                 (regexp (funcall (gptel-yatools-test--tool "grep")
+                                  "PNG" file)))
             (should (string-match-p "binary file (6 bytes)" read))
             (should (equal offset read))
             (should (equal regexp read))))))))
@@ -859,9 +858,8 @@ the model would read it."
       (gptel-yatools-test--with-file file "abc\n"
         (should (string-match-p
                  "invalid regexp"
-                 (funcall (gptel-yatools-test--tool
-                           "fetch_lines_from_file_using_regex")
-                          file "\\(unbalanced")))))))
+                 (funcall (gptel-yatools-test--tool "grep")
+                          "\\(unbalanced" file)))))))
 
 
 ;;;; 25. FIFOs and devices would hang Emacs
@@ -1206,9 +1204,8 @@ envelope rather than as a raw `wrong-type-argument'."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "nil-rx.txt")))
       (gptel-yatools-test--with-file file "abc\n"
-        (let ((out (funcall (gptel-yatools-test--tool
-                             "fetch_lines_from_file_using_regex")
-                            file nil)))
+        (let ((out (funcall (gptel-yatools-test--tool "grep")
+                            nil file)))
           (should (stringp out))
           (should (string-match-p "regex must be a string" out)))))))
 
@@ -1298,9 +1295,8 @@ envelope rather than as a raw `wrong-type-argument'."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "e.txt")))
       (gptel-yatools-test--with-file file "alpha\nbeta\n"
-        (let ((no-match (funcall (gptel-yatools-test--tool
-                                  "fetch_lines_from_file_using_regex")
-                                 file "zzz"))
+        (let ((no-match (funcall (gptel-yatools-test--tool "grep")
+                                 "zzz" file))
               (past-end (funcall (gptel-yatools-test--tool
                                   "read_file_from_offset")
                                  file 99 5))
@@ -2411,10 +2407,8 @@ and the pattern is the body.
   (gptel-yatools-test--in-dir
     (with-temp-buffer
       (gptel-yatools-test--vfs
-        (let ((out (funcall (gptel-yatools-test--tool
-                             "fetch_lines_from_file_using_regex")
-                            (gptel-yatools-test--root-file "absent.txt")
-                            "[")))
+        (let ((out (funcall (gptel-yatools-test--tool "grep")
+                            "[" (gptel-yatools-test--root-file "absent.txt"))))
           (should (string-match-p "no such file" out))
           (should-not (string-match-p "invalid regexp" out)))))))
 

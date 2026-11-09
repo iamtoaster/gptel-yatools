@@ -98,7 +98,7 @@ One sentence in the imperative, saying what changed and why it matters
 | --- | --- | --- |
 | `README.md` | users | Only what a user needs: description, installation, configuration, tool usage.  No rationale, no test harness, no `path:line`. |
 | `GLOSSARY.md` | everyone writing here | The domain vocabulary.  Use its terms in code, comments, tests and commit messages; avoid its *Avoid* lists. |
-| `docs/adr/` | whoever changes the design | One decision per file, immutable once accepted; amend with a new ADR instead of rewriting. |
+| `docs/adr/` | whoever changes the design | One decision per file.  A **partial** change is an in-file `## Amendment — …` section appended to the ADR it changes; a **fundamental** change is a new ADR that supersedes the old one, whose file moves to `docs/adr/archive/` with a header link to its replacement. |
 | `AGENTS.md` | agents working on the code | This file: commands, conventions, index. |
 | `.live-docs/` | nobody (gitignored) | `PROJECT.md` and `TASKS.org` — local state for the current session. |
 
@@ -401,11 +401,33 @@ Read the one you are about to contradict.
 - `0009` — why a remote search runs a script that only transports, and why
   no search writes a spill file.
 
+Changing one of these takes one of two forms, and which one is the whole
+decision:
+
+- **Amend** — part of the decision has moved.  Append a
+  `## Amendment — <what changed>` section to the ADR itself, saying what
+  was wrong or incomplete and what now holds.  The file keeps its number
+  and its place, and a reader of the decision sees the correction at the
+  bottom of it.  This is the ordinary case; ADR 0002 and 0005 carry three
+  amendments each.
+- **Supersede** — the decision itself no longer holds.  Write a new ADR
+  that states the decision in full, carrying over every part of the old
+  one that still applies, and **without a backlink to it**: the new ADR is
+  the decision, not a diff against a dead one.  Move the old file to
+  `docs/adr/archive/` and give it a header line pointing at its
+  replacement, so someone arriving from an old comment is sent forward
+  rather than left reading a rule that is gone.
+
+Never rewrite the body of an accepted ADR.  Its context is a record of what
+was believed at the time, and an amendment that edits it destroys the only
+evidence of why the next decision was needed.
+
 ## Before finishing
 
 - `bin/eldev check` passes — compile, tests, lint — and any new behaviour
   has a test that goes through the tool boundary.
 - User-visible changes are in `README.md`; new or changed domain terms in
-  `GLOSSARY.md`; a design decision in a new ADR.
+  `GLOSSARY.md`; a design decision in an ADR — amended or superseded, but
+  never left describing code that no longer exists.
 - No VFS changes are left pending: `vfs_diff`, then `file_sync` (or
   `vfs_discard`) before ending the session.

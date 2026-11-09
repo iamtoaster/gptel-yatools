@@ -87,7 +87,6 @@
 (defcustom gptel-yatools-subagent-tools
   '("read_path"
     "read_file_from_offset"
-    "fetch_lines_from_file_using_regex"
     "glob"
     "grep"
     "read_workspace_root"

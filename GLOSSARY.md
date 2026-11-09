@@ -359,9 +359,12 @@ _Avoid_: Confirmation prompt, tool-call renderer
 **Search tool**:
 `glob` or `grep`: a tool that answers "where is it?" rather than reading a
 path the model already knows.  `glob` matches file names by a shell
-wildcard, `grep` matches lines by an Emacs regexp.  They exist because the
-other read tools need a path first, and a model that does not know the
-tree can only guess one.  A search sees the VFS as well as disk.
+wildcard, `grep` matches lines by an Emacs regexp, and `grep`'s path may
+name one file as readily as a directory -- a file it is given is searched
+whole, because the per-file cap exists to stop one file crowding out a
+tree.  They exist because the other read tools need a path first, and a
+model that does not know the tree can only guess one.  A search sees the
+VFS as well as disk.
 _Avoid_: Finder, index, file search (that is what a user calls the
 feature, not what this package calls the tool)
 
@@ -382,12 +385,10 @@ what makes `*.el` useful in a tree whose shape the model does not know.
 _Avoid_: Pinned, full-path pattern, absolute pattern
 
 **Smart case**:
-`grep`'s case rule: the pattern matches case-insensitively unless it
-contains an uppercase letter, which is taken as the sign that the capital
-was meant.  It is the rule a model expects from the word "grep", and it
-needs no argument to say which it wanted.  `fetch_lines_from_file_using_regex`
-deliberately keeps Emacs's own rule and matches exactly, because it reads
-a file the caller already chose.
+`grep`'s case rule, for a tree and for one file alike: the pattern matches
+case-insensitively unless it contains an uppercase letter, which is taken
+as the sign that the capital was meant.  It is the rule a model expects
+from the word "grep", and it needs no argument to say which it wanted.
 _Avoid_: Auto case, insensitive search
 
 **Courier**:

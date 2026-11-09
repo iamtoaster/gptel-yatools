@@ -267,6 +267,59 @@ rather than silently matching nothing."
         (should (string-match-p "Stopped after" body))
         (should (string-match-p "seconds" body))))))
 
+(ert-deftest gptel-yatools-test-grep-searches-the-one-file-it-is-given ()
+  "A file as PATH is searched whole and answered about that file alone."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "needle one\nother\nneedle two\n")
+                                       ("b.el" . "needle three\n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep
+                   "needle" (gptel-yatools-test--root-file "a.el"))))
+        (should (string-match-p "a\\.el:1:needle one" body))
+        (should (string-match-p "a\\.el:3:needle two" body))
+        ;; The other file was not searched, and no tree summary is claimed.
+        (should-not (string-match-p "b\\.el" body))
+        (should-not (string-match-p "file(s) that matched" body))
+        (should (string-match-p "a\\.el: 2 matching line(s)" body))))))
+
+(ert-deftest gptel-yatools-test-a-named-file-is-not-capped ()
+  "The per-file cap exists to stop one file crowding out a tree, so a file
+named as PATH is not capped, and only the reply budget can cut it."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree
+     (list (cons "many.txt"
+                 (mapconcat (lambda (n) (format "needle %d" n))
+                            (number-sequence 1 25) "\n"))))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep
+                   "needle" (gptel-yatools-test--root-file "many.txt"))))
+        ;; More than the per-file cap of 20, all of them shown.
+        (should (string-match-p "many\\.txt:25:needle 25" body))
+        (should (string-match-p "many\\.txt: 25 matching line(s)" body))))))
+
+(ert-deftest gptel-yatools-test-a-named-file-uses-the-smart-case-rule ()
+  "One match rule for the whole tool: a capital means the capital was meant."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("c.txt" . "Needle\nneedle\n")))
+    (gptel-yatools-test--vfs
+      (let ((file (gptel-yatools-test--root-file "c.txt")))
+        (should (string-match-p "c\\.txt: 2 matching line(s)"
+                                (gptel-yatools-search-test--grep "needle" file)))
+        (should (string-match-p "c\\.txt: 1 matching line(s)"
+                                (gptel-yatools-search-test--grep "Needle" file)))))))
+
+(ert-deftest gptel-yatools-test-a-file-searches-its-pending-text ()
+  "A file held in the VFS is searched as the VFS holds it."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("d.el" . "on disk\n")))
+    (gptel-yatools-test--vfs
+      (gptel-yatools-vfs-put (gptel-yatools-test--root-file "d.el")
+                             "in the vfs needle\n")
+      (let ((body (gptel-yatools-search-test--grep
+                   "needle" (gptel-yatools-test--root-file "d.el"))))
+        (should (string-match-p "d\\.el:1:in the vfs needle" body))
+        (should-not (string-match-p "on disk" body))))))
+
 ;;;; 3. A workspace on another machine
 
 (defun gptel-yatools-search-test--remote-tree (files)

@@ -147,3 +147,34 @@ budget to bound each.
   handler from ADR 0004 makes a name remote, and the courier's `sh` runs for
   real against a temp tree, so the record protocol is exercised end to end
   rather than inspected.
+
+## Amendment — one search tool, for a file or for a directory
+
+Item 1 justified `grep` by pointing at `read_path` and
+`fetch_lines_from_file_using_regex`: two read tools that need the path
+first, so a model that does not know the tree can only guess one.  The
+second of those has since been removed, and the reasoning above it is
+wrong in an instructive way.
+
+Watching child agents work made the cost visible: they reach for `grep`
+first — for one file as readily as for a tree — read the refusal that a
+directory-only `grep` used to give, and only then call the tool that
+would have answered.  Two tools for one question did not prevent the
+guess; it added a step after it.  The bespoke tool's own description was
+also untrue: it promised to match "the case exactly as written" while
+matching case-insensitively, so the tool whose selling point was precision
+was the vaguer of the two.
+
+`grep`'s `path` now names a file or a directory, and the tool decides
+after resolving it.  A file it is given is searched **whole**: the
+per-file cap exists to stop one file crowding out a tree, so it does not
+apply to a file that is the whole subject, and only the reply budget can
+cut the list.  One match rule serves both — smart case — because a second
+case rule is a second thing to explain and the first was not honoured
+anyway.
+
+Nothing here reopens a decision above.  The courier still transports and
+never matches; the local walk and the remote chunks still answer in one
+shape; the ranking, the budgets and the skip sentences are unchanged.  A
+file search is the same pipeline over a one-element candidate list, which
+is why it needed no second collector.

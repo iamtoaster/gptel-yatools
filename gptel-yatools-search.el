@@ -827,7 +827,7 @@ five size skips are named; the other reasons are counted."
        (delq nil
              (list
               (when large
-                (format "%d file(s) were not searched because they are larger than %s, the most this tool reads: %s%s. Search one deliberately with execute_command, or call fetch_lines_from_file_using_regex on a file you know contains what you want."
+                (format "%d file(s) were not searched because they are larger than %s, the most a tree search reads: %s%s. Search one deliberately with execute_command, or pass that file as PATH to grep, which reads a file it is given whole."
                         (length large)
                         (gptel-yatools-search--format-size ceiling)
                         names
@@ -1056,14 +1056,15 @@ what it matches when folding is on."
   (let ((case-fold-search nil))
     (not (string-match-p "[[:upper:]]" regexp))))
 
-(defun gptel-yatools-search--line-matches (text regexp)
+(defun gptel-yatools-search--line-matches (text regexp &optional limit)
   "Return the lines of TEXT that match REGEXP, as (KEPT . TOTAL).
 
-KEPT is at most `gptel-yatools-grep-matches-per-file-limit' conses of
-LINE-NUMBER and LINE-TEXT; TOTAL counts past that cap."
+KEPT is at most LIMIT conses of LINE-NUMBER and LINE-TEXT, defaulting to
+`gptel-yatools-grep-matches-per-file-limit'; TOTAL counts past that cap."
   (if (gptel-yatools-vfs--binary-p text)
       (cons nil 0)
     (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
+          (limit (or limit gptel-yatools-grep-matches-per-file-limit))
           (total 0)
           (kept nil))
       (gptel-yatools--map-lines
@@ -1071,7 +1072,7 @@ LINE-NUMBER and LINE-TEXT; TOTAL counts past that cap."
        (lambda (number line)
          (when (string-match-p regexp line)
            (setq total (1+ total))
-           (when (< (length kept) gptel-yatools-grep-matches-per-file-limit)
+           (when (< (length kept) limit)
              (push (cons number line) kept)))))
       (cons (nreverse kept) total))))
 
@@ -1138,27 +1139,73 @@ short and how many of its lines it kept, or nil."
           :matched-files (length files)
           :partial partial)))
 
+(defun gptel-yatools-search--grep-file-body (full regexp matches total)
+  "Return the body of a `grep' reply about the one file FULL.
+
+REGEXP is what was asked for, MATCHES the LINE-NUMBER and LINE-TEXT conses
+shown, and TOTAL how many lines matched, which may be more than MATCHES
+holds when the reply budget cut the list."
+  (let ((shown (length matches))
+        (name (gptel-yatools--display-path full)))
+    (if (zerop total)
+        (format "(no lines in %s match the regexp %S.) To look for it elsewhere, call glob to find files by name, or grep again with a directory as PATH."
+                name regexp)
+      (concat
+       (mapconcat (lambda (match)
+                    (format "%s:%d:%s" name (car match) (cdr match)))
+                  matches "\n")
+       "\n\n"
+       (format "%s: %d matching line(s)."
+               name total)
+       (if (> total shown)
+           (format " The first %d are shown, the most one reply carries; narrow the expression to see the rest."
+                   shown)
+         "")))))
+
+(defun gptel-yatools-search--grep-file (regexp full)
+  "Return the Result for REGEXP searched over the one file FULL.
+
+FULL is resolved.  The whole file is searched -- the per-file cap exists to
+stop one file crowding out a tree, and there is no tree here -- so only
+`gptel-yatools-grep-match-limit', the reply's own budget, can cut the list."
+  (let ((read (gptel-yatools-vfs-read full)))
+    (gptel-yatools-vfs-with-text
+     read
+     (lambda (content provenance)
+       (let* ((scan (gptel-yatools-search--line-matches
+                     content regexp gptel-yatools-grep-match-limit))
+              (matches (car scan)))
+         (gptel-yatools-ok
+          (gptel-yatools-search--grep-file-body
+           full regexp matches (cdr scan))
+          :provenance provenance))))))
+
 (defun gptel-yatools-search--grep (regexp path)
-  "Return the Result for the `grep' tool, matching REGEXP under PATH."
+  "Return the Result for the `grep' tool, matching REGEXP under PATH.
+
+PATH may name a directory, which is walked, or one file, which is searched
+whole."
   (gptel-yatools--require-string regexp "regex")
   (when (string-empty-p regexp)
     (error "Error: regex must not be empty.  Pass an Emacs regular expression, such as \"defun gptel-yatools-\" or \"TODO\""))
-  (let ((directory (gptel-yatools-search--checked-directory
-                    path :hint "Give PATH as a directory to search under, and REGEX as the text wanted. To search one file you already know, use fetch_lines_from_file_using_regex.")))
-    (if (not (stringp directory))
-        directory
-      (let* ((collected (gptel-yatools-search--collect directory t))
-             (candidates (gptel-yatools-search--merge-pending
-                          directory (plist-get collected :candidates)))
-             (files (gptel-yatools-search--grep-collect regexp candidates))
-             (page (gptel-yatools-search--grep-lines
-                    files gptel-yatools-grep-match-limit))
-             (any-pending (cl-some (lambda (file)
-                                     (and (plist-get file :pending) t))
-                                   files)))
-        (gptel-yatools-ok
-         (gptel-yatools-search--grep-body regexp directory page files collected)
-         :provenance (if any-pending :mixed :disk))))))
+  (let ((full (gptel-yatools--resolve-path (or path ""))))
+    (if (file-directory-p full)
+        (let* ((directory (file-name-as-directory full))
+               (collected (gptel-yatools-search--collect directory t))
+               (candidates (gptel-yatools-search--merge-pending
+                            directory (plist-get collected :candidates)))
+               (files (gptel-yatools-search--grep-collect regexp candidates))
+               (page (gptel-yatools-search--grep-lines
+                      files gptel-yatools-grep-match-limit))
+               (any-pending (cl-some (lambda (file)
+                                       (and (plist-get file :pending) t))
+                                     files)))
+          (gptel-yatools-ok
+           (gptel-yatools-search--grep-body regexp directory page files collected)
+           :provenance (if any-pending :mixed :disk)))
+      ;; Anything else is one file, and the reader says what kind: text,
+      ;; a pending entry, binary, missing, or not a regular file at all.
+      (gptel-yatools-search--grep-file regexp full))))
 
 (defun gptel-yatools-search--grep-body (regexp directory page files walk)
   "Return the body of a `grep' reply, given what the search found.
@@ -1210,7 +1257,7 @@ The summary's counts are the page's own, and `:ceiling' falls back on
                                                           (plist-get file :path))
                                                    :test #'equal)
                                           :more)))
-                 (format "%s has more matching lines than fit in this reply: %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
+                 (format "%s has more matching lines than fit in this reply: %d are shown. Pass that file as PATH to grep to see them all."
                          (gptel-yatools--display-path (car (plist-get page :partial)))
                          (cdr (plist-get page :partial))))
                (when (> left-out 0)
@@ -1218,7 +1265,7 @@ The summary's counts are the page's own, and `:ceiling' falls back on
                          left-out))
                (mapconcat
                 (lambda (file)
-                  (format "%s: %d matching line(s), the first %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
+                  (format "%s: %d matching line(s), the first %d are shown. Pass that file as PATH to grep to see them all."
                           (gptel-yatools--display-path (plist-get file :path))
                           (plist-get file :line-count)
                           (length (plist-get file :lines))))
@@ -1237,7 +1284,7 @@ The summary's counts are the page's own, and `:ceiling' falls back on
   :name "grep"
   :category "filesystem"
   :description
-  "Find lines by content. REGEX is an Emacs regular expression, matched case-insensitively unless it contains an uppercase letter. Searches every file under PATH, returning one line per match: the path relative to the workspace root, a colon, the 1-based line number, a colon, and the line. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, which is how a deliberate search of `.git' or `.github' works. A symbolic link to a directory is not followed, so a link back up the tree cannot loop; a link to a file is read like the file it names. Binary files are skipped, a file larger than `gptel-yatools-search-max-file-size' is skipped and named in the reply, and one file contributes at most `gptel-yatools-grep-matches-per-file-limit' lines so that it cannot crowd out every other file. The reply says how many lines it shows, out of how many files matched, and says which files it left out when the limit bit: the files shown are the ones with the most matches, so a cap keeps what is likely to answer you rather than whatever the tree listed first. Pending VFS text is what is searched for a file the VFS holds, so a line you just wrote with write_file is found before it is synced; such a line is marked (pending). Use glob first when the tree is large, and fetch_lines_from_file_using_regex when you already know the file: this tool's answer is a summary of where to look, not every line of a file."
+  "Find lines by content. REGEX is an Emacs regular expression, matched case-insensitively unless it contains an uppercase letter. PATH may be a directory, which is searched recursively, or one file, which is searched whole; omit it to search the whole workspace. Returns one line per match: the path relative to the workspace root, a colon, the 1-based line number, a colon, and the line. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, which is how a deliberate search of `.git' or `.github' works. A symbolic link to a directory is not followed, so a link back up the tree cannot loop; a link to a file is read like the file it names. Binary files are skipped, a file larger than `gptel-yatools-search-max-file-size' is skipped and named in the reply, and in a directory search one file contributes at most `gptel-yatools-grep-matches-per-file-limit' lines so that it cannot crowd out every other file -- a file named as PATH is not capped, so use this rather than a second tool to see every match of one file. The reply says how many lines it shows, out of how many files matched, and says which files it left out when the limit bit: the files shown are the ones with the most matches, so a cap keeps what is likely to answer you rather than whatever the tree listed first. Pending VFS text is what is searched for a file the VFS holds, so a line you just wrote with write_file is found before it is synced; such a line is marked (pending). Use glob first when the tree is large, and this tool when you know the text but not the file: its answer is a summary of where to look."
   :args '((:name "regex"
                  :type string
                  :description "Emacs regular expression to match against each line, such as \"defun gptel-yatools-\" or \"TODO\\(\\.org\\)?\".")

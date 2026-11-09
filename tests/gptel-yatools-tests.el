@@ -199,7 +199,7 @@ see is a raw condition string such as `error Wrong type argument'."
     (gptel-yatools-test--vfs
       (dolist (case '(("read_path" (nil))
                       ("read_file_from_offset" (nil 1 1))
-                      ("fetch_lines_from_file_using_regex" (nil "x"))
+                      ("grep" (nil "x"))
                       ("execute_command" (nil))
                       ("write_file" (nil "x"))
                       ("write_file_diff" (nil "a" "b"))
@@ -626,12 +626,12 @@ that was sitting in the VFS."
           ;; the file does not exist.
           (dolist (name '("read_path"
                           "read_file_from_offset"
-                          "fetch_lines_from_file_using_regex"))
+                          "grep"))
             (let ((out (pcase name
                          ("read_path" (funcall (funcall tool name) "p.txt"))
                          ("read_file_from_offset"
                           (funcall (funcall tool name) "p.txt" 1 10))
-                         (_ (funcall (funcall tool name) "p.txt" "x")))))
+                         (_ (funcall (funcall tool name) "x" "p.txt")))))
               (should (string-match-p "x" out))
               (should-not (string-match-p "does not exist" out))
               (should (string-match-p "vfs=\"true\"" out))))
@@ -711,7 +711,7 @@ the real (buffer-local or global) value untouched."
 (ert-deftest gptel-yatools-test-all-tools-present ()
   "Every documented tool must stay registered."
   (dolist (name '("read_workspace_root" "read_path" "read_file_from_offset"
-                  "fetch_lines_from_file_using_regex" "execute_command"
+                  "glob" "grep" "execute_command"
                   "write_file" "write_file_diff" "file_sync" "vfs_diff"
                   "vfs_discard" "skill"))
     (should (cl-find name gptel-yatools--tools

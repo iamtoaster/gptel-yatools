@@ -582,9 +582,8 @@ Syncing would overwrite those external changes.  %s\n\n\
 ;; Reading a text file
 ;;
 ;; One reader answers "what text is at this path, and where did it come
-;; from?" for `read_path', `read-file-from-offset',
-;; `fetch-lines-from-file-using-regex' and the skill file reader, and owns
-;; the binary policy with it.
+;; from?" for `read_path', `read-file-from-offset' and the skill file
+;; reader, and owns the binary policy with it.
 ;;
 ;; The answer is a value with a `:kind': a tool has to be able to turn a
 ;; missing path into its own message, and the skill reader needs the text
@@ -2069,54 +2068,6 @@ tool reply, so the two cannot disagree."
                  (format "(no text in %s after line %d.)"
                          (gptel-yatools--display-path full) offset)))
                :provenance provenance)))))))))
-
-(gptel-yatools-define-tool gptel-yatools-fetch-lines-from-file-using-regex
-  :name "fetch_lines_from_file_using_regex"
-  :category "filesystem"
-  :description
-  "Return lines from a file that match an Emacs regexp. Each match is prefixed with its 1-based line number. Use this when you know which file to search and want every matching line of it: unlike the grep tool it does not walk the tree, is not capped, and matches the case exactly as written. Pending VFS changes shadow disk content; the reply says which it came from. Binary files (containing NUL bytes) are reported, not searched."
-  :args '((:name "path"
-                 :type string
-                 :description "File path to search.")
-          (:name "regex"
-                 :type string
-                 :description "Emacs regular expression to match against each line."))
-  (let* ((full (gptel-yatools--resolve-path path))
-         (read (gptel-yatools-vfs-read full)))
-    ;; The file is read first and the regexp validated second, so a call
-    ;; that is wrong twice -- no such file, and a broken pattern -- is
-    ;; told about the file.
-    (gptel-yatools-vfs-with-text
-     read
-     (lambda (content provenance)
-       (let ((regex-error
-              (condition-case err
-                  (progn (string-match-p regex "") nil)
-                (invalid-regexp (error-message-string err)))))
-         (when regex-error
-           (error "Error: invalid regexp %S: %s" regex regex-error))
-         ;; `string-match-p' honours the ambient `case-fold-search' (t by
-         ;; default), so a regexp with no case construct matches
-         ;; case-insensitively.  A model that wants an exact case writes one
-         ;; into the regexp ([A-Z], \\`...\\'); binding `case-fold-search'
-         ;; here would make the tool's matching disagree with Emacs, which
-         ;; is the model's mental model of an "Emacs regexp".
-         ;; `gptel-yatools-vfs--replace-once' must be exact and binds it.
-         (let ((matches '()))
-           (gptel-yatools--map-lines
-            content
-            (lambda (number line)
-              (when (string-match-p regex line)
-                (push (format "%d:%s" number line) matches))))
-           (gptel-yatools-ok
-            ;; An empty body would be indistinguishable from an
-            ;; empty file, so say that nothing matched.
-            (if matches
-                (mapconcat #'identity (nreverse matches) "\n")
-              (format "(no lines in %s match the regexp %S.)"
-                      (gptel-yatools--display-path full)
-                      regex))
-            :provenance provenance)))))))
 
 (gptel-yatools-define-tool gptel-yatools-write-file
   :name "write_file"

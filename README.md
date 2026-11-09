@@ -330,9 +330,8 @@ child running until its deadline, so either retry it or stop it.
 | --- | --- | --- |
 | `read_path` | filesystem | Read a file, or list a directory; pending VFS copies win over disk.  An image the model can see is attached to the conversation instead of being read as text. |
 | `read_file_from_offset` | filesystem | Read `lines` lines starting at a 1-based `offset`. |
-| `fetch_lines_from_file_using_regex` | filesystem | Return matching lines of **one known file**, each prefixed with its line number.  Uncapped. |
 | `glob` | filesystem | Find files by a shell wildcard (`*.el`, `src/**/*.c`), newest first.  Does not need the path in advance. |
-| `grep` | filesystem | Find lines by an Emacs regexp anywhere in a tree, case-insensitively unless the pattern has a capital. |
+| `grep` | filesystem | Find lines by an Emacs regexp, case-insensitively unless the pattern has a capital.  `path` may be a directory, which is searched recursively, or one file, which is searched whole and without the per-file cap. |
 | `write_file` | filesystem | Replace a file's contents **in the VFS**; the disk is not touched until `file_sync`. |
 | `write_file_diff` | filesystem | Replace one exact occurrence of `old_string` with `new_string`, in the VFS. |
 | `file_sync` | filesystem | Write pending changes to disk, after showing the diff for review. |
@@ -398,10 +397,14 @@ usually the one you want.
 `grep` matches lines by an Emacs regexp, case-insensitively unless the pattern
 contains a capital letter — `foo` finds `Foo`, `Foo` does not find `foo`.
 Results are `path:line:text`, and the reply says how many lines it shows out of
-how many files matched.  One file contributes at most twenty lines, and a file
-that has more is named with its real count and a pointer at
-`fetch_lines_from_file_using_regex`, which reads one known file whole and
-without a cap.
+how many files matched.
+
+`grep` also takes a **file** as `path`, and then searches that one file whole:
+the twenty-lines-per-file limit exists to stop one file crowding out a tree, so
+it does not apply, and the reply is that file's matches and their count.  There
+is one search tool rather than one for trees and one for files, because a model
+that reaches for `grep` to look inside a file it already knows should not have
+to be told it picked the wrong tool.
 
 The twenty-lines-per-file and two-hundred-lines-per-call limits keep the
 files with **the most matches**, not the ones the tree happens to list first.
@@ -531,7 +534,7 @@ it came from, not your attached files — reads what it needs, and replies.
 The reply comes back as that tool call's result.
 
 A child is a **reader**.  It gets `read_path`, `read_file_from_offset`,
-`fetch_lines_from_file_using_regex`, `glob`, `grep`, `read_workspace_root` and
+`glob`, `grep`, `read_workspace_root` and
 `skill`, and nothing else: it cannot write, cannot run a command, and cannot start another
 subagent.  That restriction is why nothing needs reviewing afterwards — there
 is nothing to lose.

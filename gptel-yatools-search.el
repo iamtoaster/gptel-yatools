@@ -930,9 +930,12 @@ a directory listing marks one."
                         (plist-get walk :files)
                         (plist-get walk :seconds))))))
     (if (null lines)
-        (format "No files under %s match the pattern %S. Check the pattern, or call read_path on that directory to see what is already there."
+        (format "No files under %s match the pattern %S.%s Check the pattern, or call read_path on that directory to see what is already there."
                 (gptel-yatools--display-path directory)
-                pattern)
+                pattern
+                (if (gptel-yatools-search--glob-anchored-p pattern)
+                    " A pattern with a slash is matched from the directory being searched, not from the workspace root."
+                  ""))
       (concat (mapconcat #'identity lines "\n")
               (when notes (concat "\n\n" (mapconcat #'identity notes "\n")))))))
 
@@ -940,7 +943,7 @@ a directory listing marks one."
   :name "glob"
   :category "filesystem"
   :description
-  "Find files by name. PATTERN is a shell wildcard: `*' matches within one path component, `**' crosses components, `?` one character, `[abc]` a set. A pattern with no slash matches the file name at any depth, so \"*.el\" finds every Emacs Lisp file under the workspace; a pattern with a slash matches the path relative to the workspace root, so \"src/**/*.c\" finds C files under src/. Returns one line per file, newest first: the path relative to the workspace root, a tab, and the modification time. No file is too large to be found: only names are read. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, and the call stops at `gptel-yatools-search-file-limit' files or `gptel-yatools-search-seconds-limit' seconds, saying so when it does. Use this instead of guessing a path and calling read_path on it. Pending VFS files exist here too: a file you wrote with write_file is found before it is synced."
+  "Find files by name. PATTERN is a shell wildcard: `*' matches within one path component, `**' crosses components, `?` one character, `[abc]` a set. A pattern with no slash matches the file name at any depth, so \"*.el\" finds every Emacs Lisp file under the workspace. A pattern with a slash is matched against the path relative to PATH, so with PATH omitted \"src/**/*.c\" finds C files under src/, and with PATH=\"src\" it is \"**/*.c\" that does. Returns one line per file, newest first: the path relative to the workspace root, a tab, and the modification time. No file is too large to be found: only names are read, and a symbolic link to a directory is not followed. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, and the call stops at `gptel-yatools-search-file-limit' files or `gptel-yatools-search-seconds-limit' seconds, saying so when it does. Use this instead of guessing a path and calling read_path on it. Pending VFS files exist here too: a file you wrote with write_file is found before it is synced."
   :args '((:name "pattern"
                  :type string
                  :description "Shell wildcard to match file names with, such as \"*.el\", \"src/**/*.c\" or \"Makefile\".")
@@ -1210,7 +1213,7 @@ asked."
   :name "grep"
   :category "filesystem"
   :description
-  "Find lines by content. REGEX is an Emacs regular expression, matched case-insensitively unless it contains an uppercase letter. Searches every file under PATH, returning one line per match: the path relative to the workspace root, a colon, the 1-based line number, a colon, and the line. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, which is how a deliberate search of `.git' or `.github' works. Binary files are skipped, a file larger than `gptel-yatools-search-max-file-size' is skipped and named in the reply, and one file contributes at most `gptel-yatools-grep-matches-per-file-limit' lines so that it cannot crowd out every other file. The reply says how many lines it shows, out of how many files matched, and says which files it left out when the limit bit: the files shown are the ones with the most matches, so a cap keeps what is likely to answer you rather than whatever the tree listed first. Pending VFS text is what is searched for a file the VFS holds, so a line you just wrote with write_file is found before it is synced; such a line is marked (pending). Use glob first when the tree is large, and fetch_lines_from_file_using_regex when you already know the file: this tool's answer is a summary of where to look, not every line of a file."
+  "Find lines by content. REGEX is an Emacs regular expression, matched case-insensitively unless it contains an uppercase letter. Searches every file under PATH, returning one line per match: the path relative to the workspace root, a colon, the 1-based line number, a colon, and the line. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, which is how a deliberate search of `.git' or `.github' works. A symbolic link to a directory is not followed, so a link back up the tree cannot loop; a link to a file is read like the file it names. Binary files are skipped, a file larger than `gptel-yatools-search-max-file-size' is skipped and named in the reply, and one file contributes at most `gptel-yatools-grep-matches-per-file-limit' lines so that it cannot crowd out every other file. The reply says how many lines it shows, out of how many files matched, and says which files it left out when the limit bit: the files shown are the ones with the most matches, so a cap keeps what is likely to answer you rather than whatever the tree listed first. Pending VFS text is what is searched for a file the VFS holds, so a line you just wrote with write_file is found before it is synced; such a line is marked (pending). Use glob first when the tree is large, and fetch_lines_from_file_using_regex when you already know the file: this tool's answer is a summary of where to look, not every line of a file."
   :args '((:name "regex"
                  :type string
                  :description "Emacs regular expression to match against each line, such as \"defun gptel-yatools-\" or \"TODO\\(\\.org\\)?\".")

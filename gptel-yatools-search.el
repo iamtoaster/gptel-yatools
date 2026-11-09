@@ -613,7 +613,7 @@ plist of `:candidates', `:files', `:stopped' (nil, `files', `seconds',
     (gptel-yatools-search--local-collect directory contents)))
 
 (defun gptel-yatools-search--merge-pending (directory candidates)
-  "Return CANDIDATES with the VFS's answer in place of disk's.
+  "Return CANDIDATES, gathered under DIRECTORY, with the VFS's answer.
 
 A path the VFS holds contributes its pending text -- the same choice
 `read_path' makes -- and is marked, so the reply can say which lines are not
@@ -690,7 +690,7 @@ name, which is what makes \"*.el\" work at every depth."
   "Return the Result for the `glob' tool, matching PATTERN under PATH."
   (gptel-yatools--require-string pattern "pattern")
   (when (string-empty-p pattern)
-    (error "Error: pattern must not be empty. Pass a shell wildcard such as \"*.el\" or \"src/**/*.c\""))
+    (error "Error: pattern must not be empty.  Pass a shell wildcard such as \"*.el\" or \"src/**/*.c\""))
   (let* ((root (gptel-yatools--workspace-root))
          (directory (gptel-yatools--resolve-path (or path "")))
          (regexp (gptel-yatools-search--glob-regexp pattern))
@@ -701,7 +701,7 @@ name, which is what makes \"*.el\" work at every depth."
                            full root anchored)))))
     (if (not (file-directory-p directory))
         (gptel-yatools-ok
-         (format "Error: %s is not a directory. Give PATH as a directory to search under, and PATTERN as the file names wanted."
+         (format "Error: %s is not a directory.  Give PATH as a directory to search under, and PATTERN as the file names wanted."
                  (gptel-yatools--display-path directory))
          :comment "Nothing was searched.")
       (let* ((collected (gptel-yatools-search--collect directory nil))
@@ -826,7 +826,7 @@ first block is binary: it is skipped, not searched."
   (and (stringp text) (string-match-p "\0" text)))
 
 (defun gptel-yatools-search--line-matches (text regexp)
-  "Return the matching lines of TEXT, as (LINE-NUMBER . LINE-TEXT) conses.
+  "Return the lines of TEXT that match REGEXP, as (LINE-NUMBER . LINE-TEXT).
 
 At most `gptel-yatools-grep-matches-per-file-limit' are returned, and
 whether more were left is reported separately by
@@ -850,7 +850,7 @@ whether more were left is reported separately by
       (nreverse found))))
 
 (defun gptel-yatools-search--more-lines-p (text regexp reported)
-  "Return non-nil when TEXT holds more matching lines than REPORTED holds."
+  "Return non-nil when TEXT holds more lines matching REGEXP than REPORTED."
   (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
         (seen 0)
         (more nil))
@@ -867,9 +867,9 @@ whether more were left is reported separately by
     more))
 
 (defun gptel-yatools-search--grep-result (path text regexp pending)
-  "Return the reply lines for PATH, and whether it had more matches.
+  "Return the reply lines for PATH's TEXT that match REGEXP.
 
-The value is a cons of the lines, each \"PATH:LINE:TEXT\", and a boolean
+PENDING non-nil marks every line as not yet on disk.  The value is a cons of the lines, each \"PATH:LINE:TEXT\", and a boolean
 saying the file holds more matches than those.  A pending entry's lines end
 in a tab and \"(pending)\", as a directory listing marks one."
   (let* ((matches (gptel-yatools-search--line-matches text regexp))
@@ -889,11 +889,11 @@ in a tab and \"(pending)\", as a directory listing marks one."
   "Return the Result for the `grep' tool, matching REGEXP under PATH."
   (gptel-yatools--require-string regexp "regex")
   (when (string-empty-p regexp)
-    (error "Error: regex must not be empty. Pass an Emacs regular expression, such as \"defun gptel-yatools-\" or \"TODO\""))
+    (error "Error: regex must not be empty.  Pass an Emacs regular expression, such as \"defun gptel-yatools-\" or \"TODO\""))
   (let ((directory (gptel-yatools--resolve-path (or path ""))))
     (if (not (file-directory-p directory))
         (gptel-yatools-ok
-         (format "Error: %s is not a directory. Give PATH as a directory to search under, and REGEX as the text wanted. To search one file you already know, use fetch_lines_from_file_using_regex."
+         (format "Error: %s is not a directory.  Give PATH as a directory to search under, and REGEX as the text wanted. To search one file you already know, use fetch_lines_from_file_using_regex."
                  (gptel-yatools--display-path directory))
          :comment "Nothing was searched.")
       (let* ((collected (gptel-yatools-search--collect directory t))

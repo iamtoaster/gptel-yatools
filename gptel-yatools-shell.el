@@ -26,20 +26,36 @@
 (declare-function gptel-yatools--update-tool-status "gptel-yatools" (message &optional face))
 
 (defun gptel-yatools-shell--command-result (output)
-  "Return the result for a finished command whose combined output is OUTPUT.
+  "Return the result for a finished command whose combined output is OUTPUT."
+  (gptel-yatools-ok
+   output
+   :provenance :disk
+   :comment "Command ran against disk."))
 
-When VFS entries are pending, the envelope's comment warns that the command
-ran against disk."
-  (let ((changed (gptel-yatools-vfs-pending-paths)))
-    (gptel-yatools-ok
-     output
-     :provenance (if changed :vfs :disk)
-     :comment
-     (if changed
-         (format "WARNING: %d VFS file(s) have uncommitted changes (%s). The command ran against DISK, not the VFS. Missing files, stale content, or unexpected results in the output below may be because changes are pending in the VFS. Run vfs_diff to inspect, file_sync to apply."
-                 (length changed)
-                 (mapconcat #'gptel-yatools--display-path changed ", "))
-       "Command ran against disk. VFS has no pending changes."))))
+(defun gptel-yatools-shell--pending-refusal (paths)
+  "Return the result refusing to run while PATHS are pending in the VFS.
+
+The command would read disk, not the VFS, so the model would be handed an
+answer describing files that are about to change -- and would run the same
+command again after syncing to find out.  Refusing says so once, before
+anything runs, and names the three ways out."
+  (gptel-yatools-ok
+   (format "\
+Error: no command was run: %d file(s) are pending in the VFS (%s).
+
+A command reads DISK, so its output would describe the files as they
+were before your changes, not as you have written them -- which is how
+the same command gets run twice.  Nothing here is broken: these changes
+simply are not on disk yet.
+
+Resolve the VFS first:
+  vfs_diff    show what is pending
+  file_sync   review the diffs and write them to disk
+  vfs_discard drop the pending changes instead"
+           (length paths)
+           (mapconcat #'gptel-yatools--display-path paths ", "))
+   :provenance :vfs
+   :comment "No command was run: the VFS holds changes that are not on disk yet."))
 
 (defun gptel-yatools-shell--refusal (sentence)
   "Return the result for a call refused before any command was started.
@@ -101,7 +117,8 @@ exists, since that would open a connection to a host the user never named."
 
 DIRECTORY is resolved against the workspace root when non-empty; empty or
 nil means the root itself.  A DIRECTORY on another machine is refused
-rather than run there.
+rather than run there, and so is any command while the VFS holds changes
+that are not on disk yet: see `gptel-yatools-shell--pending-refusal'.
 
 The result always carries a body: the exit code and combined output, or
 why the command could not be started.  The command is killed when it
@@ -113,8 +130,11 @@ job goes back to the boundary."
                                (expand-file-name directory root)
                              root))
          (shown-directory (gptel-yatools-shell--where target-directory))
+         (pending (gptel-yatools-vfs-pending-paths))
          (elsewhere (gptel-yatools-shell--elsewhere root target-directory)))
     (cond
+     (pending
+      (gptel-yatools-shell--pending-refusal pending))
      (elsewhere
       (gptel-yatools-shell--refusal elsewhere))
      ((not (file-directory-p target-directory))
@@ -189,7 +209,7 @@ TIMEOUT the budget it was given."
   :async t
   :preview '("command" "directory" "timeout")
   :description
-  "Execute a shell command and return its exit status and combined stdout/stderr output. The user is ALWAYS prompted to confirm the exact command before it runs. The command runs against DISK, not the VFS. The call returns as soon as the command has started: this tool runs in the background, so the result arrives later and a returned call does not mean the command has finished. The chat waits for it -- you will get the result before your next turn -- but do not assume completion in the meantime. Commands issued in one response may run concurrently, so put dependent steps in separate calls. When the workspace root is on a remote host (a TRAMP path such as /ssh:host:/repo), the command runs there, under that host's shell, not on your machine; DIRECTORY must then be workspace-relative or a path on that same host. DIRECTORY may never name a different machine, local or remote: a command approved for a workspace has to run where that workspace is. If any VFS files have uncommitted changes, a warning is prepended to the XML context (listing the pending paths): missing files or stale content in the output may be because changes are pending in the VFS. Use vfs_diff to inspect pending changes and file_sync to apply them. On failure the exit code and output are returned as plain text (not signaled as an Elisp error), so you can read the failure and adapt. If the command outlives the tool timeout it is killed and its partial output is returned instead."
+  "Execute a shell command and return its exit status and combined stdout/stderr output. The user is ALWAYS prompted to confirm the exact command before it runs. The command runs against DISK, not the VFS. If the VFS holds changes that are not on disk yet, the command is REFUSED before it starts, with the pending paths named: a command would answer from the old content, so call vfs_diff to inspect, file_sync to write the changes to disk, or vfs_discard to drop them, and then run the command. The call returns as soon as the command has started: this tool runs in the background, so the result arrives later and a returned call does not mean the command has finished. The chat waits for it -- you will get the result before your next turn -- but do not assume completion in the meantime. Commands issued in one response may run concurrently, so put dependent steps in separate calls. When the workspace root is on a remote host (a TRAMP path such as /ssh:host:/repo), the command runs there, under that host's shell, not on your machine; DIRECTORY must then be workspace-relative or a path on that same host. DIRECTORY may never name a different machine, local or remote: a command approved for a workspace has to run where that workspace is. On failure the exit code and output are returned as plain text (not signaled as an Elisp error), so you can read the failure and adapt. If the command outlives the tool timeout it is killed and its partial output is returned instead."
   :args '((:name "command"
                 :type string
                 :description "The shell command to run. Executed via `shell-file-name' with `shell-command-switch' (typically /bin/sh -c).")

@@ -927,25 +927,39 @@ just the file name, which is what makes \"*.el\" work at every depth."
       (gptel-yatools-search--relative path directory)
     (file-name-nondirectory path)))
 
+(cl-defun gptel-yatools-search--checked-directory (path &key hint)
+  "Return PATH resolved as a directory to search, or a refusal Result.
+
+PATH is resolved against the workspace root, and empty means the root.  The
+value is the directory, with a trailing slash, or -- when PATH names
+something that is not a directory -- a Result saying so, with the caller's
+HINT appended to the sentence."
+  (let ((directory (file-name-as-directory
+                    (gptel-yatools--resolve-path (or path "")))))
+    (if (file-directory-p directory)
+        directory
+      (gptel-yatools-ok
+       (format "Error: %s is not a directory.  %s"
+               (gptel-yatools--display-path directory)
+               hint)
+       :comment "Nothing was searched."))))
+
 (defun gptel-yatools-search--glob (pattern path)
   "Return the Result for the `glob' tool, matching PATTERN under PATH."
   (gptel-yatools--require-string pattern "pattern")
   (when (string-empty-p pattern)
     (error "Error: pattern must not be empty.  Pass a shell wildcard such as \"*.el\" or \"src/**/*.c\""))
-  (let* ((directory (file-name-as-directory
-                     (gptel-yatools--resolve-path (or path ""))))
-         (regexp (gptel-yatools-search--glob-regexp pattern))
-         (anchored (gptel-yatools-search--glob-anchored-p pattern))
-         (match (lambda (full)
-                  (string-match-p
-                   regexp (gptel-yatools-search--glob-subject
-                           full directory anchored)))))
-    (if (not (file-directory-p directory))
-        (gptel-yatools-ok
-         (format "Error: %s is not a directory.  Give PATH as a directory to search under, and PATTERN as the file names wanted."
-                 (gptel-yatools--display-path directory))
-         :comment "Nothing was searched.")
-      (let* ((collected (gptel-yatools-search--collect directory nil))
+  (let ((directory (gptel-yatools-search--checked-directory
+                    path :hint "Give PATH as a directory to search under, and PATTERN as the file names wanted.")))
+    (if (not (stringp directory))
+        directory
+      (let* ((regexp (gptel-yatools-search--glob-regexp pattern))
+             (anchored (gptel-yatools-search--glob-anchored-p pattern))
+             (match (lambda (full)
+                      (string-match-p
+                       regexp (gptel-yatools-search--glob-subject
+                               full directory anchored))))
+             (collected (gptel-yatools-search--collect directory nil))
              (candidates (gptel-yatools-search--merge-pending
                           directory (plist-get collected :candidates)))
              (hits (cl-loop for candidate in candidates
@@ -956,15 +970,8 @@ just the file name, which is what makes \"*.el\" work at every depth."
                                      (plist-get (cdr hit) :pending))
                                    hits)))
         (gptel-yatools-ok
-         (gptel-yatools-search--glob-body
-          hits pattern directory
-          (list :stopped (plist-get collected :stopped)
-                :files (plist-get collected :files)
-                :seconds (plist-get collected :seconds)
-                :failed (plist-get collected :failed)))
-         :provenance (if any-pending :mixed :disk)
-         :comment (when any-pending
-                    "This reply mixes pending virtual-filesystem changes with disk content: entries marked (pending) exist only in the VFS. Run the file_sync tool to persist them."))))))
+         (gptel-yatools-search--glob-body hits pattern directory collected)
+         :provenance (if any-pending :mixed :disk))))))
 
 (defun gptel-yatools-search--glob-sort (hits)
   "Return HITS, an alist of path to candidate, newest first.
@@ -982,9 +989,9 @@ Ties are broken by path, so two calls a second apart agree with each other."
   "Return the body of a `glob' reply.
 
 HITS is an alist of absolute path to candidate, PATTERN what was asked for,
-DIRECTORY where the walk started and WALK what `gptel-yatools-search--walk'
-reported.  A candidate with `:pending' set is marked as such in its line, as
-a directory listing marks one."
+DIRECTORY where the walk started and WALK what
+`gptel-yatools-search--collect' reported.  A candidate with `:pending' set
+is marked as such in its line, as a directory listing marks one."
   (let* ((sorted (gptel-yatools-search--glob-sort hits))
          (limit gptel-yatools-glob-result-limit)
          (shown (cl-subseq sorted 0 (min limit (length sorted))))
@@ -1136,12 +1143,10 @@ short and how many of its lines it kept, or nil."
   (gptel-yatools--require-string regexp "regex")
   (when (string-empty-p regexp)
     (error "Error: regex must not be empty.  Pass an Emacs regular expression, such as \"defun gptel-yatools-\" or \"TODO\""))
-  (let ((directory (gptel-yatools--resolve-path (or path ""))))
-    (if (not (file-directory-p directory))
-        (gptel-yatools-ok
-         (format "Error: %s is not a directory.  Give PATH as a directory to search under, and REGEX as the text wanted. To search one file you already know, use fetch_lines_from_file_using_regex."
-                 (gptel-yatools--display-path directory))
-         :comment "Nothing was searched.")
+  (let ((directory (gptel-yatools-search--checked-directory
+                    path :hint "Give PATH as a directory to search under, and REGEX as the text wanted. To search one file you already know, use fetch_lines_from_file_using_regex.")))
+    (if (not (stringp directory))
+        directory
       (let* ((collected (gptel-yatools-search--collect directory t))
              (candidates (gptel-yatools-search--merge-pending
                           directory (plist-get collected :candidates)))
@@ -1152,18 +1157,8 @@ short and how many of its lines it kept, or nil."
                                      (and (plist-get file :pending) t))
                                    files)))
         (gptel-yatools-ok
-         (gptel-yatools-search--grep-body
-          regexp directory page files
-          (list :stopped (plist-get collected :stopped)
-                :files (plist-get collected :files)
-                :seconds (plist-get collected :seconds)
-                :failed (plist-get collected :failed)
-                :ceiling (or (plist-get collected :ceiling)
-                             gptel-yatools-search-max-file-size)
-                :skipped (plist-get collected :skipped)))
-         :provenance (if any-pending :mixed :disk)
-         :comment (when any-pending
-                    "This reply mixes pending virtual-filesystem changes with disk content: lines marked (pending) are not on disk yet. Run the file_sync tool to persist them."))))))
+         (gptel-yatools-search--grep-body regexp directory page files collected)
+         :provenance (if any-pending :mixed :disk))))))
 
 (defun gptel-yatools-search--grep-body (regexp directory page files walk)
   "Return the body of a `grep' reply, given what the search found.
@@ -1173,10 +1168,8 @@ REGEXP is what was asked for, DIRECTORY where the walk started, PAGE what
 `gptel-yatools-search--grep-collect' ordered them, and WALK what
 `gptel-yatools-search--collect' reported.
 
-Every count in the summary is the page's own.  A reply that shows 200 lines
-and then calls them 202, or that says the cap applies only to this call while
-silently dropping the files it never reached, answers a question nobody
-asked."
+The summary's counts are the page's own, and `:ceiling' falls back on
+`gptel-yatools-search-max-file-size' when WALK states none."
   (let ((lines (plist-get page :lines))
         (skipped (gptel-yatools-search--skipped-sentence
                   (plist-get walk :skipped)

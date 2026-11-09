@@ -206,6 +206,17 @@ rather than silently matching nothing."
       (let ((body (gptel-yatools-search-test--grep "on disk")))
         (should-not (string-match-p "a\\.el" body))))))
 
+(ert-deftest gptel-yatools-test-a-pending-grep-says-so-in-its-envelope ()
+  "The pending note is the provenance's own, not a per-tool string."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "on disk\n")))
+    (gptel-yatools-test--vfs
+      (gptel-yatools-vfs-put (gptel-yatools-test--root-file "a.el")
+                             "in the vfs needle\n")
+      (let ((envelope (funcall (gptel-yatools-test--tool "grep") "needle" nil)))
+        (should (string-match-p "exist only in the VFS" envelope))
+        (should (string-match-p "vfs=\"true\"" envelope))))))
+
 (ert-deftest gptel-yatools-test-grep-leaves-binary-files-alone ()
   "A file with a NUL byte is skipped rather than searched, and counted."
   (gptel-yatools-test--in-dir

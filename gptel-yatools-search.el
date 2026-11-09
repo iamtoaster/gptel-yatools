@@ -358,13 +358,10 @@ or nil when STRING ends before COUNT fields were read."
   "Return the record of STRING at POSITION, with BASE as its directory.
 
 The value is a cons of the record and the position just past it, or nil when
-STRING ends inside a record -- a chunk cut short, which the caller reports
-rather than guesses at.  A record is a plist of `:path', `:size', `:mtime'
-and, when the transfer carried them, `:text' with `:contents' set, or the
-closing `:summary' record carrying `:total' and `:reached'.
-
-STRING is bytes, so the size the script wrote and the substring taken here
-are in the same unit."
+STRING ends inside a record.  A record is a plist of `:path', `:size',
+`:mtime' and, when the transfer carried them, `:text' with `:contents' set,
+or the closing `:summary' record carrying `:total' and `:reached'.  STRING is
+bytes."
   (let* ((first (and (< position (length string))
                      (gptel-yatools-search--remote-field string position)))
          (path (car first)))
@@ -413,11 +410,7 @@ are in the same unit."
                       next)))))))))))
 
 (defun gptel-yatools-search--decode (bytes)
-  "Return BYTES decoded as UTF-8, keeping what will not decode.
-
-A file is matched as text, and a byte sequence that is not UTF-8 stays a
-raw byte rather than becoming an error: a search reads trees that contain
-every encoding, and refusing one file would cost the whole walk."
+  "Return BYTES decoded as UTF-8, keeping what will not decode as raw bytes."
   (decode-coding-string bytes 'utf-8))
 
 (defun gptel-yatools-search--remote-parse (output base)
@@ -450,12 +443,10 @@ that instead of presenting a partial chunk as the whole tree."
           :complete (and complete (not (null summary))))))
 
 (defun gptel-yatools-search--remote-ceiling ()
-  "Return the largest file a remote transfer will carry contents for.
+  "Return the largest file whose contents one transfer will carry.
 
-The job output buffer stops at `gptel-yatools--job-output-limit', and a
-record cut there loses the rest of its chunk, so a file has to be small
-enough to arrive whole.  The answer is the smaller of
-`gptel-yatools-search-max-file-size' and what one transfer can hold."
+The smaller of `gptel-yatools-search-max-file-size' and what
+`gptel-yatools--job-output-limit' leaves room for."
   (min gptel-yatools-search-max-file-size
        (max 1 (- gptel-yatools--job-output-limit 65536))))
 
@@ -465,13 +456,9 @@ enough to arrive whole.  The answer is the smaller of
 
 DIRECTORY is remote; START is how many files earlier chunks consumed, WANT
 how many this one may report, BUDGET the bytes of contents it may carry,
-CONTENTS whether contents are wanted at all, and TIMEOUT the seconds this
-chunk may take.  The value is what `gptel-yatools-search--remote-parse'
-returns, plus `:failed' when the chunk was killed or could not start.
-
-The output is read as bytes, because the parse is driven by lengths the
-script wrote in bytes.  A chunk killed at its deadline keeps what it
-reported: those records are whole, its last one is not."
+CONTENTS whether contents are wanted, TIMEOUT the seconds it may take.  The
+value is what `gptel-yatools-search--remote-parse' returns, plus `:failed'
+when the chunk was killed or could not start.  The output is read as bytes."
   (let* ((skip (mapconcat #'identity gptel-yatools-search-skip-directories " "))
          (outcome
           (gptel-yatools--run-process
@@ -505,15 +492,13 @@ reported: those records are whole, its last one is not."
   "Return what lies under DIRECTORY, a remote directory, in a few trips.
 
 CONTENTS says whether the bytes are wanted.  Chunks are asked for until the
-tree is exhausted or `gptel-yatools-search-seconds-limit' is spent, and the
+tree is exhausted or `gptel-yatools-search-seconds-limit' is spent.  The
 value is a plist of `:candidates', `:skipped', `:ceiling', `:files',
-`:stopped' and `:failed' -- the same shape a local walk answers in.
+`:stopped' and `:failed'.
 
-A record without contents in a contents-transfer was withheld for its size,
-and is reported rather than dropped.  A chunk cut short -- by the output
-limit or by its deadline -- keeps the whole records it did report and the
-next chunk starts after them, so a tree larger than one transfer is still
-covered; only a chunk that arrives with no records at all is a failure."
+A record without contents was withheld for its size, and is reported.  A
+chunk cut short keeps its whole records and the next one starts after them;
+a chunk with none at all moves past that file, up to sixteen times."
   (let* ((timeout (gptel-yatools--call-deadline))
          (start (float-time))
          (deadline (min (+ start gptel-yatools-search-seconds-limit)
@@ -729,10 +714,8 @@ run."
   "Return a sentence naming what SKIPPED, or nil when nothing was.
 
 SKIPPED is the list `gptel-yatools-search--collect' reports: plists of
-`:path', `:size' and `:reason'.  CEILING is the size that applied, which is
-not always `gptel-yatools-search-max-file-size': a remote transfer carries
-less.  Only the largest few are named, since the point is to hand the model
-a decision it can act on, not to list a tree."
+`:path', `:size' and `:reason'.  CEILING is the size that applied.  At most
+five files are named."
   (when skipped
     (let* ((unreadable (cl-remove-if-not (lambda (skip)
                                            (and (null (plist-get skip :path))
@@ -1002,13 +985,8 @@ than one enormous log."
 (defun gptel-yatools-search--line-matches (text regexp)
   "Return the lines of TEXT that match REGEXP, as (KEPT . TOTAL).
 
-KEPT is the matches themselves, as (LINE-NUMBER . LINE-TEXT) conses, at most
-`gptel-yatools-grep-matches-per-file-limit' of them.  TOTAL is how many the
-file holds, counted past the cap.
-
-Counting them all is what lets a capped reply rank files by how much they
-match rather than by how many lines fit, and say a real number instead of
-\"more than twenty\"."
+KEPT is at most `gptel-yatools-grep-matches-per-file-limit' conses of
+LINE-NUMBER and LINE-TEXT; TOTAL counts past that cap."
   (if (gptel-yatools-search--binary-p text)
       (cons nil 0)
     (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
@@ -1033,14 +1011,8 @@ match rather than by how many lines fit, and say a real number instead of
   "Return the per-file matches for REGEXP over CANDIDATES, densest first.
 
 Each value is a plist of `:path', the kept `:lines', the `:line-count' the
-file really holds, a `:more' flag for a file that holds more than were kept,
-and `:pending'.  Files with no match are left out at once.
-
-The order is by `:line-count', descending, with the path breaking ties.  The
-walk visits files in whatever order the filesystem reports, which is not an
-order at all: ranking by density is what lets a capped reply keep the files
-most likely to answer the question, rather than whichever ones happened to be
-visited before the cap was reached."
+file holds, a `:more' flag, and `:pending'.  Files with no match are left
+out.  Ties are broken by path."
   (let ((found nil))
     (dolist (candidate candidates)
       (let ((text (plist-get candidate :text)))
@@ -1067,10 +1039,8 @@ visited before the cap was reached."
 (defun gptel-yatools-search--grep-lines (files limit)
   "Return the reply lines of FILES, keeping exactly LIMIT of them.
 
-FILES is what `gptel-yatools-search--grep-collect' returns.  A file is cut
-in the middle rather than dropped whole when the limit falls inside it,
-which is what makes the page land exactly on LIMIT: a reply that says it
-shows 200 lines has to show 200.
+FILES is what `gptel-yatools-search--grep-collect' returns.  The file the
+limit falls inside is cut rather than dropped whole.
 
 The value is a plist of `:lines', `:files' (how many contributed one),
 `:matched-files' (how many had any) and `:partial' -- the file the page cut

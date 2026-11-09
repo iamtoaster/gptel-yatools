@@ -183,47 +183,127 @@ value `file-attribute-modification-time' returns."
         :size (file-attribute-size attributes)
         :mtime (file-attribute-modification-time attributes)))
 
-(cl-defun gptel-yatools-search--walk (directory visit)
-  "Call VISIT for each regular file under DIRECTORY.
+;;-------------------------------------------------------------------------
+;; What a search collected
+;;
+;; A search has two ways of producing its findings -- the walk below, and the
+;; courier for a workspace on another machine -- and one shape for them, so
+;; that matching, ranking, marking and reporting are written once.  This is
+;; that shape, and the three questions both producers ask of it: add a
+;; candidate, record a skip, and say whether to stop.
+;;-------------------------------------------------------------------------
+(cl-defstruct (gptel-yatools-search--collector
+               (:constructor gptel-yatools-search--make-collector))
+  "What one search found, and how far it got.
+
+CANDIDATES are candidate plists, newest and largest as the producer made
+them.  SKIPPED are plists of `:path', `:reason' and `:size', or of
+`:reason' and `:count' for a producer that aggregates.  FILES counts what
+was visited, TOTAL may exceed it when a producer reports a larger count,
+CEILING is the size limit that applied, STOPPED is nil, `files', `seconds'
+or `failed', and FAILED is the reason a failure stopped the search."
+  (candidates nil)
+  (skipped nil)
+  (files 0)
+  (total 0)
+  (ceiling gptel-yatools-search-max-file-size)
+  (stopped nil)
+  (failed nil)
+  (started (float-time))
+  (deadline nil))
+
+(defun gptel-yatools-search--deadline (started)
+  "Return the time a search that began at STARTED must stop by.
+
+Whichever comes first: `gptel-yatools-search-seconds-limit' from STARTED,
+or the call's own deadline less a second to spare.  Outside a call the
+latter is `gptel-yatools-timeout'."
+  (min (+ started gptel-yatools-search-seconds-limit)
+       (- (+ started (gptel-yatools--call-deadline)) 1.0)))
+
+(defun gptel-yatools-search--collector-add (collector candidate)
+  "Add CANDIDATE to COLLECTOR, and count it visited."
+  (setf (gptel-yatools-search--collector-candidates collector)
+        (cons candidate
+              (gptel-yatools-search--collector-candidates collector)))
+  (setf (gptel-yatools-search--collector-files collector)
+        (1+ (gptel-yatools-search--collector-files collector)))
+  collector)
+
+(defun gptel-yatools-search--collector-replace-last (collector candidate)
+  "Replace the candidate most recently added to COLLECTOR with CANDIDATE."
+  (setcar (gptel-yatools-search--collector-candidates collector) candidate)
+  collector)
+
+(defun gptel-yatools-search--collector-skip (collector skip)
+  "Record SKIP, a plist of `:path', `:reason' and `:size', in COLLECTOR."
+  (setf (gptel-yatools-search--collector-skipped collector)
+        (cons skip (gptel-yatools-search--collector-skipped collector)))
+  collector)
+
+(defun gptel-yatools-search--collector-stop (collector)
+  "Set COLLECTOR's stop reason from what it has visited, and return it.
+
+Nil while there is room and time left, `files' once
+`gptel-yatools-search-file-limit' is reached, `seconds' once its deadline
+has passed."
+  (cond
+   ((>= (gptel-yatools-search--collector-files collector)
+        gptel-yatools-search-file-limit)
+    (setf (gptel-yatools-search--collector-stopped collector) 'files))
+   ((>= (float-time)
+        (gptel-yatools-search--collector-deadline collector))
+    (setf (gptel-yatools-search--collector-stopped collector) 'seconds)))
+  collector)
+
+(defun gptel-yatools-search--collector-result (collector)
+  "Return COLLECTOR as the plist a search's reply is built from.
+
+`:candidates', `:skipped', `:ceiling', `:files', `:stopped', `:failed'
+and `:seconds'."
+  (list :candidates (nreverse
+                     (gptel-yatools-search--collector-candidates collector))
+        :skipped (nreverse (gptel-yatools-search--collector-skipped collector))
+        :ceiling (gptel-yatools-search--collector-ceiling collector)
+        :files (max (gptel-yatools-search--collector-files collector)
+                    (gptel-yatools-search--collector-total collector))
+        :stopped (gptel-yatools-search--collector-stopped collector)
+        :failed (gptel-yatools-search--collector-failed collector)
+        :seconds (- (float-time)
+                    (gptel-yatools-search--collector-started collector))))
+
+(cl-defun gptel-yatools-search--walk (directory collector visit)
+  "Call VISIT for each regular file under DIRECTORY, filling COLLECTOR.
 
 VISIT receives one candidate plist, as `gptel-yatools-search--candidate'
 builds it.  Directories named in `gptel-yatools-search-skip-directories' are
 not descended into.
 
-Returns a plist of `:files' (how many were visited), `:stopped' (nil,
-`files' or `seconds') and `:seconds' (how long it took)."
-  (let* ((start (float-time))
-         (deadline (+ start gptel-yatools-search-seconds-limit))
-         (files 0)
-         (stopped nil))
-    (cl-labels
-        ((descend (dir)
-           (dolist (entry (gptel-yatools-search--entries dir))
-             (unless stopped
-               (let ((name (car entry))
-                     (attributes (cdr entry)))
-                 (cond
-                  ;; `directory-files-and-attributes' lists the directory
-                  ;; itself and its parent, which are two ways up the tree
-                  ;; rather than entries in it.
-                  ((member name '("." "..")))
-                  ((gptel-yatools-search--directory-p attributes)
-                   (unless (member name gptel-yatools-search-skip-directories)
-                     (descend (expand-file-name name dir))))
-                  ((gptel-yatools-search--regular-p name attributes dir)
-                   (setq files (1+ files))
-                   (funcall visit
-                            (gptel-yatools-search--candidate
-                             (expand-file-name name dir) attributes))
-                   (cond
-                    ((>= files gptel-yatools-search-file-limit)
-                     (setq stopped 'files))
-                    ((>= (float-time) deadline)
-                     (setq stopped 'seconds))))))))))
-      (descend (file-name-as-directory (expand-file-name directory))))
-    (list :files files
-          :stopped stopped
-          :seconds (- (float-time) start))))
+COLLECTOR is a `gptel-yatools-search--collector', and carries the deadline
+the walk stops at as well as the file count it stops after.  Returns
+COLLECTOR."
+  (cl-labels
+      ((descend (dir)
+         (dolist (entry (gptel-yatools-search--entries dir))
+           (unless (gptel-yatools-search--collector-stopped collector)
+             (let ((name (car entry))
+                   (attributes (cdr entry)))
+               (cond
+                ;; `directory-files-and-attributes' lists the directory
+                ;; itself and its parent, which are two ways up the tree
+                ;; rather than entries in it.
+                ((member name '("." "..")))
+                ((gptel-yatools-search--directory-p attributes)
+                 (unless (member name gptel-yatools-search-skip-directories)
+                   (descend (expand-file-name name dir))))
+                ((gptel-yatools-search--regular-p name attributes dir)
+                 (let ((candidate (gptel-yatools-search--candidate
+                                   (expand-file-name name dir) attributes)))
+                   (gptel-yatools-search--collector-add collector candidate)
+                   (funcall visit candidate))
+                 (gptel-yatools-search--collector-stop collector))))))))
+    (descend (file-name-as-directory (expand-file-name directory)))
+    collector))
 
 
 ;;-------------------------------------------------------------------------
@@ -492,67 +572,65 @@ when the chunk was killed or could not start.  The output is read as bytes."
   "Return what lies under DIRECTORY, a remote directory, in a few trips.
 
 CONTENTS says whether the bytes are wanted.  Chunks are asked for until the
-tree is exhausted or `gptel-yatools-search-seconds-limit' is spent.  The
-value is a plist of `:candidates', `:skipped', `:ceiling', `:files',
-`:stopped' and `:failed'.
+tree is exhausted or the collector's deadline is reached.
 
-A record without contents was withheld for its size, and is reported.  A
-chunk cut short keeps its whole records and the next one starts after them;
-a chunk with none at all moves past that file, up to sixteen times."
-  (let* ((timeout (gptel-yatools--call-deadline))
-         (start (float-time))
-         (deadline (min (+ start gptel-yatools-search-seconds-limit)
-                        (- (+ start timeout) 1.0)))
-         (candidates nil)
-         (skipped nil)
-         (files 0)
-         (total 0)
+A record without contents was withheld for its size, and is recorded as a
+skip.  A chunk cut short keeps its whole records and the next one starts
+after them; a chunk with none at all moves past that file, up to sixteen
+times."
+  (let* ((collector (gptel-yatools-search--make-collector))
+         (deadline (gptel-yatools-search--deadline
+                    (gptel-yatools-search--collector-started collector)))
          (hops 0)
-         (stopped nil)
-         (failed nil)
          (end nil))
-    (while (and (not end) (not stopped))
+    (setf (gptel-yatools-search--collector-deadline collector) deadline)
+    (while (and (not end)
+                (not (gptel-yatools-search--collector-stopped collector)))
       (let* ((remaining (max 1 (- deadline (float-time))))
              (chunk (gptel-yatools-search--remote-scan
-                     directory files
+                     directory (gptel-yatools-search--collector-files collector)
                      (if contents 0 gptel-yatools-search-remote-chunk-records)
                      gptel-yatools-search-remote-chunk-bytes
                      contents remaining))
              (records (plist-get chunk :records)))
-        (setq total (or (plist-get chunk :total) total))
+        (setf (gptel-yatools-search--collector-total collector)
+              (or (plist-get chunk :total)
+                  (gptel-yatools-search--collector-total collector)))
         (dolist (record records)
           (if (or (not contents) (plist-get record :contents))
-              (push record candidates)
-            (push (list :path (plist-get record :path)
-                        :reason (or (plist-get record :reason) :too-large)
-                        :size (plist-get record :size))
-                  skipped)))
-        (setq files (+ files (length records)))
+              (gptel-yatools-search--collector-add collector record)
+            (gptel-yatools-search--collector-skip
+             collector
+             (list :path (plist-get record :path)
+                   :reason (or (plist-get record :reason) :too-large)
+                   :size (plist-get record :size)))))
         (cond
          ((plist-get chunk :failed)
-          (setq failed (plist-get chunk :failed)
-                stopped 'failed))
+          (setf (gptel-yatools-search--collector-failed collector)
+                (plist-get chunk :failed)
+                (gptel-yatools-search--collector-stopped collector)
+                'failed))
          ((plist-get chunk :reached) (setq end t))
          ;; A chunk that framed nothing is one file that could not be read
          ;; whole -- a file that shrank, a device with a size, a host whose
          ;; `stat' lies.  Step over it rather than ending the search there.
          ((null records)
           (if (< hops 16)
-              (setq files (1+ files)
-                    hops (1+ hops))
-            (setq failed "the transfer from the remote host kept arriving incomplete"
-                  stopped 'failed)))
-         ((>= files gptel-yatools-search-file-limit) (setq stopped 'files))
-         ((>= (float-time) deadline) (setq stopped 'seconds)))))
+              (progn
+                (setf (gptel-yatools-search--collector-files collector)
+                      (1+ (gptel-yatools-search--collector-files collector)))
+                (setq hops (1+ hops)))
+            (setf (gptel-yatools-search--collector-failed collector)
+                  "the transfer from the remote host kept arriving incomplete"
+                  (gptel-yatools-search--collector-stopped collector)
+                  'failed)))
+         (t (gptel-yatools-search--collector-stop collector)))))
     (when (> hops 0)
-      (push (list :path nil :reason :unreadable :count hops) skipped))
-    (list :candidates (nreverse candidates)
-          :skipped (nreverse skipped)
-          :ceiling (gptel-yatools-search--remote-ceiling)
-          :files (max files total)
-          :stopped stopped
-          :failed failed
-          :seconds (- (float-time) start))))
+      (gptel-yatools-search--collector-skip
+       collector (list :path nil :reason :unreadable :count hops)))
+    (setf (gptel-yatools-search--collector-ceiling collector)
+          (gptel-yatools-search--remote-ceiling))
+    (gptel-yatools-search--collector-result collector)))
 
 
 ;;-------------------------------------------------------------------------
@@ -672,34 +750,34 @@ file is reached by the walk itself, and marked where it is merged."
 
 CONTENTS says whether each candidate carries its text.  The text is
 `gptel-yatools-vfs-read''s answer under `gptel-yatools-search-max-file-size';
-a file it does not answer with text is reported in `:skipped', with its
+a file it does not answer with text is recorded as a skip, with its
 `:reason' and `:size'.  A file the VFS shadows is read from disk twice."
-  (let* ((candidates nil)
-         (skipped nil)
-         (walk (gptel-yatools-search--walk
-                directory
-                (lambda (candidate)
-                  (let ((path (plist-get candidate :path)))
-                    (if (not contents)
-                        (push candidate candidates)
-                      (let* ((read (gptel-yatools-vfs-read
-                                    path nil gptel-yatools-search-max-file-size))
-                             (kind (plist-get read :kind)))
-                        (if (eq kind :text)
-                            (push (plist-put (copy-sequence candidate)
-                                             :text (plist-get read :text))
-                                  candidates)
-                          (push (list :path path
-                                      :reason kind
-                                      :size (or (plist-get read :size)
-                                                (plist-get candidate :size)))
-                                skipped)))))))))
-    (list :candidates (nreverse candidates)
-          :skipped (nreverse skipped)
-          :ceiling gptel-yatools-search-max-file-size
-          :files (plist-get walk :files)
-          :stopped (plist-get walk :stopped)
-          :seconds (plist-get walk :seconds))))
+  (let ((collector (gptel-yatools-search--make-collector)))
+    (setf (gptel-yatools-search--collector-deadline collector)
+          (gptel-yatools-search--deadline
+           (gptel-yatools-search--collector-started collector)))
+    (gptel-yatools-search--walk
+     directory collector
+     (lambda (candidate)
+       (when contents
+         (let* ((path (plist-get candidate :path))
+                (read (gptel-yatools-vfs-read
+                       path nil gptel-yatools-search-max-file-size))
+                (kind (plist-get read :kind)))
+           (cond
+            ((eq kind :text)
+             (gptel-yatools-search--collector-replace-last
+              collector
+              (plist-put (copy-sequence candidate)
+                         :text (plist-get read :text))))
+            (t
+             (gptel-yatools-search--collector-skip
+              collector
+              (list :path path
+                    :reason kind
+                    :size (or (plist-get read :size)
+                              (plist-get candidate :size))))))))))
+    (gptel-yatools-search--collector-result collector)))
 
 (defun gptel-yatools-search--collect (directory contents)
   "Return what lies under DIRECTORY, saying how far the search got.

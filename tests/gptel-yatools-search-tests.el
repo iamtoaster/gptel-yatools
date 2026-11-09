@@ -235,6 +235,27 @@ rather than silently matching nothing."
           (should (string-match-p "were not searched because they are not regular files"
                                   body)))))))
 
+(ert-deftest gptel-yatools-test-search-deadline-is-the-earlier-of-two-limits ()
+  "Both budgets end a search, and the call's own is the nearer one."
+  (let ((gptel-yatools-search-seconds-limit 5.0)
+        (gptel-yatools-timeout 100))
+    (should (< (abs (- (gptel-yatools-search--deadline 0.0) 5.0)) 0.001)))
+  (let ((gptel-yatools-search-seconds-limit 500.0)
+        (gptel-yatools-timeout 10))
+    ;; The call's deadline less a second to spare.
+    (should (< (abs (- (gptel-yatools-search--deadline 0.0) 9.0)) 0.001))))
+
+(ert-deftest gptel-yatools-test-local-search-stops-on-its-seconds-budget ()
+  "A local walk spends the same budget a remote one does, and says so."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "needle\n")
+                                       ("b.el" . "needle\n")))
+    (gptel-yatools-test--vfs
+      (let* ((gptel-yatools-search-seconds-limit -1)
+             (body (gptel-yatools-search-test--glob "*")))
+        (should (string-match-p "Stopped after" body))
+        (should (string-match-p "seconds" body))))))
+
 ;;;; 3. A workspace on another machine
 
 (defun gptel-yatools-search-test--remote-tree (files)

@@ -444,6 +444,31 @@ default, so a buffer with a buffer-local value keeps it."
                      (1+ gptel-yatools--output-line-limit))
              (gptel-yatools--truncate longer)))))
 
+(ert-deftest gptel-yatools-test-a-header-line-label-is-one-button ()
+  "A label is propertized once, and its help-echo is the click's own text."
+  (let ((label (gptel-yatools--header-line-button
+                "[Things: 2]" (lambda (&rest _) (message "two things"))
+                "2 things here; click to list them")))
+    (should (stringp label))
+    (should (equal (substring-no-properties label) "[Things: 2]"))
+    (should (get-text-property 0 'mouse-face label))
+    (should (equal (get-text-property 0 'help-echo label)
+                   "2 things here; click to list them"))))
+
+(ert-deftest gptel-yatools-test-counted-pluralises ()
+  "One noun is singular, none and many are not."
+  (should (equal (gptel-yatools--counted 0 "file") "0 files"))
+  (should (equal (gptel-yatools--counted 1 "file") "1 file"))
+  (should (equal (gptel-yatools--counted 2 "file") "2 files")))
+
+(ert-deftest gptel-yatools-test-registering-a-label-twice-adds-it-once ()
+  "Reloading a module must not double its label."
+  (let ((gptel-yatools-header-line-extra-functions nil)
+        (fn (lambda () nil)))
+    (gptel-yatools-register-header-line-label fn)
+    (gptel-yatools-register-header-line-label fn)
+    (should (equal gptel-yatools-header-line-extra-functions (list fn)))))
+
 (ert-deftest gptel-yatools-test-map-lines-numbers-from-one ()
   "Every line reaches the function with its 1-based number."
   (let ((seen nil))

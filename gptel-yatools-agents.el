@@ -760,13 +760,13 @@ A failure while stopping the request does not prevent settling."
          (let ((job (gptel-yatools-subagent--record-job record)))
            (gptel-yatools-subagent--settle
             record 'timed-out
-            (format "Error: the subagent timed out after %d seconds and was stopped, after %d tool call%s.%s"
+            (format "Error: the subagent timed out after %d seconds and was stopped, after %s.%s"
                     (if job
                         (round (- (gptel-yatools-job-deadline job)
                                   (gptel-yatools-job-started job)))
                       0)
-                    (gptel-yatools-subagent--record-calls record)
-                    (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s")
+                    (gptel-yatools--counted
+                     (gptel-yatools-subagent--record-calls record) "tool call")
                     (if stop-error
                         (format " It could not be stopped cleanly: %s"
                                 (error-message-string stop-error))
@@ -774,13 +774,14 @@ A failure while stopping the request does not prevent settling."
         (_
          (gptel-yatools-subagent--settle
           record 'aborted
-          (format "Error: the subagent was %s before it finished, after %d tool call%s. Its partial output is not an answer."
+          (format "Error: the subagent was %s before it finished, after %s. Its partial output is not an answer."
                   (pcase cause
                     ('buffer-killed "killed")
                     ('cancelled "cancelled with its parent request")
                     (_ "aborted"))
-                  (gptel-yatools-subagent--record-calls record)
-                  (if (= (gptel-yatools-subagent--record-calls record) 1) "" "s"))))))))
+                  (gptel-yatools--counted
+                   (gptel-yatools-subagent--record-calls record)
+                   "tool call"))))))))
 
 ;;-------------------------------------------------------------------------
 ;; Drawing the transcript
@@ -1011,13 +1012,11 @@ gptel's process sentinel."
   (let ((paths (plist-get outcome :paths))
         (elapsed (plist-get outcome :elapsed)))
     (concat
-     (format "Subagent result (status: %s%s, %d turn%s, %d tool call%s)\n"
+     (format "Subagent result (status: %s%s, %s, %s)\n"
              (gptel-yatools-subagent--record-state record)
              (if elapsed (format ", %.1fs" elapsed) "")
-             (plist-get outcome :turns)
-             (if (= (plist-get outcome :turns) 1) "" "s")
-             (plist-get outcome :calls)
-             (if (= (plist-get outcome :calls) 1) "" "s"))
+             (gptel-yatools--counted (plist-get outcome :turns) "turn")
+             (gptel-yatools--counted (plist-get outcome :calls) "tool call"))
      (if paths
          (format "Files read: %s\n"
                  (mapconcat (lambda (path)
@@ -1282,20 +1281,18 @@ when there are none.  A child's own buffer says whose it is instead."
                                    (gptel-yatools-subagent--record-state record)
                                    (gptel-yatools-subagent--short-task record)))
                          records "; ")))
-            (propertize
-             (buttonize text
-                        (lambda (&rest _) (gptel-yatools-subagent-select)))
-             'mouse-face 'highlight
-             'help-echo (format "%s. Click to list them."
-                                (if (> running 0)
-                                    (format "%d subagent%s running: %s"
-                                            running (if (= running 1) "" "s") names)
-                                  (format "Finished subagents: %s" names)))))))))
+            (gptel-yatools--header-line-button
+             text
+             (lambda (&rest _) (gptel-yatools-subagent-select))
+             (format "%s. Click to list them."
+                     (if (> running 0)
+                         (format "%s running: %s"
+                                 (gptel-yatools--counted running "subagent")
+                                 names)
+                       (format "Finished subagents: %s" names)))))))))
 
-(unless (memq #'gptel-yatools-subagent--header-line-label
-              gptel-yatools-header-line-extra-functions)
-  (add-to-list 'gptel-yatools-header-line-extra-functions
-               #'gptel-yatools-subagent--header-line-label t))
+(gptel-yatools-register-header-line-label
+ #'gptel-yatools-subagent--header-line-label)
 
 ;;-------------------------------------------------------------------------
 ;; The picker
@@ -1401,12 +1398,11 @@ landing in a hidden buffer has, and clicking it goes back to the parent."
   (when-let* ((record gptel-yatools-subagent--record)
               (parent (gptel-yatools-subagent--record-parent record)))
     (when (buffer-live-p parent)
-      (propertize
-       (buttonize (format "[Subagent of %s]" (buffer-name parent))
-                  (lambda (&rest _)
-                    (when (buffer-live-p parent) (pop-to-buffer parent))))
-       'mouse-face 'highlight
-       'help-echo "Click to go back to the chat that started this subagent"))))
+      (gptel-yatools--header-line-button
+       (format "[Subagent of %s]" (buffer-name parent))
+       (lambda (&rest _)
+         (when (buffer-live-p parent) (pop-to-buffer parent)))
+       "Click to go back to the chat that started this subagent"))))
 
 ;;-------------------------------------------------------------------------
 ;; The tool

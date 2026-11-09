@@ -698,8 +698,8 @@ identifies one skill on its own."
      (delq nil
            (list
             (if skills
-                (format "%d skill%s available. Call this tool with `name' to load one, or with `name' and `file' to read a file it references."
-                        (length skills) (if (= (length skills) 1) "" "s"))
+                (format "%s available. Call this tool with `name' to load one, or with `name' and `file' to read a file it references."
+                        (gptel-yatools--counted (length skills) "skill"))
               (format "No skills found. Searched: %s"
                       (if roots
                           (mapconcat #'identity roots ", ")
@@ -1128,21 +1128,16 @@ Only the count is shown; the names are one click, or one `help-echo',
 away."
   (when-let* ((names (gptel-yatools-skills--attached-names)))
     (let ((count (length names)))
-      (propertize
-       (buttonize
-        (format "[Skills: %d]" count)
-        (lambda (&rest _)
-          (message "Skills sent with each request: %s"
-                   (mapconcat #'identity (gptel-yatools-skills--attached-names)
-                              ", "))))
-       'mouse-face 'highlight
-       'help-echo (format "%d skill%s attached to the gptel context; click to list them"
-                          count (if (= count 1) "" "s"))))))
+      (gptel-yatools--header-line-button
+       (format "[Skills: %d]" count)
+       (lambda (&rest _)
+         (message "Skills sent with each request: %s"
+                  (mapconcat #'identity (gptel-yatools-skills--attached-names)
+                             ", ")))
+       (format "%s attached to the gptel context; click to list them"
+               (gptel-yatools--counted count "skill"))))))
 
-(unless (memq #'gptel-yatools-skills--header-line-label
-              gptel-yatools-header-line-extra-functions)
-  (add-to-list 'gptel-yatools-header-line-extra-functions
-               #'gptel-yatools-skills--header-line-label t))
+(gptel-yatools-register-header-line-label #'gptel-yatools-skills--header-line-label)
 
 ;;-------------------------------------------------------------------------
 ;; Interactive browsing

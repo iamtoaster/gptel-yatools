@@ -497,7 +497,7 @@ Signals a `user-error' when there is nothing to stop, unless the buffer set
     (cond
      ((> count 0)
       (gptel-yatools--abort-request buffer)
-      (message "Cancelled %d tool call%s" count (if (= count 1) "" "s")))
+      (message "Cancelled %s" (gptel-yatools--counted count "tool call")))
      ((and (buffer-live-p buffer)
            (buffer-local-value 'gptel-yatools--cancel-function buffer))
       (with-current-buffer buffer
@@ -856,6 +856,24 @@ Each is called with no arguments while the header line is rendered and
 returns a propertized string, or nil to contribute nothing.  They run on
 every redisplay, so they must be cheap, and modules append rather than
 prepend.")
+
+(defun gptel-yatools-register-header-line-label (function)
+  "Add FUNCTION to `gptel-yatools-header-line-extra-functions' once."
+  (unless (memq function gptel-yatools-header-line-extra-functions)
+    (add-to-list 'gptel-yatools-header-line-extra-functions function t)))
+
+(defun gptel-yatools--header-line-button (text click help)
+  "Return TEXT as a header-line label that calls CLICK and explains itself.
+
+CLICK is called with no arguments when the label is clicked, and HELP is
+the `help-echo' text shown while point is over it."
+  (propertize (buttonize text click)
+              'mouse-face 'highlight
+              'help-echo help))
+
+(defun gptel-yatools--counted (count noun)
+  "Return COUNT and NOUN, pluralised: \"1 file\", \"3 files\"."
+  (format "%d %s%s" count noun (if (= count 1) "" "s")))
 
 ;;-------------------------------------------------------------------------
 ;; Paths

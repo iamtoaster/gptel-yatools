@@ -428,23 +428,17 @@ carries a note."
 Clicking the label echoes the pending paths."
   (let ((paths (gptel-yatools-vfs--header-line-paths)))
     (when paths
-      (propertize
-       (buttonize
-        (format "[VFS: %d file%s pending]"
-                (length paths) (if (= (length paths) 1) "" "s"))
-        (lambda (&rest _)
-          (message "Unsynced VFS changes: %s"
-                   (mapconcat #'gptel-yatools--display-path paths ", "))))
-       'mouse-face 'highlight
-       'help-echo (format "Pending VFS changes: %s"
-                          (mapconcat #'gptel-yatools--display-path paths ", "))))))
+      (gptel-yatools--header-line-button
+       (format "[VFS: %s pending]" (gptel-yatools--counted (length paths) "file"))
+       (lambda (&rest _)
+         (message "Unsynced VFS changes: %s"
+                  (mapconcat #'gptel-yatools--display-path paths ", ")))
+       (format "Pending VFS changes: %s"
+               (mapconcat #'gptel-yatools--display-path paths ", "))))))
 
 ;; Registered like any other module's label: the drawer in
 ;; `gptel-yatools.el' asks the registry.
-(unless (memq #'gptel-yatools-vfs--header-line-label
-              gptel-yatools-header-line-extra-functions)
-  (add-to-list 'gptel-yatools-header-line-extra-functions
-               #'gptel-yatools-vfs--header-line-label t))
+(gptel-yatools-register-header-line-label #'gptel-yatools-vfs--header-line-label)
 
 ;;-------------------------------------------------------------------------
 ;; Unified diff via external `diff'
@@ -1258,8 +1252,8 @@ Of the form \"2 hunks, +12 -3\", or \"no text change\"."
        ((string-prefix-p "-" line) (setq removed (1+ removed)))))
     (if (zerop hunks)
         "no text change"
-      (format "%d hunk%s, +%d -%d"
-              hunks (if (= hunks 1) "" "s") added removed))))
+      (format "%s, +%d -%d"
+              (gptel-yatools--counted hunks "hunk") added removed))))
 
 (defun gptel-yatools-write-diff--hunk-sections (body-start body-end)
   "Return hunk sections between BODY-START and BODY-END."

@@ -400,6 +400,23 @@ tree, so it is asked for in chunks: a chunk stops at a byte budget between
 records, and the next starts at the count the last one reported.
 _Avoid_: Remote agent, helper script, grep bridge
 
+**Skip reason**:
+Why a file the walk found was not searched: `:too-large` for one over
+`gptel-yatools-search-max-file-size`, `:special` for anything that is not a
+regular file, `:unreadable`.  A skip is reported, never silent, because a
+file dropped without a word reads as a file with no matches.  `glob` has no
+skip reasons: it reads names, so no file is too large to be found.
+_Avoid_: Excluded file, ignored file, filter
+
+**Page**:
+The lines a `grep` reply actually shows, cut to exactly
+`gptel-yatools-grep-match-limit` from the matches ranked by density -- a file
+is cut in the middle rather than dropped whole when the limit falls inside
+it.  Every count the reply states is the page's own, so the number of lines
+shown and the number reported are the same number.
+_Avoid_: Chunk (that is a remote transfer), truncation (that is the
+envelope's)
+
 **Search budget**:
 The limits that end a search before it ends itself: files visited,
 seconds spent, lines reported, lines per file, and bytes per remote

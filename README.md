@@ -213,11 +213,11 @@ instead of asking about each file across the connection.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `gptel-yatools-search-skip-directories` | `.git`, `node_modules`, `.venv` and similar | Directory names a search does not descend into, at any depth. |
-| `gptel-yatools-search-max-file-size` | 1 MiB | Largest file whose contents are read.  Bigger files are skipped and the count is reported. |
+| `gptel-yatools-search-max-file-size` | 1 MiB | Largest file whose contents are read.  Bigger files are skipped and named in the reply, and `glob` still finds them. |
 | `gptel-yatools-search-file-limit` | 4000 | Files one search may visit before it stops and says so. |
 | `gptel-yatools-search-seconds-limit` | 20 | Seconds one search may spend walking before it stops and says so. |
 | `gptel-yatools-glob-result-limit` | 200 | Paths one `glob` returns, newest first. |
-| `gptel-yatools-grep-match-limit` | 200 | Lines one `grep` returns. |
+| `gptel-yatools-grep-match-limit` | 200 | Lines one `grep` returns, taken from the files with the most matches. |
 | `gptel-yatools-grep-matches-per-file-limit` | 20 | Lines one file may contribute, so one busy file cannot crowd out the rest. |
 | `gptel-yatools-search-remote-chunk-bytes` | 512 KiB | Bytes of contents one transfer from a remote host may carry. |
 | `gptel-yatools-search-remote-chunk-records` | 2000 | Files one metadata-only transfer from a remote host may report. |
@@ -396,10 +396,23 @@ usually the one you want.
 
 `grep` matches lines by an Emacs regexp, case-insensitively unless the pattern
 contains a capital letter — `foo` finds `Foo`, `Foo` does not find `foo`.
-Results are `path:line:text`, and the reply says how many lines and files
-matched.  One file contributes at most twenty lines; the others are named with
-a pointer at `fetch_lines_from_file_using_regex`, which reads one known file
-whole and without a cap.
+Results are `path:line:text`, and the reply says how many lines it shows out of
+how many files matched.  One file contributes at most twenty lines; the others
+are named with a pointer at `fetch_lines_from_file_using_regex`, which reads
+one known file whole and without a cap.
+
+The twenty-lines-per-file and two-hundred-lines-per-call limits keep the
+files with **the most matches**, not the ones the tree happens to list first.
+That matters because `readdir` order is not an order: a cap applied to it
+would drop an arbitrary two dozen files, and the densest one is exactly what a
+capped answer must not lose.  The reply names the files it left out, so a
+short answer is never mistaken for a complete one.
+
+A file larger than `gptel-yatools-search-max-file-size` is not read, and the
+reply names it: `glob` still finds it, so a file too big to search can be
+opened deliberately with `execute_command`.  Naming a directory in `PATH`
+searches it even if it is on the skip list, which is how `.git/config` or
+`.github/workflows` is searched on purpose.
 
 Both search the **VFS as well as disk**, exactly as `read_path` reads it: a
 file you just wrote with `write_file` is found before it is synced, and a line

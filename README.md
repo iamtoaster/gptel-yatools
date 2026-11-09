@@ -4,8 +4,8 @@ Extra [gptel](https://github.com/karthink/gptel) tools — "yet another tools".
 
 `gptel-yatools` gives a gptel model a small, **buffer-local virtual
 filesystem** layered over the real one, plus the tools a coding assistant
-needs to work in it: workspace-relative paths, line-addressed reads, regexp
-search, shell commands, Agent Skills and PlantUML diagrams.
+needs to work in it: workspace-relative paths, line-addressed reads, file and
+line search, shell commands, Agent Skills and PlantUML diagrams.
 
 Writes go through the virtual filesystem: the model's changes are buffered,
 shown to you as a unified diff, and only then written to disk.  Reads see
@@ -204,6 +204,28 @@ the model still has to call `file_sync`.  Overwriting a file that changed on
 disk since it was read is confirmed separately, per call, and is not covered
 by this setting.
 
+### Search
+
+`glob` and `grep` walk the workspace themselves, in Elisp: no `rg`, no `fd`,
+nothing to install.  On a remote workspace they run one script on the host
+instead of asking about each file across the connection.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `gptel-yatools-search-skip-directories` | `.git`, `node_modules`, `.venv` and similar | Directory names a search does not descend into, at any depth. |
+| `gptel-yatools-search-max-file-size` | 1 MiB | Largest file whose contents are read.  Bigger files are skipped and the count is reported. |
+| `gptel-yatools-search-file-limit` | 4000 | Files one search may visit before it stops and says so. |
+| `gptel-yatools-search-seconds-limit` | 20 | Seconds one search may spend walking before it stops and says so. |
+| `gptel-yatools-glob-result-limit` | 200 | Paths one `glob` returns, newest first. |
+| `gptel-yatools-grep-match-limit` | 200 | Lines one `grep` returns. |
+| `gptel-yatools-grep-matches-per-file-limit` | 20 | Lines one file may contribute, so one busy file cannot crowd out the rest. |
+| `gptel-yatools-search-remote-chunk-bytes` | 512 KiB | Bytes of contents one transfer from a remote host may carry. |
+| `gptel-yatools-search-remote-chunk-records` | 2000 | Files one metadata-only transfer from a remote host may report. |
+
+Every limit ends in a sentence the model is told, so a partial answer is never
+mistaken for a complete one.  `.gitignore` is not consulted: the skip list is
+explicit, and a directory you need skipped is a name to add to it.
+
 ### Skills
 
 | Option | Default | Meaning |
@@ -308,7 +330,9 @@ child running until its deadline, so either retry it or stop it.
 | --- | --- | --- |
 | `read_path` | filesystem | Read a file, or list a directory; pending VFS copies win over disk.  An image the model can see is attached to the conversation instead of being read as text. |
 | `read_file_from_offset` | filesystem | Read `lines` lines starting at a 1-based `offset`. |
-| `fetch_lines_from_file_using_regex` | filesystem | Return matching lines, each prefixed with its line number. |
+| `fetch_lines_from_file_using_regex` | filesystem | Return matching lines of **one known file**, each prefixed with its line number.  Uncapped. |
+| `glob` | filesystem | Find files by a shell wildcard (`*.el`, `src/**/*.c`), newest first.  Does not need the path in advance. |
+| `grep` | filesystem | Find lines by an Emacs regexp anywhere in a tree, case-insensitively unless the pattern has a capital. |
 | `write_file` | filesystem | Replace a file's contents **in the VFS**; the disk is not touched until `file_sync`. |
 | `write_file_diff` | filesystem | Replace one exact occurrence of `old_string` with `new_string`, in the VFS. |
 | `file_sync` | filesystem | Write pending changes to disk, after showing the diff for review. |
@@ -357,6 +381,41 @@ through a proxy may not be in that table at all.
 and <kbd>S-TAB</kbd> folds or unfolds every file.  Each file is headed by its
 path and how much moved (`+12 -3`), so a folded file still says what it
 changes, and the body is the same text `vfs_diff` shows the model.
+
+### Search
+
+A model that does not know the tree can only guess a path, and a guess costs
+a failed call and a retry.  `glob` and `grep` answer "where is it?" instead.
+
+`glob` matches file names by a shell wildcard.  A pattern with no slash in it
+matches the name at any depth, so `*.el` finds every Emacs Lisp file in the
+workspace; a pattern with a slash matches the path relative to the root, so
+`src/**/*.c` walks only that subtree.  Results are one path per line with its
+modification time, newest first, because the file you were just working on is
+usually the one you want.
+
+`grep` matches lines by an Emacs regexp, case-insensitively unless the pattern
+contains a capital letter — `foo` finds `Foo`, `Foo` does not find `foo`.
+Results are `path:line:text`, and the reply says how many lines and files
+matched.  One file contributes at most twenty lines; the others are named with
+a pointer at `fetch_lines_from_file_using_regex`, which reads one known file
+whole and without a cap.
+
+Both search the **VFS as well as disk**, exactly as `read_path` reads it: a
+file you just wrote with `write_file` is found before it is synced, and a line
+you just wrote is matched instead of the disk line it shadows.  Those results
+are marked `(pending)`, and the envelope's `vfs="true"` says the reply is not
+all from disk.  A search that ignored the VFS would tell the model its own
+file does not exist.
+
+Nothing here needs `ripgrep` or `fd`.  Locally, a directory is listed once and
+its entries are matched in Emacs, so the tools work on any machine Emacs runs
+on.  On a remote workspace that would be a network round trip per file, so one
+POSIX `sh` script walks the host and streams file metadata — and, for `grep`,
+file contents — back through a single process.  The script transports; Emacs
+still does the matching, which is what keeps one regexp dialect and one VFS
+rule on both sides of the connection.  A tree too large for one transfer is
+fetched in several, until the time budget runs out.
 
 ### Skills
 
@@ -454,8 +513,8 @@ it came from, not your attached files — reads what it needs, and replies.
 The reply comes back as that tool call's result.
 
 A child is a **reader**.  It gets `read_path`, `read_file_from_offset`,
-`fetch_lines_from_file_using_regex`, `read_workspace_root` and `skill`, and
-nothing else: it cannot write, cannot run a command, and cannot start another
+`fetch_lines_from_file_using_regex`, `glob`, `grep`, `read_workspace_root` and
+`skill`, and nothing else: it cannot write, cannot run a command, and cannot start another
 subagent.  That restriction is why nothing needs reviewing afterwards — there
 is nothing to lose.
 

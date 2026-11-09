@@ -354,6 +354,60 @@ shape, a script's indentation and a subagent's brief are what the user is
 judging.  Everything else invisible is still spelled out.
 _Avoid_: Confirmation prompt, tool-call renderer
 
+### Search
+
+**Search tool**:
+`glob` or `grep`: a tool that answers "where is it?" rather than reading a
+path the model already knows.  `glob` matches file names by a shell
+wildcard, `grep` matches lines by an Emacs regexp.  They exist because the
+other read tools need a path first, and a model that does not know the
+tree can only guess one.  A search sees the VFS as well as disk.
+_Avoid_: Finder, index, file search (that is what a user calls the
+feature, not what this package calls the tool)
+
+**Candidate**:
+One file a search has found, as the walk describes it: absolute path,
+size, modification time, and -- when the tool needs to match text -- the
+contents under `:text`.  A candidate the VFS holds is also marked
+`:pending`.  The walk produces candidates and knows nothing about what
+will be matched against them, which is why `glob`, `grep` and the courier
+all agree about what a file is.
+_Avoid_: Entry (that is a VFS entry), hit, record
+
+**Anchored pattern**:
+A `glob` pattern that contains a slash: it names a position in the tree
+and is matched against the path relative to the workspace root.  One that
+contains none is matched against the file name at any depth, which is
+what makes `*.el` useful in a tree whose shape the model does not know.
+_Avoid_: Pinned, full-path pattern, absolute pattern
+
+**Smart case**:
+`grep`'s case rule: the pattern matches case-insensitively unless it
+contains an uppercase letter, which is taken as the sign that the capital
+was meant.  It is the rule a model expects from the word "grep", and it
+needs no argument to say which it wanted.  `fetch_lines_from_file_using_regex`
+deliberately keeps Emacs's own rule and matches exactly, because it reads
+a file the caller already chose.
+_Avoid_: Auto case, insensitive search
+
+**Courier**:
+The `sh` script a search runs on a remote workspace's host: it walks the
+tree there and streams back file metadata, and contents for `grep`, as
+NUL-separated records.  It transports and never matches -- matching stays
+in Emacs, so one regexp dialect, one case rule and one VFS merge serve
+both a local and a remote workspace.  One process cannot carry a whole
+tree, so it is asked for in chunks: a chunk stops at a byte budget between
+records, and the next starts at the count the last one reported.
+_Avoid_: Remote agent, helper script, grep bridge
+
+**Search budget**:
+The limits that end a search before it ends itself: files visited,
+seconds spent, lines reported, lines per file, and bytes per remote
+transfer.  A search that hits one says which, and what to do about it,
+because a silently truncated search teaches the model that a file it
+needs does not exist.
+_Avoid_: Cutoff, quota, threshold
+
 ### Diagrams
 
 **Render token**:

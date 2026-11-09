@@ -2,8 +2,8 @@
 
 Extra [gptel](https://github.com/karthink/gptel) tools: a small,
 buffer-local **virtual filesystem** with a reviewed sync step, a shell
-runner, workspace paths, Agent Skills, inline PlantUML diagrams and a
-read-only child agent.
+runner, workspace paths, file and line search, Agent Skills, inline
+PlantUML diagrams and a read-only child agent.
 
 A tool body returns a `Result` (a body, its provenance and an optional
 context comment); one generated boundary per tool renders that into the
@@ -120,9 +120,11 @@ Four of them, each with a test that fails when a module reaches past it:
   `gptel-yatools-page`; sizing, truncation, escaping and the XML envelope
   stay in `common.el`.
 - **Process** — everything runs through `gptel-yatools--run-process`
-  (`common.el`, `:911`) with an explicit `:directory`.  A module calling
+  (`common.el:802`) with an explicit `:directory`.  A module calling
   `make-process` has left the seam.  A subprocess runs where its
-  artifacts live (ADR 0006).
+  artifacts live (ADR 0006).  A local search runs none; a remote search
+  asks the host for its tree with one script per chunk, and the script
+  transports rather than matches (ADR 0009).
 - **Job** — `gptel-yatools--make-job-live` (`common.el:656`) is the only
   place a job becomes live: registry, deadline timer, kill hook, status
   line.  A module that pushes into the registry, arms its own timer or
@@ -204,6 +206,13 @@ changing the rule.
 - **A disposable cache still needs a lifetime.**  The diagram cache is
   swept by age, on an idle timer, once a session; a sweep never runs on a
   tool call's path and never signals.
+- **A search sees the VFS, and says so.**  `glob` and `grep` match pending
+  text where the VFS holds it and find files the VFS alone holds, marking
+  both; a reply that used either is `:mixed`.  A search that read disk only
+  would tell the model its own file does not exist (ADR 0009).
+- **A budget is reported, never silent.**  Every search limit ends in a
+  sentence the model reads.  Truncating quietly teaches it that a file it
+  needs is not there, which is the failure those tools exist to end.
 - **Skills are read from disk only.**  A pending `SKILL.md` is invisible
   to discovery, so the model cannot author instructions that are
   authoritative before review.  `allowed-tools` is advisory and stays
@@ -231,9 +240,9 @@ changing the rule.
 
 - Names use the `gptel-yatools-test-` prefix.  Suites are split by
   subject: package glue and shell in `gptel-yatools-tests.el`, filesystem
-  in `-vfs-tests.el`, skills in `-skills-tests.el`, diagrams in
-  `-diagram-tests.el`, children in `-agents-tests.el`, images in
-  `-media-tests.el`.
+  in `-vfs-tests.el`, search in `-search-tests.el`, skills in
+  `-skills-tests.el`, diagrams in `-diagram-tests.el`, children in
+  `-agents-tests.el`, images in `-media-tests.el`.
 - Call tools through `gptel-yatools-test--tool`, which returns the
   generated boundary, so assertions see the envelope the model would.
   `gptel-yatools-test--should-be-enveloped` checks both tags and JSON
@@ -282,6 +291,18 @@ filesystem tools.
 `-with-text` `:899`, `-write` `:1054`, `-refusal` `:1683`, `-sync`
 `:2024`, `gptel-yatools-write-diff-mode` `:1310`, and the write policy
 defcustoms at `:950`.
+
+### Search — `gptel-yatools-search.el`
+
+`glob` and `grep`: the walk, the wildcard and smart-case dialects, the VFS
+merge, the budgets that keep a search inside a call, and the courier that
+does the same work on a remote host, one round trip per chunk.
+
+`gptel-yatools-search--walk` `:185`, `gptel-yatools-search--glob-regexp`
+`:475`, `gptel-yatools-search--collect` `:603`,
+`gptel-yatools-search--remote-script` `:258`,
+`gptel-yatools-search--remote-collect` `:423`; the tools at `:774` and
+`:975`.
 
 ### The shell — `gptel-yatools-shell.el`
 
@@ -348,8 +369,8 @@ extras, binds `C-c C-k`, loads the tool modules.
 
 - **Response** — `gptel-yatools--respond`, `gptel-yatools-page`
   (`common.el:1606`, `:2243`); crossed by every tool module.
-- **Process** — `gptel-yatools--run-process` (`common.el:911`); crossed by
-  `shell.el` and `diagram.el`.
+- **Process** — `gptel-yatools--run-process` (`common.el:802`); crossed by
+  `shell.el`, `diagram.el` and `search.el`.
 - **Job** — `gptel-yatools--make-job-live` (`common.el:656`); crossed by
   `shell.el` and `agents.el`.
 - **Path** — `gptel-yatools--resolve-path` (`common.el:1038`); crossed by
@@ -372,6 +393,8 @@ Read the one you are about to contradict.
 - `0007` — why there are two lists of write/sync checks.
 - `0008` — why an image is delivered twice: once to the request that asked
   for it, and once to the conversation.
+- `0009` — why a remote search runs a script that only transports, and why
+  no search writes a spill file.
 
 ## Before finishing
 

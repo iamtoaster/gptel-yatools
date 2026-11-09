@@ -88,6 +88,8 @@
   '("read_path"
     "read_file_from_offset"
     "fetch_lines_from_file_using_regex"
+    "glob"
+    "grep"
     "read_workspace_root"
     "skill")
   "The tools a child agent may use, by name.
@@ -619,7 +621,9 @@ for why the callback must stay off the filesystem."
       ;; Only the file-reading tools name a path in a way this can report.
       (when (and (member name '("read_path"
                                 "read_file_from_offset"
-                                "fetch_lines_from_file_using_regex"))
+                                "fetch_lines_from_file_using_regex"
+                                "glob"
+                                "grep"))
                  (gptel-yatools-subagent--path-recorded-p path))
         (unless (member path (gptel-yatools-subagent--record-paths record))
           (setf (gptel-yatools-subagent--record-paths record)

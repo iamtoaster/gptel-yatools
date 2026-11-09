@@ -186,11 +186,11 @@ value `file-attribute-modification-time' returns."
   "Call VISIT for each regular file under DIRECTORY.
 
 VISIT receives one candidate plist, as `gptel-yatools-search--candidate'
-builds it, and stops the walk by returning non-nil.  Directories named in
-`gptel-yatools-search-skip-directories' are not descended into.
+builds it.  Directories named in `gptel-yatools-search-skip-directories' are
+not descended into.
 
-Returns a plist of `:files' (how many were visited), `:stopped' (nil, or
-`files', `seconds' or `visit') and `:seconds' (how long it took)."
+Returns a plist of `:files' (how many were visited), `:stopped' (nil,
+`files' or `seconds') and `:seconds' (how long it took)."
   (let* ((start (float-time))
          (deadline (+ start gptel-yatools-search-seconds-limit))
          (files 0)
@@ -211,12 +211,10 @@ Returns a plist of `:files' (how many were visited), `:stopped' (nil, or
                      (descend (expand-file-name name dir))))
                   ((gptel-yatools-search--regular-p name attributes dir)
                    (setq files (1+ files))
-                   (when (funcall visit
-                                  (gptel-yatools-search--candidate
-                                   (expand-file-name name dir) attributes))
-                     (setq stopped 'visit))
+                   (funcall visit
+                            (gptel-yatools-search--candidate
+                             (expand-file-name name dir) attributes))
                    (cond
-                    (stopped)
                     ((>= files gptel-yatools-search-file-limit)
                      (setq stopped 'files))
                     ((>= (float-time) deadline)
@@ -648,7 +646,6 @@ STOPPED is what `gptel-yatools-search--walk' reported, FILES how many it
 visited and SECONDS how long it took."
   (pcase stopped
     ('nil nil)
-    ('visit nil)
     ('failed nil)
     ('files
      (format "Stopped after %d files, the `gptel-yatools-search-file-limit'. Results below are partial: pass PATH to search a smaller part of the tree."
@@ -869,9 +866,10 @@ whether more were left is reported separately by
 (defun gptel-yatools-search--grep-result (path text regexp pending)
   "Return the reply lines for PATH's TEXT that match REGEXP.
 
-PENDING non-nil marks every line as not yet on disk.  The value is a cons of the lines, each \"PATH:LINE:TEXT\", and a boolean
-saying the file holds more matches than those.  A pending entry's lines end
-in a tab and \"(pending)\", as a directory listing marks one."
+PENDING non-nil marks every line as not yet on disk.  The value is a cons
+of the lines, each \"PATH:LINE:TEXT\", and a boolean saying the file holds
+more matches than those.  A pending entry's lines end in a tab and
+\"(pending)\", as a directory listing marks one."
   (let* ((matches (gptel-yatools-search--line-matches text regexp))
          (more (and matches
                     (= (length matches) gptel-yatools-grep-matches-per-file-limit)

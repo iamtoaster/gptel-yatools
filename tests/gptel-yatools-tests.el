@@ -355,6 +355,7 @@ the just-compiled modules rather than the source ones."
                     (files '("gptel-yatools-common.el"
                              "gptel-yatools-media.el"
                              "gptel-yatools-vfs.el"
+                             "gptel-yatools-search.el"
                              "gptel-yatools-shell.el"
                              "gptel-yatools-skills.el"
                              "gptel-yatools.el")))
@@ -517,22 +518,20 @@ through the write itself, and the same question is asked again by
   (gptel-yatools-test--in-dir
     (with-temp-buffer
       (gptel-yatools-test--vfs
-        ;; Asked before anything is pending: a command is refused while the
-        ;; VFS holds changes, and this test is about how a path is written.
-        (let ((missing (funcall (gptel-yatools-test--tool "execute_command")
+        (funcall (gptel-yatools-test--tool "write_file") "p" "x\n")
+        (let ((ancestor (funcall (gptel-yatools-test--tool "write_file")
+                                 "p/child" "y\n"))
+              (missing (funcall (gptel-yatools-test--tool "execute_command")
                                 "true" "no/such"))
               (here (funcall (gptel-yatools-test--tool "execute_command")
                              "true")))
-          (should (string-match-p "does not exist: no/such" missing))
-          ;; The workspace root itself is ".", not an empty string.
-          (should (string-match-p "succeeded in \\. " here)))
-        (funcall (gptel-yatools-test--tool "write_file") "p" "x\n")
-        (let ((ancestor (funcall (gptel-yatools-test--tool "write_file")
-                                 "p/child" "y\n")))
           (should (string-match-p "cannot write p/child: ancestor p"
                                   ancestor))
           (should-not (string-match-p (regexp-quote default-directory)
-                                      ancestor)))))))
+                                      ancestor))
+          (should (string-match-p "does not exist: no/such" missing))
+          ;; The workspace root itself is ".", not an empty string.
+          (should (string-match-p "succeeded in \\. " here)))))))
 
 
 ;;;; 46b. One name means one file, whichever tool receives it
@@ -1542,9 +1541,9 @@ A module that calls `make-process' itself has reached past that seam."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
          (files '("gptel-yatools.el" "gptel-yatools-media.el"
-                  "gptel-yatools-vfs.el" "gptel-yatools-shell.el"
-                  "gptel-yatools-skills.el" "gptel-yatools-diagram.el"
-                  "gptel-yatools-agents.el"))
+                  "gptel-yatools-vfs.el" "gptel-yatools-search.el"
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
+                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))
@@ -1589,9 +1588,9 @@ the registry, a job's timer or the kill hook at all."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
          (files '("gptel-yatools.el" "gptel-yatools-media.el"
-                  "gptel-yatools-vfs.el" "gptel-yatools-shell.el"
-                  "gptel-yatools-skills.el" "gptel-yatools-diagram.el"
-                  "gptel-yatools-agents.el"))
+                  "gptel-yatools-vfs.el" "gptel-yatools-search.el"
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
+                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))
@@ -1897,33 +1896,12 @@ tells the model the work is done when nothing was written at all."
         (gptel-yatools-test--kill-request-buffer chat)
         (gptel-yatools-test--kill-request-buffer inspect)))))
 
-(ert-deftest gptel-yatools-test-command-refuses-while-the-vfs-has-pending-changes ()
-  "A command that would read stale disk content is refused, not warned about.
+(ert-deftest gptel-yatools-test-command-warns-about-request-buffer-vfs ()
+  "`execute_command' confirmed elsewhere must report the chat's VFS state.
 
-A warning arrives beside an output the model has already been given, so it
-reads the stale answer first and runs the command again afterwards.  Refusing
-before anything runs leaves it no answer to trust."
-  (gptel-yatools-test--in-dir
-    (let ((file (gptel-yatools-test--root-file "f.txt")))
-      (gptel-yatools-test--write file "orig\n")
-      (gptel-yatools-test--vfs
-        (gptel-yatools-vfs-put file "pending\n")
-        (let ((out (gptel-yatools-test--silencing-message
-                     (gptel-yatools-test--noninteractive
-                       (funcall (gptel-yatools-test--tool "execute_command")
-                                "touch made.txt")))))
-          (should (string-match-p "no command was run" out))
-          (should (string-match-p "f\\.txt" out))
-          (should (string-match-p "file_sync" out))
-          (should-not (file-exists-p
-                       (gptel-yatools-test--root-file "made.txt"))))))))
-
-(ert-deftest gptel-yatools-test-command-refusal-reads-the-request-buffer-vfs ()
-  "`execute_command' confirmed elsewhere must read the chat's VFS state.
-
-The refusal is decided from the buffer that owns the request.  Read from the
-wrong buffer it finds no pending changes and runs a command whose answer the
-model must not trust."
+The XML provenance tag promises the model that the command ran against
+disk and says whether pending VFS changes may explain the output.  Read
+from the wrong buffer it claims there are none."
   (gptel-yatools-test--in-dir
     (let ((file (gptel-yatools-test--root-file "f.txt"))
           (chat (gptel-yatools-test--request-buffer))
@@ -1939,7 +1917,7 @@ model must not trust."
                             (gptel-yatools-test--tool-spec "execute_command")
                             (list :command "true"))))))
               (should (string-match-p "vfs=\"true\"" out))
-              (should (string-match-p "no command was run" out))
+              (should (string-match-p "WARNING" out))
               (should (string-match-p "f.txt" out))))
         (gptel-yatools-test--kill-request-buffer chat)
         (gptel-yatools-test--kill-request-buffer inspect)))))
@@ -2644,9 +2622,9 @@ the budget is offered because `vfs_diff' has to page its own output."
   (let* ((root (file-name-directory (or (locate-library "gptel-yatools")
                                         "")))
          (files '("gptel-yatools.el" "gptel-yatools-media.el"
-                  "gptel-yatools-vfs.el" "gptel-yatools-shell.el"
-                  "gptel-yatools-skills.el" "gptel-yatools-diagram.el"
-                  "gptel-yatools-agents.el"))
+                  "gptel-yatools-vfs.el" "gptel-yatools-search.el"
+                  "gptel-yatools-shell.el" "gptel-yatools-skills.el"
+                  "gptel-yatools-diagram.el" "gptel-yatools-agents.el"))
          (offenders nil))
     (dolist (file files)
       (let ((path (expand-file-name file root)))

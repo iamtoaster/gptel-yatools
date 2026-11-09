@@ -2030,7 +2030,7 @@ tool reply, so the two cannot disagree."
   :name "fetch_lines_from_file_using_regex"
   :category "filesystem"
   :description
-  "Return lines from a file that match an Emacs regexp. Each match is prefixed with its 1-based line number. Pending VFS changes shadow disk content; the reply says which it came from. Binary files (containing NUL bytes) are reported, not searched."
+  "Return lines from a file that match an Emacs regexp. Each match is prefixed with its 1-based line number. Use this when you know which file to search and want every matching line of it: unlike the grep tool it does not walk the tree, is not capped, and matches the case exactly as written. Pending VFS changes shadow disk content; the reply says which it came from. Binary files (containing NUL bytes) are reported, not searched."
   :args '((:name "path"
                  :type string
                  :description "File path to search.")

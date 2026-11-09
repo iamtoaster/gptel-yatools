@@ -844,6 +844,13 @@ gptel finishing its reply."
             (accept-process-output nil 0.05))))
       (should (gptel-yatools-subagent--record-detached record))
       (should-not (memq record gptel-yatools-subagent--records))
+      ;; Detaching takes the hooks off, so the adopted buffer is no longer
+      ;; watched by the module that made it.
+      (with-current-buffer child
+        (should-not (memq #'gptel-yatools-subagent--buffer-killed-handler
+                          kill-buffer-hook))
+        (should-not (memq #'gptel-yatools-subagent--buffer-changed-handler
+                          after-change-functions)))
       (should asked))))
 
 (ert-deftest gptel-yatools-test-subagent-rename-keeps-the-name-on-empty ()

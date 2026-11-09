@@ -319,10 +319,10 @@ never had the tools for."
 (defvar-local gptel-yatools-subagent--inserting nil
   "Non-nil while this module is inserting into a child buffer.
 
-`inhibit-read-only' suppresses the read-only check, and nothing else -- so
-jit-lock and gptel's own change functions keep working.  This flag is what
-tells the module's edit detector that a change was ours rather than the
-user taking the child over.")
+Tells the module's edit detector that a change was ours rather than the
+user taking the child over.  Binding `inhibit-read-only' suppresses the
+read-only check and nothing else, so jit-lock and gptel's own change
+functions keep working.")
 
 (defvar-local gptel-yatools-subagent--settling nil
   "Non-nil from the moment a child settles until the next user command.
@@ -346,11 +346,6 @@ first real edit is still seen.")
 
 (defun gptel-yatools-subagent--insert (buffer string)
   "Insert STRING at the end of BUFFER without the user's edit hook firing.
-
-Binding `inhibit-read-only' suppresses the read-only check and nothing
-else, so jit-lock and gptel's own `after-change-functions' keep working;
-the module's edit detector has to be silenced separately, because it would
-otherwise see our insert as the user taking the child over.
 
 Configs get this as `gptel-yatools-subagent-insert'."
   (with-current-buffer buffer
@@ -383,6 +378,32 @@ again by `gptel-yatools-subagent-retry', because settling clears it."
       (with-current-buffer buffer
         (setq-local gptel-yatools--cancel-function
                     (lambda () (gptel-yatools-subagent--abort record 'by-hand)))))))
+
+(defun gptel-yatools-subagent--buffer-killed-handler ()
+  "Abort this child when its buffer is killed, as `--buffer-killed' does."
+  (let ((record gptel-yatools-subagent--record))
+    (when record
+      (gptel-yatools-subagent--buffer-killed record))))
+
+(defun gptel-yatools-subagent--buffer-changed-handler (beg end before)
+  "Detach this child if the change from BEG to END before BEFORE is the user's."
+  (let ((record gptel-yatools-subagent--record))
+    (when record
+      (gptel-yatools-subagent--buffer-changed record beg end before))))
+
+(defun gptel-yatools-subagent--install-hooks ()
+  "Watch this child buffer for a kill and for a user edit."
+  (add-hook 'kill-buffer-hook
+            #'gptel-yatools-subagent--buffer-killed-handler nil t)
+  (add-hook 'after-change-functions
+            #'gptel-yatools-subagent--buffer-changed-handler nil t))
+
+(defun gptel-yatools-subagent--remove-hooks ()
+  "Stop watching this child buffer for a kill and for a user edit."
+  (remove-hook 'kill-buffer-hook
+               #'gptel-yatools-subagent--buffer-killed-handler t)
+  (remove-hook 'after-change-functions
+               #'gptel-yatools-subagent--buffer-changed-handler t))
 
 (defun gptel-yatools-subagent--make-buffer (record)
   "Create and return RECORD's child buffer, configured but not started.
@@ -437,13 +458,7 @@ read-only tool list and the same system prompt."
       (insert "\n\n")
       (setq buffer-read-only t)
       (setf (gptel-yatools-subagent--record-read-only record) t)
-      (add-hook 'kill-buffer-hook
-                (lambda () (gptel-yatools-subagent--buffer-killed record))
-                nil t)
-      (add-hook 'after-change-functions
-                (lambda (beg end before)
-                  (gptel-yatools-subagent--buffer-changed record beg end before))
-                nil t))
+      (gptel-yatools-subagent--install-hooks))
     buffer))
 
 (defun gptel-yatools-subagent--buffer-killed (record)
@@ -469,15 +484,6 @@ answer was delivered already, so killing the transcript is not a cancel."
 ;; rename is a question, so the common case -- fixing a typo in the task --
 ;; costs nothing when the answer is no.
 ;;-------------------------------------------------------------------------
-;;-------------------------------------------------------------------------
-;; The child buffer
-;;-------------------------------------------------------------------------
-(defvar-local gptel-yatools-subagent--inserting nil
-  "Non-nil while this module is inserting into a child buffer.
-
-`inhibit-read-only' would suppress the read-only check *and* jit-lock and
-gptel's own change functions, so our inserts bind both it and this.  The
-flag is what tells the edit detector that a change was ours.")
 (defun gptel-yatools-subagent--buffer-changed (record beg end _before)
   "Detach RECORD's child if the user has just edited its buffer.
 
@@ -507,13 +513,7 @@ parent's transcript, so killing the parent must not destroy it."
   (let ((buffer (gptel-yatools-subagent--record-buffer record)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (remove-hook 'kill-buffer-hook
-                     (lambda () (gptel-yatools-subagent--buffer-killed record))
-                     t)
-        (remove-hook 'after-change-functions
-                     (lambda (beg end before)
-                       (gptel-yatools-subagent--buffer-changed record beg end before))
-                     t)
+        (gptel-yatools-subagent--remove-hooks)
         ;; The child's own cancel function names work that is over.
         (setq-local gptel-yatools--cancel-function nil)
         ;; The minibuffer must not be entered from inside

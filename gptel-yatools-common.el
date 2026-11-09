@@ -1136,7 +1136,7 @@ Text with neither is returned unchanged."
   (let ((s (if (multibyte-string-p string)
                string
              (string-to-multibyte string))))
-    (gptel-yatools--escape-invisible-chars
+    (gptel-yatools--escape-chars
      (if (null (string-match-p gptel-yatools--raw-byte-regexp s))
          s
        (let (parts)
@@ -1146,16 +1146,8 @@ Text with neither is returned unchanged."
                        (format "\\x%02x" (logand c #xFF))
                      (char-to-string c))
                    parts)))
-         (apply #'concat (nreverse parts)))))))
-
-(defun gptel-yatools--escape-invisible-chars (string)
-  "Return STRING with bidi and zero-width characters written as <U+XXXX>."
-  (if (null (string-match-p gptel-yatools--invisible-char-regexp string))
-      string
-    (replace-regexp-in-string
-     gptel-yatools--invisible-char-regexp
-     (lambda (m) (format "<U+%04X>" (string-to-char m)))
-     string t t)))
+         (apply #'concat (nreverse parts))))
+     gptel-yatools--invisible-char-regexp)))
 
 
 (defun gptel-yatools--hard-cut (string limit)

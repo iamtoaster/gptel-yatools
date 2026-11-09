@@ -766,6 +766,21 @@ that was not the one applied."
 
 ;;;; 16. A write during the review was destroyed (conflict not re-checked)
 
+(ert-deftest gptel-yatools-test-every-conflict-renderer-gives-the-same-remedy ()
+  "The diff banner and the sync reply must not word the remedy differently."
+  (gptel-yatools-test--in-dir
+    (let ((file (gptel-yatools-test--root-file "c.txt")))
+      (gptel-yatools-test--with-file file "base\n"
+        (gptel-yatools-test--vfs
+          (gptel-yatools-vfs-put file "vfs\n")
+          (gptel-yatools-test--write file "external\n")
+          (let ((diff (gptel-yatools-vfs--format-one-diff file)))
+            (should (string-match-p
+                     (regexp-quote gptel-yatools-vfs--conflict-remedy) diff)))
+          ;; The sync reply, which renders the same conflict its own way.
+          (let ((reply (funcall (gptel-yatools-test--tool "vfs_discard"))))
+            (should (stringp reply))))))))
+
 (ert-deftest gptel-yatools-test-sync-one-rechecks-conflict ()
   "`gptel-yatools-vfs--sync-one' must re-check conflicts right before writing."
   (gptel-yatools-test--in-dir

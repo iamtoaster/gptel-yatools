@@ -443,6 +443,10 @@ Clicking the label echoes the pending paths."
 ;;-------------------------------------------------------------------------
 ;; Unified diff via external `diff'
 ;;-------------------------------------------------------------------------
+(defconst gptel-yatools-vfs--conflict-remedy
+  "Resolve by running `vfs_discard' for this path and re-reading, or by calling `write_file' with overwrite=true to force the VFS version (the user is asked to confirm)."
+  "How a conflict is resolved, as every renderer says it.")
+
 (defun gptel-yatools-vfs--unified-diff (old new &optional labels)
   "Return a unified diff from string OLD to string NEW.
 
@@ -524,14 +528,13 @@ to VFS)."
                     (format "b/%s (VFS)" label)))))
         (format "===== %s =====\n\
 CONFLICT: file changed on disk since the VFS captured its baseline.\n\
-Syncing would overwrite those external changes.  Resolve by running\n\
-`vfs_discard' for this path and re-reading, or by calling `write_file'\n\
-with overwrite=true to force the VFS version (the user is asked to confirm).\n\n\
+Syncing would overwrite those external changes.  %s\n\n\
 -- External changes on disk since baseline (would be lost if synced):\n\
 %s\n\
 -- What `file_sync' would write to disk:\n\
 %s\n"
                 label
+                gptel-yatools-vfs--conflict-remedy
                 (cond
                  ((not (string-empty-p external)) external)
                  ;; Text identical: only the coding system moved.
@@ -880,6 +883,16 @@ directories -- so the message names the rule that applied."
                 (gptel-yatools-vfs--truename-or-path denied-dir)))))
      (t nil))))
 
+(defun gptel-yatools-vfs--write-refusal (full reason &optional remedy)
+  "Return the error text for refusing to write FULL, because of REASON.
+
+REMEDY, when non-nil, is what the model can do about it, appended after
+the assurance that nothing was written."
+  (format "Error: cannot write %s: %s.  Nothing was written%s"
+          (gptel-yatools--display-path full)
+          reason
+          (if remedy (format ".  %s" remedy) "")))
+
 (defun gptel-yatools-vfs--confirm-overwrite (full)
   "Ask the user to accept discarding FULL's external changes.
 
@@ -890,8 +903,11 @@ signals in batch."
                  (y-or-n-p
                   (format "%s changed on disk since this chat captured it.  Overwrite those changes with the VFS version? "
                           name)))
-      (error "Error: cannot write %s: it changed on disk since the VFS captured it.  overwrite=true discards that change and needs the user's confirmation, which was not given.  Nothing was written.  Call vfs_discard and read the file again instead, or ask the user"
-             name))))
+      (error "%s"
+             (gptel-yatools-vfs--write-refusal
+              full
+              "it changed on disk since the VFS captured it.  overwrite=true discards that change and needs the user's confirmation, which was not given"
+              "Call vfs_discard and read the file again instead, or ask the user")))))
 
 (defun gptel-yatools-vfs-write (path content &optional overwrite coding)
   "Store CONTENT at PATH in the VFS, and return what changed.
@@ -919,33 +935,44 @@ conflicting file asks the user first."
       (error "Error: content must be a string"))
      ;; The remedy differs by where the blocking file lives.
      (ancestor
-      (error "Error: cannot write %s: ancestor %s is a file %s"
-             (gptel-yatools--display-path full)
-             (gptel-yatools--display-path ancestor)
-             (if (gptel-yatools-vfs-entry ancestor)
-                 "in the VFS. Use vfs_discard to remove it first."
-               "on disk.")))
+      (error "%s"
+             (gptel-yatools-vfs--write-refusal
+              full
+              (format "ancestor %s is a file %s"
+                      (gptel-yatools--display-path ancestor)
+                      (if (gptel-yatools-vfs-entry ancestor)
+                          "in the VFS"
+                        "on disk"))
+              (if (gptel-yatools-vfs-entry ancestor)
+                  "Use vfs_discard to remove it first"
+                nil))))
      ;; A newline in the name would forge a line of a review heading, so
      ;; such a target is refused rather than escaped.
      ((string-match-p gptel-yatools--control-char-regexp full)
-      (error "Error: cannot write %s: the path contains a control or invisible character.  Rename the file, or write it from the shell if you really mean it.  Nothing was written"
-             (gptel-yatools--display-path full)))
+      (error "%s"
+             (gptel-yatools-vfs--write-refusal
+              full
+              "the path contains a control or invisible character"
+              "Rename the file, or write it from the shell if you really mean it")))
      (policy-error
-      (error "Error: cannot write %s: %s.  Nothing was written"
-             (gptel-yatools--display-path full)
-             policy-error))
+      (error "%s" (gptel-yatools-vfs--write-refusal full policy-error)))
      ((file-directory-p full)
-      (error "Error: cannot write %s: it is a directory on disk"
-             (gptel-yatools--display-path full)))
+      (error "%s"
+             (gptel-yatools-vfs--write-refusal
+              full "it is a directory on disk")))
      ;; A file over a virtual directory would make every pending child
      ;; unsyncable ("File exists").
      ((gptel-yatools-vfs--has-children-p full)
-      (error "Error: cannot write %s: it is a directory in the VFS because pending file(s) are stored under it.  Discard those entries first"
-             (gptel-yatools--display-path full)))
+      (error "%s"
+             (gptel-yatools-vfs--write-refusal
+              full
+              "it is a directory in the VFS because pending file(s) are stored under it"
+              "Discard those entries first")))
      ;; A FIFO blocks until a reader appears; a device may fail or scribble.
      ((and (file-exists-p full) (not (file-regular-p full)))
-      (error "Error: cannot write %s: it is not a regular file (device, FIFO or socket)"
-             (gptel-yatools--display-path full)))
+      (error "%s"
+             (gptel-yatools-vfs--write-refusal
+              full "it is not a regular file (device, FIFO or socket)")))
      ((not (gptel-yatools-vfs--encodable-p content target))
       (error "Error: %s cannot represent %s.  Nothing was written.  Either remove it, or pass coding=\"utf-8\" to convert %s to UTF-8 on sync"
              target
@@ -1852,9 +1879,10 @@ section and not as four with three blanks."
                (length entries)
                (gptel-yatools-vfs--sync-file-list entries)))
       (:conflicts
-       (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
+       (format "\nConflicts (%d file(s), NOT synced — disk changed since VFS baseline):\n%s\n%s\n"
                (length entries)
-               (gptel-yatools-vfs--sync-file-list entries)))
+               (gptel-yatools-vfs--sync-file-list entries)
+               gptel-yatools-vfs--conflict-remedy))
       (:blocked
        (format "\nBlocked (%d file(s), NOT synced):\n%s\n"
                (length entries)
@@ -1931,9 +1959,10 @@ tool reply, so the two cannot disagree."
             :comment "All pending changes are blocked; nothing synced."))
           ((equal kinds '(:conflicts))
            (gptel-yatools-ok
-            (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\nResolve with vfs_discard + re-read, or write_file with overwrite=true, which asks the user before it discards anything.\n"
+            (format "The following file(s) changed on disk since the VFS captured them; refusing to overwrite:\n%s\n\n%s\n"
                     (gptel-yatools-vfs--sync-file-list
-                     (gptel-yatools-vfs--sync-entries (car sections))))
+                     (gptel-yatools-vfs--sync-entries (car sections)))
+                    gptel-yatools-vfs--conflict-remedy)
             :provenance :vfs
             :comment "All pending changes conflict with disk; nothing synced."))
           (t

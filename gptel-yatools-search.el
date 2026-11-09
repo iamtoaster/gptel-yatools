@@ -252,6 +252,14 @@ Returns a plist of `:files' (how many were visited), `:stopped' (nil,
 ;; read by size rather than to a delimiter for the same reason: a NUL inside
 ;; a file is data, not the end of a record.
 ;;
+;; The output is read as bytes (`:coding binary'), so the sizes the script
+;; writes and the offsets the parser counts are in the same unit.  Decoded
+;; first, every non-ASCII file would shift the parse and desynchronise it.
+;;
+;; A symbolic link to a directory is not followed: a link pointing at an
+;; ancestor walks a tree that is not the one asked for, until the kernel
+;; refuses.
+;;
 ;; One process cannot carry a whole tree, so a chunk stops at a byte budget
 ;; and the next starts where it stopped.  A chunk that stopped because of the
 ;; budget always stops between records, so the count Emacs advances by is
@@ -268,7 +276,10 @@ walk() {
     [ -e \"$path\" ] || continue
     base=${path##*/}
     case \" $skips \" in *\" $base \"*) continue;; esac
-    if [ -d \"$path\" ]; then walk \"$path\"; continue; fi
+    if [ -d \"$path\" ]; then
+      if [ ! -h \"$path\" ]; then walk \"$path\"; fi
+      continue
+    fi
     [ -f \"$path\" ] || continue
     if [ \"$want\" -gt 0 ] && [ \"$emitted\" -ge \"$want\" ]; then stop=1; return; fi
     count=$((count+1))
@@ -324,15 +335,26 @@ terminator, or nil at the end of STRING."
 (defun gptel-yatools-search--remote-record (string position base)
   "Return the record of STRING at POSITION, with BASE as its directory.
 
-The value is a cons of the record and the position just past it, or nil at
-the end of STRING.  A record is a plist of `:path', `:size', `:mtime' and,
-when the transfer carried them, `:text' with `:contents' set."
+The value is a cons of the record and the position just past it, or nil
+when STRING ends inside a record -- a chunk cut short, which the caller
+reports rather than guesses at.  A record is a plist of `:path', `:size',
+`:mtime' and, when the transfer carried them, `:text' with `:contents' set.
+
+STRING is bytes, so the size the script wrote and the substring taken here
+are in the same unit."
   (let ((path-field (gptel-yatools-search--remote-field string position)))
     (when path-field
       (let* ((path (car path-field))
              (position (cdr path-field)))
         (if (string-prefix-p "#" path)
-            (cons (list :summary t) position)
+            (let* ((total (gptel-yatools-search--remote-field string position))
+                   (reached (and total
+                                 (gptel-yatools-search--remote-field
+                                  string (cdr total)))))
+              (cons (list :summary t
+                          :total (string-to-number (or (car total) "0"))
+                          :reached (equal (and reached (car reached)) "1"))
+                    (or (and reached (cdr reached)) (length string))))
           (let* ((size-field (gptel-yatools-search--remote-field string position))
                  (size (string-to-number (or (car size-field) "0")))
                  (position (cdr size-field))
@@ -342,63 +364,72 @@ when the transfer carried them, `:text' with `:contents' set."
                  (flag-field (gptel-yatools-search--remote-field string position))
                  (has-contents (equal (car flag-field) "1"))
                  (position (cdr flag-field))
-                 (full (expand-file-name (string-remove-prefix "./" path) base))
-                 (record (list :path full :size size :mtime mtime)))
+                 (record (list :path (expand-file-name
+                                      (string-remove-prefix "./" path) base)
+                               :size size :mtime mtime)))
             (cond
              ((not has-contents) (cons record position))
              ((> (+ position size) (length string)) nil)
              (t
               (let ((text (substring string position (+ position size)))
                     (after (+ position size)))
-                ;; The byte after the contents is the record's terminator.  A
-                ;; file that grew between the walk and the read has something
-                ;; else there, so the parse resynchronises on the next NUL
-                ;; instead of reading the rest of the chunk as one record.
+                ;; The byte after the contents is the record's terminator.
                 (unless (and (< after (length string))
                              (eq (aref string after) ?\0))
-                  (let ((next (string-search "\0" string after)))
-                    (setq after (if next (1+ next) (length string)))))
-                (when (and (< after (length string))
-                           (eq (aref string after) ?\0))
+                  (setq after (length string)))
+                (when (< after (length string))
                   (setq after (1+ after)))
-                (cons (plist-put (plist-put record :text text) :contents t)
+                (cons (plist-put (plist-put record :text
+                                            (gptel-yatools-search--decode text))
+                                 :contents t)
                       after))))))))))
+
+(defun gptel-yatools-search--decode (bytes)
+  "Return BYTES decoded as UTF-8, keeping what will not decode.
+
+A file is matched as text, and a byte sequence that is not UTF-8 stays a
+raw byte rather than becoming an error: a search reads trees that contain
+every encoding, and refusing one file would cost the whole walk."
+  (decode-coding-string bytes 'utf-8))
 
 (defun gptel-yatools-search--remote-parse (output base)
   "Return the records in OUTPUT, one remote chunk's bytes.
 
 BASE is the directory the script walked, which is prepended to the relative
-names the script reports.  The value is a cons of the records -- plists of
-`:path', `:size', `:mtime' and, when the transfer carried them, `:text' with
-`:contents' set -- and a plist of `:total' and `:reached' from the closing
-record.
+names the script reports.  The value is a plist of `:records', `:total',
+`:reached' and `:complete'.
 
-A record that does not parse ends the parse rather than being half read: a
-desynchronised stream is a bug worth seeing, not a record to guess at."
+`:complete' is nil when the parse ended inside a record -- a chunk cut short
+by the output limit, or a stream that desynchronised.  The caller reports
+that instead of presenting a partial chunk as the whole tree."
   (let ((position 0)
         (records nil)
         (summary nil)
+        (complete t)
         (base (file-name-as-directory base)))
     (while (and (< position (length output)) (not summary))
       (let ((parsed (gptel-yatools-search--remote-record output position base)))
         (if (null parsed)
-            (setq position (length output))
-          (let ((record (car parsed)))
-            (setq position (cdr parsed))
-            (if (plist-get record :summary)
-                ;; The closing record: how many files this chunk consumed, and
-                ;; whether the walk reached the end of the tree.
-                (let ((total (gptel-yatools-search--remote-field
-                              output position)))
-                  (let ((reached (and total
-                                      (gptel-yatools-search--remote-field
-                                       output (cdr total)))))
-                    (setq summary (list :total (string-to-number
-                                                (or (car total) "0"))
-                                        :reached (equal (car reached) "1")))))
-              (push record records))))))
-    (cons (nreverse records)
-          (or summary (list :total 0 :reached t)))))
+            (setq complete nil
+                  position (length output))
+          (setq position (cdr parsed))
+          (if (plist-get (car parsed) :summary)
+              (setq summary (car parsed))
+            (push (car parsed) records)))))
+    (list :records (nreverse records)
+          :total (if summary (plist-get summary :total) 0)
+          :reached (if summary (plist-get summary :reached) nil)
+          :complete (and complete (not (null summary))))))
+
+(defun gptel-yatools-search--remote-ceiling ()
+  "Return the largest file a remote transfer will carry contents for.
+
+The job output buffer stops at `gptel-yatools--job-output-limit', and a
+record cut there loses the rest of its chunk, so a file has to be small
+enough to arrive whole.  The answer is the smaller of
+`gptel-yatools-search-max-file-size' and what one transfer can hold."
+  (min gptel-yatools-search-max-file-size
+       (max 1 (- gptel-yatools--job-output-limit 65536))))
 
 (defun gptel-yatools-search--remote-scan (directory start want budget contents)
   "Return one chunk of DIRECTORY, walked on its own host.
@@ -406,7 +437,10 @@ desynchronised stream is a bug worth seeing, not a record to guess at."
 DIRECTORY is remote; START is how many files earlier chunks consumed, WANT
 how many this one may report, BUDGET the bytes of contents it may carry, and
 CONTENTS whether contents are wanted at all.  The value is what
-`gptel-yatools-search--remote-parse' returns."
+`gptel-yatools-search--remote-parse' returns.
+
+The output is read as bytes, because the parse is driven by lengths the
+script wrote in bytes."
   (let* ((skip (mapconcat #'identity gptel-yatools-search-skip-directories " "))
          (outcome
           (gptel-yatools--run-process
@@ -415,20 +449,22 @@ CONTENTS whether contents are wanted at all.  The value is what
                  (number-to-string start)
                  (number-to-string (max 0 want))
                  (number-to-string (max 1 budget))
-                 (number-to-string gptel-yatools-search-max-file-size)
+                 (number-to-string (gptel-yatools-search--remote-ceiling))
                  skip
                  (if contents "1" "0"))
-           :directory directory)))
+           :directory directory
+           :coding 'binary)))
     (if (eq (plist-get outcome :status) 'exited)
         (gptel-yatools-search--remote-parse
          (plist-get outcome :output) directory)
       ;; A walk that could not run is not a tree with nothing in it.
-      (cons nil
-            (list :total 0
-                  :reached nil
-                  :failed (if (eq (plist-get outcome :status) 'timed-out)
-                              "the search timed out on the remote host"
-                            (string-trim (plist-get outcome :output))))))))
+      (list :records nil
+            :total 0
+            :reached nil
+            :complete nil
+            :failed (if (eq (plist-get outcome :status) 'timed-out)
+                        "the search timed out on the remote host"
+                      (string-trim (plist-get outcome :output)))))))
 
 (defun gptel-yatools-search--remote-collect (directory contents)
   "Return what lies under DIRECTORY, a remote directory, in a few trips.
@@ -436,13 +472,12 @@ CONTENTS whether contents are wanted at all.  The value is what
 CONTENTS says whether the bytes are wanted.  Chunks are asked for until the
 tree is exhausted or `gptel-yatools-search-seconds-limit' is spent, and the
 value is a plist of `:candidates', `:skipped', `:files', `:stopped' and
-`:failed' -- the same shape a local walk answers in, so that a tool cannot
-tell a remote workspace from a local one except by what it reports when a
-limit bites.
+`:failed' -- the same shape a local walk answers in.
 
-A file whose contents the script withheld arrives without any, which in a
-contents-transfer means one thing: it was larger than
-`gptel-yatools-search-max-file-size'."
+A record without contents in a contents-transfer was withheld for its size,
+and is reported rather than dropped.  A chunk that ended inside a record is
+reported as a failure: what it did not reach is unknown, and saying so beats
+presenting half a tree as the whole of one."
   (let* ((timeout (gptel-yatools--call-deadline))
          (start (float-time))
          (deadline (min (+ start gptel-yatools-search-seconds-limit)
@@ -460,11 +495,13 @@ contents-transfer means one thing: it was larger than
                      (if contents 0 gptel-yatools-search-remote-chunk-records)
                      gptel-yatools-search-remote-chunk-bytes
                      contents))
-             (records (car chunk))
-             (summary (cdr chunk)))
-        (setq total (or (plist-get summary :total) total))
-        (when (plist-get summary :failed)
-          (setq failed (plist-get summary :failed)
+             (records (plist-get chunk :records)))
+        (setq total (or (plist-get chunk :total) total))
+        (when (plist-get chunk :failed)
+          (setq failed (plist-get chunk :failed)
+                stopped 'failed))
+        (unless (plist-get chunk :complete)
+          (setq failed "the transfer from the remote host was cut short"
                 stopped 'failed))
         (dolist (record records)
           (if (or (not contents) (plist-get record :contents))
@@ -476,8 +513,8 @@ contents-transfer means one thing: it was larger than
         (setq files (+ files (length records)))
         (cond
          (stopped nil)
-         ((null records) (setq end (if (plist-get summary :reached) t 'empty)))
-         ((plist-get summary :reached) (setq end t))
+         ((null records) (setq end t))
+         ((plist-get chunk :reached) (setq end t))
          ((>= files gptel-yatools-search-file-limit) (setq stopped 'files))
          ((>= (float-time) deadline) (setq stopped 'seconds)))))
     (list :candidates (nreverse candidates)
@@ -642,12 +679,14 @@ run."
       (gptel-yatools-search--remote-collect directory contents)
     (gptel-yatools-search--local-collect directory contents)))
 
-(defun gptel-yatools-search--skipped-sentence (skipped)
+(defun gptel-yatools-search--skipped-sentence (skipped ceiling)
   "Return a sentence naming what SKIPPED, or nil when nothing was.
 
 SKIPPED is the list `gptel-yatools-search--collect' reports: plists of
-`:path', `:size' and `:reason'.  Only the largest few are named, since the
-point is to hand the model a decision it can act on, not to list a tree."
+`:path', `:size' and `:reason'.  CEILING is the size that applied, which is
+not always `gptel-yatools-search-max-file-size': a remote transfer carries
+less.  Only the largest few are named, since the point is to hand the model
+a decision it can act on, not to list a tree."
   (when skipped
     (let* ((large (cl-remove-if-not (lambda (skip)
                                       (eq (plist-get skip :reason) :too-large))
@@ -661,8 +700,9 @@ point is to hand the model a decision it can act on, not to list a tree."
                                         (plist-get skip :size))))
                              shown ", ")))
       (when large
-        (format "%d file(s) were not searched because they are larger than `gptel-yatools-search-max-file-size' (in bytes): %s%s. Search one deliberately with execute_command, or call fetch_lines_from_file_using_regex on a file you know contains what you want."
+        (format "%d file(s) were not searched because they are larger than %s, the most this tool reads: %s%s. Search one deliberately with execute_command, or call fetch_lines_from_file_using_regex on a file you know contains what you want."
                 (length large)
+                (gptel-yatools-search--format-size ceiling)
                 names
                 (if (> (length large) (length shown)) ", and more" ""))))))
 
@@ -737,14 +777,14 @@ nothing, which matters for a path that has no file -- a pending entry."
       (substring path (length root))
     path))
 
-(defun gptel-yatools-search--glob-subject (path root anchored)
+(defun gptel-yatools-search--glob-subject (path directory anchored)
   "Return the part of PATH a `glob' pattern is matched against.
 
-ROOT is the workspace root and ANCHORED says whether the pattern names a
-position in the tree: then the whole relative path, else just the file
-name, which is what makes \"*.el\" work at every depth."
+DIRECTORY is the directory being searched and ANCHORED says whether the
+pattern names a position in the tree: then PATH relative to DIRECTORY, else
+just the file name, which is what makes \"*.el\" work at every depth."
   (if anchored
-      (gptel-yatools-search--relative path root)
+      (gptel-yatools-search--relative path directory)
     (file-name-nondirectory path)))
 
 (defun gptel-yatools-search--glob (pattern path)
@@ -752,14 +792,14 @@ name, which is what makes \"*.el\" work at every depth."
   (gptel-yatools--require-string pattern "pattern")
   (when (string-empty-p pattern)
     (error "Error: pattern must not be empty.  Pass a shell wildcard such as \"*.el\" or \"src/**/*.c\""))
-  (let* ((root (gptel-yatools--workspace-root))
-         (directory (gptel-yatools--resolve-path (or path "")))
+  (let* ((directory (file-name-as-directory
+                     (gptel-yatools--resolve-path (or path ""))))
          (regexp (gptel-yatools-search--glob-regexp pattern))
          (anchored (gptel-yatools-search--glob-anchored-p pattern))
          (match (lambda (full)
                   (string-match-p
                    regexp (gptel-yatools-search--glob-subject
-                           full root anchored)))))
+                           full directory anchored)))))
     (if (not (file-directory-p directory))
         (gptel-yatools-ok
          (format "Error: %s is not a directory.  Give PATH as a directory to search under, and PATTERN as the file names wanted."
@@ -928,9 +968,9 @@ match rather than by how many lines fit, and say a real number instead of
 (defun gptel-yatools-search--grep-collect (regexp candidates)
   "Return the per-file matches for REGEXP over CANDIDATES, densest first.
 
-Each value is a plist of `:path', `:lines' (the matches kept), `:line-count'
-(how many the file holds), `:more' (it holds more than were kept) and
-`:pending'.  Files with no match are left out.
+Each value is a plist of `:path', the kept `:lines', the `:line-count' the
+file really holds, a `:more' flag for a file that holds more than were kept,
+and `:pending'.  Files with no match are left out at once.
 
 The order is by `:line-count', descending, with the path breaking ties.  The
 walk visits files in whatever order the filesystem reports, which is not an
@@ -1023,6 +1063,8 @@ short and how many of its lines it kept, or nil."
                 :files (plist-get collected :files)
                 :seconds (plist-get collected :seconds)
                 :failed (plist-get collected :failed)
+                :ceiling (or (plist-get collected :ceiling)
+                             gptel-yatools-search-max-file-size)
                 :skipped (plist-get collected :skipped)))
          :provenance (if any-pending :mixed :disk)
          :comment (when any-pending
@@ -1042,7 +1084,9 @@ silently dropping the files it never reached, answers a question nobody
 asked."
   (let ((lines (plist-get page :lines))
         (skipped (gptel-yatools-search--skipped-sentence
-                  (plist-get walk :skipped)))
+                  (plist-get walk :skipped)
+                  (or (plist-get walk :ceiling)
+                      gptel-yatools-search-max-file-size)))
         (left-out (- (plist-get page :matched-files) (plist-get page :files))))
     (if (null lines)
         (format "No line under %s matches %S. Check the expression, or call glob to see what files are there.%s"

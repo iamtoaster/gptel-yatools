@@ -698,7 +698,7 @@ there would leave the command running on the host."
       (ignore-errors (delete-process process)))))
 
 (cl-defun gptel-yatools--spawn-process (argv &key directory timeout
-                                            result description)
+                                            result description coding)
   "Start ARGV in the background and return a `gptel-yatools-job'.
 
 ARGV is a list of strings: the program and its arguments, not a shell
@@ -712,6 +712,10 @@ RESULT is a function of the outcome plist returning the Result to report,
 DESCRIPTION names the work in the header line, and TIMEOUT is the budget in
 seconds, defaulting to the call's deadline less a margin so the kill lands
 inside it.
+
+CODING decodes the output, and nil keeps the default.  `binary' reads the
+bytes undecoded, which a caller parsing a byte protocol needs: an offset
+counted in characters does not match a length the program wrote in bytes.
 
 Returns without waiting: the sentinel reports the exit, and the deadline
 timer kills a process that does not finish."
@@ -757,6 +761,8 @@ timer kills a process that does not finish."
                 :filter #'gptel-yatools--job-filter
                 :noquery t
                 :sentinel #'gptel-yatools--job-sentinel)))
+          (when coding
+            (set-process-coding-system process coding coding))
           (setf (gptel-yatools-job-process job) process)
           (process-put process 'gptel-yatools-job job)
           (ignore-errors (process-send-eof process))
@@ -799,13 +805,13 @@ job through the `unwind-protect'."
       (unless done
         (gptel-yatools--job-abandon job)))))
 
-(cl-defun gptel-yatools--run-process (argv &key directory timeout)
+(cl-defun gptel-yatools--run-process (argv &key directory timeout coding)
   "Run ARGV under a deadline and return a plist describing what happened.
 
 ARGV is a list of strings: the program and its arguments, not a shell
 command.  DIRECTORY defaults to `default-directory', and TIMEOUT to the
 call's deadline, both in the sense `gptel-yatools--spawn-process' gives
-them.
+them.  CODING is that function's too: `binary' keeps the output as bytes.
 
 The answer is always a plist, never a signal:
 
@@ -819,7 +825,8 @@ remote host that is the remote one, killed through TRAMP.
 
 Starts the process with `gptel-yatools--spawn-process' and waits for it."
   (gptel-yatools--await-job
-   (gptel-yatools--spawn-process argv :directory directory :timeout timeout)))
+   (gptel-yatools--spawn-process argv :directory directory :timeout timeout
+                                 :coding coding)))
 
 (defmacro gptel-yatools--with-deadline-suspended (&rest body)
   "Run BODY without counting its time against the call's deadline.

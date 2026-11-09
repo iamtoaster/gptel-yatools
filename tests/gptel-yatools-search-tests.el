@@ -388,4 +388,76 @@ this is the tree the script sees when it walks \"\"."
           (should (string-match-p "busy\\.el: 30 matching line(s)" body))
           (should-not (string-match-p "than fit in this reply" body)))))))
 
+;;;; 6. A file's bytes are never parsed as anything but its bytes
+
+(ert-deftest gptel-yatools-test-grep-reads-past-a-file-of-accents ()
+  "Multi-byte content must not shift the transfer's offsets."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.txt" . "é")
+                                              ("z.txt" . "tokz z\n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep "tokz")))
+        (should (string-match-p "z\\.txt:1:tokz z" body))
+        (should (string-match-p "1 of 1 file(s)" body))
+        (should-not (string-match-p "not searched" body))))))
+
+(ert-deftest gptel-yatools-test-grep-invents-no-file-out-of-a-length ()
+  "A reply names only files that exist."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("é.txt" . "é")
+                                              ("z.txt" . "tokz z\n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--grep "tokz")))
+        (should-not (string-match-p "MiB" body))
+        (should-not (string-match-p "not searched" body))))))
+
+(ert-deftest gptel-yatools-test-grep-reports-a-transfer-that-was-cut-short ()
+  "A chunk missing its closing record is a failure, not a whole tree."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.txt" . "tokz\n")))
+    (gptel-yatools-test--vfs
+      ;; A record larger than one chunk can carry: the script withholds it
+      ;; and the reply must say so rather than pretend the tree was searched.
+      (let ((gptel-yatools-search-max-file-size 1048576)
+            (gptel-yatools-search-remote-chunk-bytes 1))
+        (let ((body (gptel-yatools-search-test--grep "tokz")))
+          (should (string-match-p "a\\.txt:1:tokz" body)))))))
+
+(ert-deftest gptel-yatools-test-search-says-which-limit-withheld-a-file ()
+  "The size reported is the one that applied, not a setting that did not."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("big.txt" . "0123456789ab")
+                                              ("small.txt" . "tokz\n")))
+    (gptel-yatools-test--vfs
+      ;; small.txt is 5 bytes, big.txt 12: one is read, the other named.
+      (let ((gptel-yatools-search-max-file-size 6))
+        (let ((body (gptel-yatools-search-test--grep "tokz")))
+          (should (string-match-p "small\\.txt:1:tokz" body))
+          (should (string-match-p "big\\.txt (12 bytes)" body))
+          (should (string-match-p "larger than 6 bytes" body)))))))
+
+(ert-deftest gptel-yatools-test-search-does-not-follow-a-symlinked-directory ()
+  "A link back up the tree is not walked, locally or on a host."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("top/a.el" . "tokz\n")))
+    (make-symbolic-link (gptel-yatools-test--root-file "top")
+                        (gptel-yatools-test--root-file "top/loop"))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--glob "*.el")))
+        (should (= 1 (length (split-string body "\n"))))
+        (should-not (string-match-p "loop" body))))))
+
+(ert-deftest gptel-yatools-test-glob-anchored-patterns-start-at-path ()
+  "A pattern with a slash is relative to the directory being searched."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("sub/deep/c.c" . "c")))
+    (gptel-yatools-test--vfs
+      (should (string-match-p "sub/deep/c\\.c"
+                              (gptel-yatools-search-test--glob "sub/**/*.c")))
+      (should (string-match-p "sub/deep/c\\.c"
+                              (gptel-yatools-search-test--glob "**/*.c" "sub")))
+      (should (string-match-p "sub/deep/c\\.c"
+                              (gptel-yatools-search-test--glob "deep/*.c"
+                                                               "sub"))))))
+
 (provide 'gptel-yatools-search-tests)

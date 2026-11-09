@@ -217,4 +217,70 @@ rather than silently matching nothing."
         (should (string-match-p "a\\.txt:1:" body))
         (should-not (string-match-p "bin\\.dat" body))))))
 
+;;;; 3. A workspace on another machine
+
+(defun gptel-yatools-search-test--remote-tree (files)
+  "Write FILES, an alist of relative path to content, on the stand-in host.
+
+The stand-in maps the host's root onto `gptel-yatools-test--remote-root', so
+this is the tree the script sees when it walks \"\"."
+  (dolist (pair files)
+    (let ((full (expand-file-name (car pair) gptel-yatools-test--remote-root)))
+      (make-directory (file-name-directory full) t)
+      (gptel-yatools-test--write full (cdr pair)))))
+
+(ert-deftest gptel-yatools-test-glob-searches-a-remote-workspace ()
+  "A remote tree is found without a round trip per file."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.el" . "a")
+                                              ("sub/b.el" . "b")
+                                              ("notes.txt" . "n")))
+    (gptel-yatools-test--vfs
+      (let ((body (gptel-yatools-search-test--glob "*.el")))
+        (should (string-match-p "a\\.el\t" body))
+        (should (string-match-p "sub/b\\.el\t" body))
+        (should-not (string-match-p "notes\\.txt" body))))))
+
+(ert-deftest gptel-yatools-test-grep-reads-a-remote-workspace-in-chunks ()
+  "Every file is searched even when one transfer cannot carry them all."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.el" . "needle one\n")
+                                              ("b.el" . "needle two\n")
+                                              ("c.el" . "needle three\n")))
+    (gptel-yatools-test--vfs
+      ;; A budget smaller than any file: each chunk can carry one, so the
+      ;; only way all three are reported is if the tool asks again.
+      (let ((gptel-yatools-search-remote-chunk-bytes 1))
+        (let ((body (gptel-yatools-search-test--grep "needle")))
+          (should (string-match-p "a\\.el:1:needle one" body))
+          (should (string-match-p "b\\.el:1:needle two" body))
+          (should (string-match-p "c\\.el:1:needle three" body))
+          (should (string-match-p "3 matching line(s) in 3 file(s)" body)))))))
+
+(ert-deftest gptel-yatools-test-glob-walks-a-remote-workspace-in-chunks ()
+  "A metadata transfer split into several chunks still lists every file."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.el" . "a")
+                                              ("b.el" . "b")
+                                              ("c.el" . "c")))
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-search-remote-chunk-records 1))
+        (let ((body (gptel-yatools-search-test--glob "*.el")))
+          (should (string-match-p "a\\.el\t" body))
+          (should (string-match-p "b\\.el\t" body))
+          (should (string-match-p "c\\.el\t" body)))))))
+
+(ert-deftest gptel-yatools-test-glob-searches-a-remote-workspace-in-one-trip ()
+  "A whole remote tree is walked by one process, not one question per file."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.el" . "a")
+                                              ("sub/b.el" . "b")
+                                              ("sub/deep/c.el" . "c")
+                                              ("d.zig" . "d")))
+    (gptel-yatools-test--vfs
+      (setq gptel-yatools-test--remote-process-args nil)
+      (let ((body (gptel-yatools-search-test--glob "*.el")))
+        (should (string-match-p "sub/deep/c\\.el\t" body))
+        (should (= 1 (length gptel-yatools-test--remote-process-args)))))))
+
 (provide 'gptel-yatools-search-tests)

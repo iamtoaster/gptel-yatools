@@ -228,6 +228,246 @@ Returns a plist of `:files' (how many were visited), `:stopped' (nil, or
 
 
 ;;-------------------------------------------------------------------------
+;; The courier: one round trip for a workspace on another machine
+;;
+;; Every question asked of a remote filesystem is a command and a wait, so
+;; the walk above would cost one round trip per file and take minutes.  This
+;; half does it the other way round: one `sh' script walks the host, in one
+;; process, and streams the answers back.
+;;
+;; The script is a courier, not a matcher.  It reports a path, a size, a
+;; modification time and -- when contents were wanted -- the bytes, and Emacs
+;; does the matching.  That is what keeps one regexp dialect and one VFS rule
+;; on both sides of the connection: a `grep -E' would be a second dialect to
+;; explain, a second case rule to get right, and a second matcher for the
+;; pending entries this side holds.
+;;
+;; It walks "." rather than a path it was given, because that is what travels
+;; correctly: a process on the host runs in its own directory, so "." means
+;; the same tree to the script as the file name means to Emacs, over TRAMP
+;; and over the stand-in handler the tests use.
+;;
+;; Records are NUL-separated -- path, size, modification time, contents -- so
+;; no file name, however strange, can forge one.  Contents are read by size
+;; rather than to a delimiter for the same reason: a NUL inside a file is
+;; data, not the end of a record.
+;;
+;; One process cannot carry a whole tree, so a chunk stops at a byte budget
+;; and the next starts where it stopped.  A chunk that stopped because of the
+;; budget always stops between records, so the count Emacs advances by is
+;; exact.
+;;-------------------------------------------------------------------------
+(defconst gptel-yatools-search--remote-script
+  "\
+exec 2>/dev/null
+start=$1 want=$2 budget=$3 maxsize=$4 skips=$5 contents=$6
+count=0 used=0 emitted=0 stop=0
+walk() {
+  for path in \"$1\"/* \"$1\"/.[!.]*; do
+    if [ \"$stop\" -eq 1 ]; then return; fi
+    [ -e \"$path\" ] || continue
+    base=${path##*/}
+    case \" $skips \" in *\" $base \"*) continue;; esac
+    if [ -d \"$path\" ]; then walk \"$path\"; continue; fi
+    [ -f \"$path\" ] || continue
+    if [ \"$want\" -gt 0 ] && [ \"$emitted\" -ge \"$want\" ]; then stop=1; return; fi
+    count=$((count+1))
+    [ \"$count\" -le \"$start\" ] && continue
+    size=$(wc -c < \"$path\") || size=0
+    case $size in ''|*[!0-9]*) size=0;; esac
+    mtime=$(stat -c %Y \"$path\" || stat -f %m \"$path\" || echo 0)
+    case $mtime in ''|*[!0-9]*) mtime=0;; esac
+    if [ \"$contents\" -eq 1 ] && [ \"$size\" -le \"$maxsize\" ]; then
+      cost=$((size + ${#path} + 32))
+      if [ \"$emitted\" -gt 0 ] && [ $((used + cost)) -gt \"$budget\" ]; then
+        stop=1; count=$((count-1)); return
+      fi
+      used=$((used + cost))
+      printf '%s\\000%s\\000%s\\000' \"$path\" \"$size\" \"$mtime\"
+      head -c \"$size\" \"$path\"
+      printf '\\000'
+    else
+      printf '%s\\000%s\\000%s\\000-\\000' \"$path\" \"$size\" \"$mtime\"
+    fi
+    emitted=$((emitted+1))
+  done
+}
+walk .
+if [ \"$stop\" -eq 0 ]; then reached=1; else reached=0; fi
+printf '#\\000%s\\000%s\\000' \"$count\" \"$reached\"
+"
+  "The script that walks a remote tree and streams what it finds.
+
+Positional arguments: the number of files already consumed, how many files
+this chunk may report, the byte budget for contents, the largest file whose
+contents are worth sending, the directory names to skip as a space-separated
+list, and 1 when contents are wanted.
+
+Every record is four NUL-terminated fields -- path, size, modification time,
+contents or \"-\" -- and the last record starts with \"#\": the number of
+files consumed by this chunk, and 1 when the walk reached the end of the
+tree.")
+
+(defun gptel-yatools-search--remote-field (string position)
+  "Return the NUL-terminated field of STRING at POSITION, as a cons.
+
+The car is the field's text and the cdr the position just past its
+terminator, or nil at the end of STRING."
+  (if (>= position (length string))
+      nil
+    (let ((end (string-search "\0" string position)))
+      (if end
+          (cons (substring string position end) (1+ end))
+        (cons (substring string position) (length string))))))
+
+(defun gptel-yatools-search--remote-parse (output contents base)
+  "Return the records in OUTPUT, one remote chunk's bytes.
+
+CONTENTS says whether the chunk carried file contents, and BASE is the
+directory the script walked, which is prepended to the relative names it
+reports.  The value is a cons of the candidates -- plists as
+`gptel-yatools-search--candidate' builds them, with `:text' when contents
+were sent -- and a plist of `:total' and `:reached' from the closing
+record.
+
+A record that does not parse ends the parse rather than being half read: a
+desynchronised stream is a bug worth seeing, not a record to guess at."
+  (let ((position 0)
+        (candidates nil)
+        (summary nil)
+        (done nil)
+        (base (file-name-as-directory base)))
+    (cl-flet ((rebased (path)
+                (expand-file-name (string-remove-prefix "./" path) base)))
+      (while (and (not done) (< position (length output)))
+        (let* ((path-field (gptel-yatools-search--remote-field output position))
+               (path (car path-field)))
+          (setq position (cdr path-field))
+          (cond
+           ((null path-field) (setq done t))
+           ((string-prefix-p "#" path)
+            (let* ((total (gptel-yatools-search--remote-field output position))
+                   (reached (and total
+                                 (progn
+                                   (setq position (cdr total))
+                                   (gptel-yatools-search--remote-field
+                                    output position)))))
+              (when reached (setq position (cdr reached)))
+              (setq summary (list :total (string-to-number (or (car total) "0"))
+                                  :reached (equal (car reached) "1"))))
+            (setq done t))
+           (t
+            (let* ((size-field (gptel-yatools-search--remote-field output position))
+                   (size (string-to-number (or (car size-field) "0"))))
+              (setq position (cdr size-field))
+              (let* ((mtime-field
+                      (gptel-yatools-search--remote-field output position))
+                     (mtime (string-to-number (or (car mtime-field) "0"))))
+                (setq position (cdr mtime-field))
+                (cond
+                 ((not contents)
+                  (let ((placeholder
+                         (gptel-yatools-search--remote-field output position)))
+                    (setq position (cdr placeholder))
+                    (push (list :path (rebased path) :size size :mtime mtime)
+                          candidates)))
+                 ((> (+ position size) (length output))
+                  (setq done t))
+                 (t
+                  (let ((text (substring output position (+ position size))))
+                    (setq position (+ position size))
+                    ;; The byte after the contents is the record's
+                    ;; terminator.  A file that grew between the walk and
+                    ;; the read has something else there, so the parse
+                    ;; resynchronises on the next NUL instead of reading the
+                    ;; rest of the chunk as one record.
+                    (if (and (< position (length output))
+                             (eq (aref output position) ?\0))
+                        (setq position (1+ position))
+                      (let ((next (string-search "\0" output position)))
+                        (setq position (if next (1+ next) (length output)))))
+                    (push (list :path (rebased path) :size size :mtime mtime
+                                :text text)
+                          candidates)))))))))))
+    (cons (nreverse candidates)
+          (or summary (list :total 0 :reached t)))))
+
+(defun gptel-yatools-search--remote-scan (directory start want budget contents)
+  "Return one chunk of DIRECTORY, walked on its own host.
+
+DIRECTORY is remote; START is how many files earlier chunks consumed, WANT
+how many this one may report, BUDGET the bytes of contents it may carry, and
+CONTENTS whether contents are wanted at all.  The value is what
+`gptel-yatools-search--remote-parse' returns."
+  (let* ((skip (mapconcat #'identity gptel-yatools-search-skip-directories " "))
+         (outcome
+          (gptel-yatools--run-process
+           (list "sh" "-c" gptel-yatools-search--remote-script
+                 "gptel-yatools-search"
+                 (number-to-string start)
+                 (number-to-string (max 0 want))
+                 (number-to-string (max 1 budget))
+                 (number-to-string gptel-yatools-search-max-file-size)
+                 skip
+                 (if contents "1" "0"))
+           :directory directory)))
+    (if (eq (plist-get outcome :status) 'exited)
+        (gptel-yatools-search--remote-parse
+         (plist-get outcome :output) contents directory)
+      ;; A walk that could not run is not a tree with nothing in it.
+      (cons nil
+            (list :total 0
+                  :reached nil
+                  :failed (if (eq (plist-get outcome :status) 'timed-out)
+                              "the search timed out on the remote host"
+                            (string-trim (plist-get outcome :output))))))))
+
+(defun gptel-yatools-search--remote-collect (directory contents)
+  "Return what lies under DIRECTORY, a remote directory, in a few trips.
+
+CONTENTS says whether the bytes are wanted.  Chunks are asked for until the
+tree is exhausted or `gptel-yatools-search-seconds-limit' is spent, and the
+value is a plist of `:candidates', `:files', `:stopped' and `:failed' -- the
+same shape a local walk answers in, so that a tool cannot tell a remote
+workspace from a local one except by what it reports when a limit bites."
+  (let* ((timeout (gptel-yatools--call-deadline))
+         (start (float-time))
+         (deadline (min (+ start gptel-yatools-search-seconds-limit)
+                        (- (+ start timeout) 1.0)))
+         (candidates nil)
+         (files 0)
+         (total 0)
+         (stopped nil)
+         (failed nil)
+         (end nil))
+    (while (and (not end) (not stopped))
+      (let* ((chunk (gptel-yatools-search--remote-scan
+                     directory files
+                     (if contents 0 gptel-yatools-search-remote-chunk-records)
+                     gptel-yatools-search-remote-chunk-bytes
+                     contents))
+             (records (car chunk))
+             (summary (cdr chunk)))
+        (setq total (or (plist-get summary :total) total))
+        (when (plist-get summary :failed)
+          (setq failed (plist-get summary :failed)
+                stopped 'failed))
+        (setq candidates (nconc candidates records)
+              files (+ files (length records)))
+        (cond
+         (stopped nil)
+         ((null records) (setq end (if (plist-get summary :reached) t 'empty)))
+         ((plist-get summary :reached) (setq end t))
+         ((>= files gptel-yatools-search-file-limit) (setq stopped 'files))
+         ((>= (float-time) deadline) (setq stopped 'seconds)))))
+    (list :candidates candidates
+          :files (max files total)
+          :stopped stopped
+          :failed failed
+          :seconds (- (float-time) start))))
+
+
+;;-------------------------------------------------------------------------
 ;; What the model wrote, as a pattern
 ;;
 ;; Shell wildcards rather than an Emacs regexp: a model reaching for "find
@@ -306,16 +546,12 @@ whose depth the model does not know."
 ;; it is not -- disk changed to meet the VFS afterwards -- costs a stale
 ;; "(pending)" note rather than a wrong answer.
 ;;-------------------------------------------------------------------------
-(defun gptel-yatools-search--pending-p (path)
-  "Return non-nil when the VFS, not disk, answers for PATH."
-  (and (gptel-yatools-vfs-entry path) t))
-
 (defun gptel-yatools-search--vfs-candidates (directory)
   "Return candidates for the VFS entries under DIRECTORY that disk lacks.
 
-Each is a candidate plist with `:pending' set, in path order.  Only entries
-with no file on disk need this pass: one that shadows a disk file is reached
-by the walk itself, and marked there."
+Each is a candidate plist with `:pending' and `:text' set, in path order.
+Only entries with no file on disk need this pass: one that shadows a disk
+file is reached by the walk itself, and marked where it is merged."
   (let ((full-dir (file-name-as-directory (expand-file-name directory)))
         (now (current-time))
         (found nil))
@@ -323,14 +559,84 @@ by the walk itself, and marked there."
                (when (and (string-prefix-p full-dir path)
                           (> (length path) (length full-dir))
                           (not (file-exists-p path)))
-                 (push (list :path path
-                             :size (length (or (plist-get entry :content) ""))
-                             :mtime now
-                             :pending t)
-                       found)))
+                 (let ((text (or (plist-get entry :content) "")))
+                   (push (list :path path
+                               :size (length text)
+                               :mtime now
+                               :text text
+                               :pending t)
+                         found))))
              (gptel-yatools-vfs--table))
     (sort found (lambda (a b) (string-lessp (plist-get a :path)
                                             (plist-get b :path))))))
+
+;;-------------------------------------------------------------------------
+;; Collecting what is under a directory
+;;
+;; One shape, two ways of producing it: a local walk, and the courier for a
+;; workspace on another machine.  Everything above this line -- matching,
+;; ranking, marking, reporting -- is then the same for both, which is what
+;; stops a search from answering differently depending on where the files
+;; happen to live.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-search--local-collect (directory contents)
+  "Return what lies under DIRECTORY, a local directory, by walking it.
+
+CONTENTS says whether each candidate carries its text."
+  (let* ((candidates nil)
+         (walk (gptel-yatools-search--walk
+               directory
+               (lambda (candidate)
+                 (push (if contents
+                           (let ((text (gptel-yatools-search--text
+                                        (plist-get candidate :path))))
+                             (if text
+                                 (plist-put (copy-sequence candidate)
+                                            :text text)
+                               candidate))
+                         candidate)
+                       candidates)
+                 nil))))
+    (list :candidates (nreverse candidates)
+          :files (plist-get walk :files)
+          :stopped (plist-get walk :stopped)
+          :seconds (plist-get walk :seconds))))
+
+(defun gptel-yatools-search--collect (directory contents)
+  "Return what lies under DIRECTORY, saying how far the search got.
+
+CONTENTS says whether candidates should carry their text.  The value is a
+plist of `:candidates', `:files', `:stopped' (nil, `files', `seconds',
+`failed' or `visit') and `:failed', the reason a remote walk could not run."
+  (if (file-remote-p directory)
+      (gptel-yatools-search--remote-collect directory contents)
+    (gptel-yatools-search--local-collect directory contents)))
+
+(defun gptel-yatools-search--merge-pending (directory candidates)
+  "Return CANDIDATES with the VFS's answer in place of disk's.
+
+A path the VFS holds contributes its pending text -- the same choice
+`read_path' makes -- and is marked, so the reply can say which lines are not
+on disk yet.  A path the VFS alone holds is added: the model wrote that file,
+so a search must find it before it is synced."
+  (let ((merged
+         (mapcar (lambda (candidate)
+                   (let* ((path (plist-get candidate :path))
+                          (entry (gptel-yatools-vfs-entry path)))
+                     (if entry
+                         (plist-put (plist-put (copy-sequence candidate)
+                                               :text
+                                               (plist-get entry :content))
+                                    :pending t)
+                       candidate)))
+                 candidates))
+        (seen (make-hash-table :test #'equal)))
+    (dolist (candidate merged)
+      (puthash (plist-get candidate :path) t seen))
+    (append merged
+            (cl-remove-if (lambda (candidate)
+                            (gethash (plist-get candidate :path) seen))
+                          (gptel-yatools-search--vfs-candidates directory)))))
 
 ;;-------------------------------------------------------------------------
 ;; The tools
@@ -343,6 +649,7 @@ visited and SECONDS how long it took."
   (pcase stopped
     ('nil nil)
     ('visit nil)
+    ('failed nil)
     ('files
      (format "Stopped after %d files, the `gptel-yatools-search-file-limit'. Results below are partial: pass PATH to search a smaller part of the tree."
              files))
@@ -350,6 +657,15 @@ visited and SECONDS how long it took."
      (format "Stopped after %.0f seconds, the `gptel-yatools-search-seconds-limit', having visited %d files. Results below are partial: pass PATH to search a smaller part of the tree."
              seconds files))
     (_ nil)))
+
+(defun gptel-yatools-search--failure-sentence (failed)
+  "Return a sentence saying the search itself failed, or nil.
+
+FAILED is the reason `gptel-yatools-search--collect' reported, which is
+what a remote walk says when the process could not run or was killed."
+  (when failed
+    (format "The search could not finish: %s. What is reported below is what it had gathered; a local read_path still works."
+            failed)))
 
 (defun gptel-yatools-search--relative (path root)
   "Return PATH relative to ROOT, a directory with a trailing slash.
@@ -388,33 +704,23 @@ name, which is what makes \"*.el\" work at every depth."
          (format "Error: %s is not a directory. Give PATH as a directory to search under, and PATTERN as the file names wanted."
                  (gptel-yatools--display-path directory))
          :comment "Nothing was searched.")
-      (let* ((hits nil)
-             (walk (gptel-yatools-search--walk
-                    directory
-                    (lambda (candidate)
-                      (when (funcall match (plist-get candidate :path))
-                        (push (cons (plist-get candidate :path) candidate) hits))
-                      (>= (length hits) gptel-yatools-glob-result-limit))))
-             ;; A file the VFS holds and disk does not is a file this search
-             ;; must find: the model wrote it, so it exists.  One that disk
-             ;; holds too was already reached by the walk, below.
-             (pending
-              (cl-loop for candidate in (gptel-yatools-search--vfs-candidates directory)
-                       when (funcall match (plist-get candidate :path))
-                       collect (cons (plist-get candidate :path) candidate)))
-             (hits (append
-                    (mapcar (lambda (hit)
-                              (if (gptel-yatools-search--pending-p (car hit))
-                                  (cons (car hit)
-                                        (plist-put (copy-sequence (cdr hit))
-                                                   :pending t))
-                                hit))
-                            hits)
-                    pending))
-             (any-pending (cl-some (lambda (hit) (plist-get (cdr hit) :pending))
+      (let* ((collected (gptel-yatools-search--collect directory nil))
+             (candidates (gptel-yatools-search--merge-pending
+                          directory (plist-get collected :candidates)))
+             (hits (cl-loop for candidate in candidates
+                            when (funcall match (plist-get candidate :path))
+                            collect (cons (plist-get candidate :path)
+                                          candidate)))
+             (any-pending (cl-some (lambda (hit)
+                                     (plist-get (cdr hit) :pending))
                                    hits)))
         (gptel-yatools-ok
-         (gptel-yatools-search--glob-body hits pattern directory walk)
+         (gptel-yatools-search--glob-body
+          hits pattern directory
+          (list :stopped (plist-get collected :stopped)
+                :files (plist-get collected :files)
+                :seconds (plist-get collected :seconds)
+                :failed (plist-get collected :failed)))
          :provenance (if any-pending :mixed :disk)
          :comment (when any-pending
                     "This reply mixes pending virtual-filesystem changes with disk content: entries marked (pending) exist only in the VFS. Run the file_sync tool to persist them."))))))
@@ -455,6 +761,8 @@ a directory listing marks one."
                        (when (> (length sorted) limit)
                          (format "Showing the %d most recently modified of %d matching files. Make PATTERN more specific, or pass PATH, to narrow the search."
                                  limit (length sorted)))
+                       (gptel-yatools-search--failure-sentence
+                        (plist-get walk :failed))
                        (gptel-yatools-search--stop-sentence
                         (plist-get walk :stopped)
                         (plist-get walk :files)
@@ -517,14 +825,12 @@ first block is binary: it is skipped, not searched."
   "Return non-nil when TEXT holds a NUL byte."
   (and (stringp text) (string-match-p "\0" text)))
 
-(defun gptel-yatools-search--line-matches (path text regexp)
+(defun gptel-yatools-search--line-matches (text regexp)
   "Return the matching lines of TEXT, as (LINE-NUMBER . LINE-TEXT) conses.
 
-PATH names the file the text came from, for the binary refusal's message
-and for nothing else.  At most
-`gptel-yatools-grep-matches-per-file-limit' are returned, and whether more
-were left is reported separately by
-`gptel-yatools-search--count-matching-lines'."
+At most `gptel-yatools-grep-matches-per-file-limit' are returned, and
+whether more were left is reported separately by
+`gptel-yatools-search--more-lines-p'."
   (if (gptel-yatools-search--binary-p text)
       nil
     (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
@@ -566,7 +872,7 @@ were left is reported separately by
 The value is a cons of the lines, each \"PATH:LINE:TEXT\", and a boolean
 saying the file holds more matches than those.  A pending entry's lines end
 in a tab and \"(pending)\", as a directory listing marks one."
-  (let* ((matches (gptel-yatools-search--line-matches path text regexp))
+  (let* ((matches (gptel-yatools-search--line-matches text regexp))
          (more (and matches
                     (= (length matches) gptel-yatools-grep-matches-per-file-limit)
                     (gptel-yatools-search--more-lines-p
@@ -590,33 +896,38 @@ in a tab and \"(pending)\", as a directory listing marks one."
          (format "Error: %s is not a directory. Give PATH as a directory to search under, and REGEX as the text wanted. To search one file you already know, use fetch_lines_from_file_using_regex."
                  (gptel-yatools--display-path directory))
          :comment "Nothing was searched.")
-      (let* ((limit gptel-yatools-grep-match-limit)
+      (let* ((collected (gptel-yatools-search--collect directory t))
+             (candidates (gptel-yatools-search--merge-pending
+                          directory (plist-get collected :candidates)))
+             (limit gptel-yatools-grep-match-limit)
              (lines nil)
-             (visited 0)
              (capped nil)
              (any-pending nil)
-             (per-file nil)
-             (walk (gptel-yatools-search--walk
-                   directory
-                   (lambda (candidate)
-                     (let* ((full (plist-get candidate :path))
-                            (pending (gptel-yatools-search--pending-p full))
-                            (text (gptel-yatools-search--text full)))
-                       (setq visited (1+ visited))
-                       (when text
-                         (let ((result (gptel-yatools-search--grep-result
-                                        full text regexp pending)))
-                           (when (car result)
-                             (when pending (setq any-pending t))
-                             (setq lines (nconc lines (car result)))
-                             (when (cdr result)
-                               (push full per-file)))))
-                       (when (>= (length lines) limit)
-                         (setq capped t)
-                         t))))))
+             (per-file nil))
+        (catch 'enough
+          (dolist (candidate candidates)
+            (let ((text (plist-get candidate :text)))
+              (when text
+                (let ((result (gptel-yatools-search--grep-result
+                               (plist-get candidate :path)
+                               text regexp
+                               (plist-get candidate :pending))))
+                  (when (car result)
+                    (when (plist-get candidate :pending)
+                      (setq any-pending t))
+                    (setq lines (nconc lines (car result)))
+                    (when (cdr result)
+                      (push (plist-get candidate :path) per-file)))
+                  (when (>= (length lines) limit)
+                    (setq capped t)
+                    (throw 'enough nil)))))))
         (gptel-yatools-ok
          (gptel-yatools-search--grep-body
-          regexp directory lines capped per-file walk)
+          regexp directory lines capped per-file
+          (list :stopped (plist-get collected :stopped)
+                :files (plist-get collected :files)
+                :seconds (plist-get collected :seconds)
+                :failed (plist-get collected :failed)))
          :provenance (if any-pending :mixed :disk)
          :comment (when any-pending
                     "This reply mixes pending virtual-filesystem changes with disk content: lines marked (pending) are not on disk yet. Run the file_sync tool to persist them."))))))
@@ -655,6 +966,8 @@ WALK what `gptel-yatools-search--walk' reported."
                (list (when capped
                        (format "Stopped at %d matching lines, the `gptel-yatools-grep-match-limit'. Make the expression more specific, or pass PATH, to see the rest."
                                limit)))
+               (list (gptel-yatools-search--failure-sentence
+                      (plist-get walk :failed)))
                (list (gptel-yatools-search--stop-sentence
                       (plist-get walk :stopped)
                       (plist-get walk :files)

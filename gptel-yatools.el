@@ -545,6 +545,7 @@ appending makes a second run harmless."
 ;;-------------------------------------------------------------------------
 (require 'gptel-yatools-media)
 (require 'gptel-yatools-vfs)
+(require 'gptel-yatools-search)
 (require 'gptel-yatools-shell)
 (require 'gptel-yatools-skills)
 (require 'gptel-yatools-diagram)

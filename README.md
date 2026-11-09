@@ -397,9 +397,10 @@ usually the one you want.
 `grep` matches lines by an Emacs regexp, case-insensitively unless the pattern
 contains a capital letter — `foo` finds `Foo`, `Foo` does not find `foo`.
 Results are `path:line:text`, and the reply says how many lines it shows out of
-how many files matched.  One file contributes at most twenty lines; the others
-are named with a pointer at `fetch_lines_from_file_using_regex`, which reads
-one known file whole and without a cap.
+how many files matched.  One file contributes at most twenty lines, and a file
+that has more is named with its real count and a pointer at
+`fetch_lines_from_file_using_regex`, which reads one known file whole and
+without a cap.
 
 The twenty-lines-per-file and two-hundred-lines-per-call limits keep the
 files with **the most matches**, not the ones the tree happens to list first.

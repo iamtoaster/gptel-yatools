@@ -191,7 +191,7 @@ rather than silently matching nothing."
     (gptel-yatools-test--vfs
       (let ((body (gptel-yatools-search-test--grep "hit")))
         (should (string-match-p "quiet\\.el:1:hit once" body))
-        (should (string-match-p "busy\\.el: more than 20 matching lines" body))
+        (should (string-match-p "busy\\.el: 30 matching line(s), the first 20 are shown" body))
         (should-not (string-match-p "busy\\.el:21:" body))))))
 
 (ert-deftest gptel-yatools-test-grep-reads-pending-text-not-disk ()
@@ -385,7 +385,7 @@ this is the tree the script sees when it walks \"\"."
     (gptel-yatools-test--vfs
       (let ((gptel-yatools-grep-match-limit 3))
         (let ((body (gptel-yatools-search-test--grep "hit")))
-          (should (string-match-p "more than 20 matching lines" body))
+          (should (string-match-p "busy\\.el: 30 matching line(s)" body))
           (should-not (string-match-p "than fit in this reply" body)))))))
 
 (provide 'gptel-yatools-search-tests)

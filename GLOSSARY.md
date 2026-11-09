@@ -417,6 +417,13 @@ shown and the number reported are the same number.
 _Avoid_: Chunk (that is a remote transfer), truncation (that is the
 envelope's)
 
+**Density**:
+How many lines a file holds that match, counted past the per-file cap rather
+than stopped at it: a file with sixty-four matches has density 64 and shows
+twenty.  It is what `grep` ranks by, so a capped reply is a selection of the
+files most likely to answer rather than whatever `readdir` reported first.
+_Avoid_: Weight, score, hit rate
+
 **Search budget**:
 The limits that end a search before it ends itself: files visited,
 seconds spent, lines reported, lines per file, and bytes per remote

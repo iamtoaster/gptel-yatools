@@ -896,75 +896,62 @@ than one enormous log."
   (and (stringp text) (string-match-p "\0" text)))
 
 (defun gptel-yatools-search--line-matches (text regexp)
-  "Return the lines of TEXT that match REGEXP, as (LINE-NUMBER . LINE-TEXT).
+  "Return the lines of TEXT that match REGEXP, as (KEPT . TOTAL).
 
-At most `gptel-yatools-grep-matches-per-file-limit' are returned, and
-whether more were left is reported separately by
-`gptel-yatools-search--more-lines-p'."
+KEPT is the matches themselves, as (LINE-NUMBER . LINE-TEXT) conses, at most
+`gptel-yatools-grep-matches-per-file-limit' of them.  TOTAL is how many the
+file holds, counted past the cap.
+
+Counting them all is what lets a capped reply rank files by how much they
+match rather than by how many lines fit, and say a real number instead of
+\"more than twenty\"."
   (if (gptel-yatools-search--binary-p text)
-      nil
+      (cons nil 0)
     (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
           (number 0)
-          (found nil))
+          (total 0)
+          (kept nil))
       (with-temp-buffer
         (insert text)
         (goto-char (point-min))
-        (while (and (not (eobp))
-                    (< (length found) gptel-yatools-grep-matches-per-file-limit))
+        (while (not (eobp))
           (setq number (1+ number))
           (let ((line (buffer-substring-no-properties
                        (line-beginning-position) (line-end-position))))
             (when (string-match-p regexp line)
-              (push (cons number line) found)))
+              (setq total (1+ total))
+              (when (< (length kept) gptel-yatools-grep-matches-per-file-limit)
+                (push (cons number line) kept))))
           (forward-line 1)))
-      (nreverse found))))
-
-(defun gptel-yatools-search--more-lines-p (text regexp reported)
-  "Return non-nil when TEXT holds more lines matching REGEXP than REPORTED."
-  (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
-        (seen 0)
-        (more nil))
-    (with-temp-buffer
-      (insert text)
-      (goto-char (point-min))
-      (while (and (not (eobp)) (not more))
-        (when (string-match-p regexp (buffer-substring-no-properties
-                                      (line-beginning-position)
-                                      (line-end-position)))
-          (setq seen (1+ seen))
-          (when (> seen reported) (setq more t)))
-        (forward-line 1)))
-    more))
+      (cons (nreverse kept) total))))
 
 (defun gptel-yatools-search--grep-collect (regexp candidates)
   "Return the per-file matches for REGEXP over CANDIDATES, densest first.
 
-Each value is a plist of `:path', `:lines' (the match conses),
-`:line-count', `:more' (the file holds more than were kept) and `:pending'.
-Files with no match are left out.
+Each value is a plist of `:path', `:lines' (the matches kept), `:line-count'
+(how many the file holds), `:more' (it holds more than were kept) and
+`:pending'.  Files with no match are left out.
 
-The order is by kept lines, descending, with the path breaking ties.  The
+The order is by `:line-count', descending, with the path breaking ties.  The
 walk visits files in whatever order the filesystem reports, which is not an
 order at all: ranking by density is what lets a capped reply keep the files
-most likely to answer the question, rather than whichever ones happened to
-be visited before the cap was reached."
+most likely to answer the question, rather than whichever ones happened to be
+visited before the cap was reached."
   (let ((found nil))
     (dolist (candidate candidates)
       (let ((text (plist-get candidate :text)))
         (when text
           (let* ((path (plist-get candidate :path))
-                 (matches (gptel-yatools-search--line-matches text regexp)))
+                 (scan (gptel-yatools-search--line-matches text regexp))
+                 (matches (car scan))
+                 (total (cdr scan)))
             (when matches
-              (let ((more (and (= (length matches)
-                                  gptel-yatools-grep-matches-per-file-limit)
-                               (gptel-yatools-search--more-lines-p
-                                text regexp (length matches)))))
-                (push (list :path path
-                            :lines matches
-                            :line-count (length matches)
-                            :more more
-                            :pending (plist-get candidate :pending))
-                      found)))))))
+              (push (list :path path
+                          :lines matches
+                          :line-count total
+                          :more (> total (length matches))
+                          :pending (plist-get candidate :pending))
+                    found))))))
     (sort found
           (lambda (a b)
             (let ((na (plist-get a :line-count))
@@ -1089,10 +1076,10 @@ asked."
                          left-out))
                (mapconcat
                 (lambda (file)
-                  (format "%s: more than %d matching lines, only the first %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
+                  (format "%s: %d matching line(s), the first %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
                           (gptel-yatools--display-path (plist-get file :path))
-                          gptel-yatools-grep-matches-per-file-limit
-                          gptel-yatools-grep-matches-per-file-limit))
+                          (plist-get file :line-count)
+                          (length (plist-get file :lines))))
                 (cl-remove-if-not (lambda (file) (plist-get file :more)) files)
                 "\n")
                skipped

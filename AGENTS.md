@@ -210,6 +210,10 @@ changing the rule.
   text where the VFS holds it and find files the VFS alone holds, marking
   both; a reply that used either is `:mixed`.  A search that read disk only
   would tell the model its own file does not exist (ADR 0009).
+- **A subprocess that parses a byte protocol reads bytes.**  `--run-process`
+  takes `:coding`; the search courier asks for `binary`, because its framing
+  is lengths a script wrote in bytes.  Decoded first, every multi-byte
+  character shifts the parse (ADR 0009).
 - **A budget is reported, never silent, and keeps the densest files.**  Every
   search limit ends in a sentence the model reads, and a `grep` cap is applied
   after ranking by match count rather than to `readdir` order, so the file

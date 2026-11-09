@@ -48,10 +48,23 @@ budget to bound each.
    anything matched. Emacs does, in one place, so a local and a remote
    workspace share the regexp dialect, the smart-case rule, the binary and
    size skips, and the VFS merge.
-2. **Records are NUL-separated and contents are read by size.** Path, size,
-   mtime, then either `-` or exactly `size` bytes. No file name can forge a
-   record, and a NUL inside a file is data rather than a delimiter. A
-   mis-shaped record ends the parse and is reported rather than half read.
+2. **Records are NUL-separated, read as bytes, and contents are framed by
+   size.** Path, size, mtime, a flag, then exactly `size` bytes when the flag
+   says they follow. No file name can forge a record, and a NUL inside a file
+   is data rather than a delimiter.
+
+   The output is read with `:coding binary`, so the size the script wrote and
+   the offset the parser counts are the same unit. This is not a detail: decoded
+   first, one accented character costs two bytes and one character, every
+   later record is read shifted, and the result is a phantom file whose name is
+   a length and whose size is a modification time. The two faults that survived
+   review longest — lost matches next to a UTF-8 file, and a hard error with
+   binary file data in a path — were both this.
+
+   A record that does not frame — the terminator is not where the size says,
+   the stream stops inside one — ends the chunk rather than shifting the
+   parse. A parser that resynchronises on the next NUL turns file content into
+   paths; one that stops loses at most one file, and says so.
 3. **The script walks `.`, and Emacs rebases what comes back.** A process on
    the host runs in its own directory, so `.` means the same tree to the
    script as the file name means to Emacs — over TRAMP, and over the stand-in
@@ -65,10 +78,16 @@ budget to bound each.
    count. Chunks are asked for until the tree is exhausted or
    `-seconds-limit` is spent, which is what turns truncation into
    completeness: only a tree too large for the *time* budget ends partial.
-5. **The transport stays under the job output limit.** Transfers are bounded
-   well below `gptel-yatools--job-output-limit`, because past it the process
-   filter cuts the stream and injects a truncation marker, which would break
-   records apart mid-field.
+5. **The transport stays under the job output limit, and says when it does
+   not.** `gptel-yatools--job-output-limit` cuts the stream and injects a
+   truncation marker, so a file bigger than one transfer can carry cannot
+   arrive whole. The content ceiling is therefore the smaller of
+   `-max-file-size` and what one transfer holds, passed to the script so a
+   too-large file is *withheld* (a flag, not a short record) and named in the
+   reply. A chunk that is cut anyway keeps its whole records, and the next
+   chunk starts after them, so a tree larger than one transfer is still
+   covered; only a chunk that frames nothing is a failure, and it is reported
+   as a partial answer.
 6. **A local walk and the courier answer in the same shape.** Both produce a
    list of candidates plus `:files`, `:stopped` and `:failed`, and everything
    above that — matching, ranking, marking, reporting — is shared. A tool
@@ -102,8 +121,9 @@ budget to bound each.
 - The dialect is one. A pattern that works locally works remotely, including
   smart-case, `[[:upper:]]` as a case test, and the fact that a pending entry
   shadows disk in both.
-- The script depends on `wc`, `head` and `stat` on the host, and on `-c`
-  (GNU) or `-f` (BSD) `stat`. It is POSIX `sh` otherwise, and it does not use
+- The script depends on `head` and `stat` on the host, and on `-c` (GNU) or
+  `-f` (BSD) `stat`; size and mtime come from one call, which is half the
+  forks per file. It is POSIX `sh` otherwise, and it does not use
   `set -e` or `pipefail`. A host missing those degrades to `:failed` with the
   shell's own message, which the model is shown, rather than to an empty
   result.
@@ -116,6 +136,13 @@ budget to bound each.
 - Every budget is a defcustom and every budget ends in a sentence the model
   is told. A search that stops silently is worse than one that fails: it
   teaches the model that a file does not exist.
+- A symbolic link to a directory is not followed, on either side, so a link
+  that points at an ancestor cannot walk a tree nobody asked for. A link to a
+  file is read as the file it names.
+- A pattern with a slash in `glob` is matched from the directory being
+  searched, not from the workspace root: the root is only what `PATH` defaults
+  to. Anchoring at the root made `PATH` silently inert for exactly the
+  patterns that name a subtree.
 - The walk and the courier are testable without a network: the stand-in
   handler from ADR 0004 makes a name remote, and the courier's `sh` runs for
   real against a temp tree, so the record protocol is exercised end to end

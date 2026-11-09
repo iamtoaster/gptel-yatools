@@ -400,6 +400,14 @@ tree, so it is asked for in chunks: a chunk stops at a byte budget between
 records, and the next starts at the count the last one reported.
 _Avoid_: Remote agent, helper script, grep bridge
 
+**Content ceiling**:
+The most bytes a search will read from one file: `-max-file-size` locally,
+and the smaller of that and what one remote transfer can frame.  It is passed
+to the courier so a file above it is *withheld* -- a flag in the record, not a
+short record -- and the reply names the ceiling that applied rather than a
+setting that played no part.
+_Avoid_: Limit (there are several), threshold
+
 **Skip reason**:
 Why a file the walk found was not searched: `:too-large` for one over
 `gptel-yatools-search-max-file-size`, `:special` for anything that is not a

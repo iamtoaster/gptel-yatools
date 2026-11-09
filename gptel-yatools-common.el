@@ -1190,6 +1190,30 @@ text in a buffer."
           newlines
         (1+ newlines)))))
 
+(defun gptel-yatools--map-lines (text function)
+  "Call FUNCTION with each line of TEXT and its 1-based number.
+
+FUNCTION is called as (FUNCTION NUMBER LINE), and its value is ignored.
+LINE is the line's text without properties and without the newline that
+ends it, so a trailing carriage return stays on the line it ends.  A
+trailing newline does not start another line, so \"a\\nb\\n\" reaches
+FUNCTION twice and \"\" reaches it not at all.
+
+The lines are found in a temporary buffer, which is current while FUNCTION
+runs: it must not depend on the caller's buffer.  Nothing about matching
+is bound here, so a FUNCTION that matches a regexp obeys the caller's
+`case-fold-search'."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((number 0))
+      (while (not (eobp))
+        (setq number (1+ number))
+        (funcall function number
+                 (buffer-substring-no-properties
+                  (line-beginning-position) (line-end-position)))
+        (forward-line 1)))))
+
 (defun gptel-yatools--truncate-slow (string)
   "Return STRING cut to the response limits, with a note saying what was cut.
 

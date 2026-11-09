@@ -444,6 +444,49 @@ default, so a buffer with a buffer-local value keeps it."
                      (1+ gptel-yatools--output-line-limit))
              (gptel-yatools--truncate longer)))))
 
+(ert-deftest gptel-yatools-test-map-lines-numbers-from-one ()
+  "Every line reaches the function with its 1-based number."
+  (let ((seen nil))
+    (gptel-yatools--map-lines "alpha\nbeta\ngamma"
+                              (lambda (number line)
+                                (push (cons number line) seen)))
+    (should (equal (nreverse seen)
+                   '((1 . "alpha") (2 . "beta") (3 . "gamma"))))))
+
+(ert-deftest gptel-yatools-test-map-lines-sees-no-phantom-line ()
+  "A trailing newline does not start a line, and empty text has none."
+  (let ((lines nil))
+    (gptel-yatools--map-lines "a\n"
+                              (lambda (_number line) (push line lines)))
+    (should (equal (nreverse lines) '("a"))))
+  (let ((lines nil))
+    (gptel-yatools--map-lines "" (lambda (_number line) (push line lines)))
+    (should (null lines)))
+  ;; The empty line between two newlines is a line, and so is the one
+  ;; before a trailing newline that follows it.
+  (let ((lines nil))
+    (gptel-yatools--map-lines "a\n\n"
+                              (lambda (_number line) (push line lines)))
+    (should (equal (nreverse lines) '("a" "")))))
+
+(ert-deftest gptel-yatools-test-map-lines-keeps-a-carriage-return ()
+  "A CRLF file keeps its carriage return on the line it ends."
+  (let ((lines nil))
+    (gptel-yatools--map-lines "a\r\nb\r\n"
+                              (lambda (_number line) (push line lines)))
+    (should (equal (nreverse lines) '("a\r" "b\r")))))
+
+(ert-deftest gptel-yatools-test-map-lines-leaves-case-folding-alone ()
+  "The walk never matches, so the caller's `case-fold-search' survives."
+  (let ((folded nil))
+    (let ((case-fold-search nil))
+      (gptel-yatools--map-lines "x" (lambda (&rest _) (setq folded case-fold-search))))
+    (should-not folded))
+  (let ((folded nil))
+    (let ((case-fold-search t))
+      (gptel-yatools--map-lines "x" (lambda (&rest _) (setq folded case-fold-search))))
+    (should folded)))
+
 
 ;;;; 46. Messages mixed absolute and workspace-relative paths
 

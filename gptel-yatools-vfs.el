@@ -1999,9 +1999,7 @@ tool reply, so the two cannot disagree."
              (lines  (gptel-yatools--coerce-integer lines 0 0)))
          (with-temp-buffer
            (insert content)
-           ;; `count-lines' counts the lines that exist, not the
-           ;; empty field after a trailing newline.
-           (let ((total (count-lines (point-min) (point-max))))
+           (let ((total (gptel-yatools--line-count content)))
              (goto-char (point-min))
              (forward-line (1- offset))
              (let* ((beg (point))
@@ -2051,36 +2049,28 @@ tool reply, so the two cannot disagree."
                 (invalid-regexp (error-message-string err)))))
          (when regex-error
            (error "Error: invalid regexp %S: %s" regex regex-error))
-         (with-temp-buffer
-           (insert content)
-           (goto-char (point-min))
-           (let ((line-num 0)
-                 (matches '()))
-             ;; `string-match-p' honours the ambient `case-fold-search' (t
-             ;; by default), so a regexp with no case construct matches
-             ;; case-insensitively.  A model that wants an exact case writes
-             ;; one into the regexp ([A-Z], \\`...\\'); binding
-             ;; `case-fold-search' here would make the tool's matching
-             ;; disagree with Emacs, which is the model's mental model of an
-             ;; "Emacs regexp".  `gptel-yatools-vfs--replace-once' must be
-             ;; exact and binds it.
-             (while (not (eobp))
-               (setq line-num (1+ line-num))
-               (let ((line (buffer-substring-no-properties
-                            (line-beginning-position)
-                            (line-end-position))))
-                 (when (string-match-p regex line)
-                   (push (format "%d:%s" line-num line) matches)))
-               (forward-line 1))
-             (gptel-yatools-ok
-              ;; An empty body would be indistinguishable from an
-              ;; empty file, so say that nothing matched.
-              (if matches
-                  (mapconcat #'identity (nreverse matches) "\n")
-                (format "(no lines in %s match the regexp %S.)"
-                        (gptel-yatools--display-path full)
-                        regex))
-              :provenance provenance))))))))
+         ;; `string-match-p' honours the ambient `case-fold-search' (t by
+         ;; default), so a regexp with no case construct matches
+         ;; case-insensitively.  A model that wants an exact case writes one
+         ;; into the regexp ([A-Z], \\`...\\'); binding `case-fold-search'
+         ;; here would make the tool's matching disagree with Emacs, which
+         ;; is the model's mental model of an "Emacs regexp".
+         ;; `gptel-yatools-vfs--replace-once' must be exact and binds it.
+         (let ((matches '()))
+           (gptel-yatools--map-lines
+            content
+            (lambda (number line)
+              (when (string-match-p regex line)
+                (push (format "%d:%s" number line) matches))))
+           (gptel-yatools-ok
+            ;; An empty body would be indistinguishable from an
+            ;; empty file, so say that nothing matched.
+            (if matches
+                (mapconcat #'identity (nreverse matches) "\n")
+              (format "(no lines in %s match the regexp %S.)"
+                      (gptel-yatools--display-path full)
+                      regex))
+            :provenance provenance)))))))
 
 (gptel-yatools-define-tool gptel-yatools-write-file
   :name "write_file"

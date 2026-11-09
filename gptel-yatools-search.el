@@ -990,21 +990,15 @@ LINE-NUMBER and LINE-TEXT; TOTAL counts past that cap."
   (if (gptel-yatools-search--binary-p text)
       (cons nil 0)
     (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
-          (number 0)
           (total 0)
           (kept nil))
-      (with-temp-buffer
-        (insert text)
-        (goto-char (point-min))
-        (while (not (eobp))
-          (setq number (1+ number))
-          (let ((line (buffer-substring-no-properties
-                       (line-beginning-position) (line-end-position))))
-            (when (string-match-p regexp line)
-              (setq total (1+ total))
-              (when (< (length kept) gptel-yatools-grep-matches-per-file-limit)
-                (push (cons number line) kept))))
-          (forward-line 1)))
+      (gptel-yatools--map-lines
+       text
+       (lambda (number line)
+         (when (string-match-p regexp line)
+           (setq total (1+ total))
+           (when (< (length kept) gptel-yatools-grep-matches-per-file-limit)
+             (push (cons number line) kept)))))
       (cons (nreverse kept) total))))
 
 (defun gptel-yatools-search--grep-collect (regexp candidates)

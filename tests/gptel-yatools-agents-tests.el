@@ -303,6 +303,19 @@ and a bare answer with no paths cannot be told apart from \"did not look\"."
         (should (string-match-p "tool call"
                                 (gptel-yatools-result-body result)))))))
 
+(ert-deftest gptel-yatools-test-a-read-tool-is-one-that-takes-a-path ()
+  "Which tools report a path is read from their arguments, not a second list.
+
+A tool added to `gptel-yatools-subagent-tools' with a `path' argument must
+be reported without anyone remembering to add its name anywhere."
+  (should (gptel-yatools-subagent--path-argument-p "read_path"))
+  (should (gptel-yatools-subagent--path-argument-p "glob"))
+  (should (gptel-yatools-subagent--path-argument-p "grep"))
+  ;; It takes no path, so there is nothing to report for it.
+  (should-not (gptel-yatools-subagent--path-argument-p "read_workspace_root"))
+  (should-not (gptel-yatools-subagent--path-argument-p "skill"))
+  (should-not (gptel-yatools-subagent--path-argument-p "no-such-tool")))
+
 (ert-deftest gptel-yatools-test-subagent-counts-calls-and-paths ()
   "A child's tool calls and the files it read are counted and listed.
 

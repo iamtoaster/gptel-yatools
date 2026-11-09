@@ -600,6 +600,13 @@ directory is not something this can afford to find out."
   (and (stringp path)
        (not (string-empty-p path))))
 
+(defun gptel-yatools-subagent--path-argument-p (name)
+  "Return non-nil when the tool called NAME declares a `path' argument."
+  (when-let* ((spec (cl-find name gptel-yatools--tools
+                             :key #'gptel-tool-name :test #'equal)))
+    (cl-some (lambda (arg) (equal (plist-get arg :name) "path"))
+             (gptel-tool-args spec))))
+
 (defun gptel-yatools-subagent--note-call (record results)
   "Record the tool calls in RESULTS as work RECORD's child did.
 
@@ -618,12 +625,9 @@ for why the callback must stay off the filesystem."
            (args (car-safe (cdr-safe triple)))
            (name (and (gptel-tool-p tool) (gptel-tool-name tool)))
            (path (and args (plist-get args :path))))
-      ;; Only the file-reading tools name a path in a way this can report.
-      (when (and (member name '("read_path"
-                                "read_file_from_offset"
-                                "fetch_lines_from_file_using_regex"
-                                "glob"
-                                "grep"))
+      ;; A tool that declares a `path' argument reports the path it was
+      ;; given; which tools those are is the tool definition's business.
+      (when (and (gptel-yatools-subagent--path-argument-p name)
                  (gptel-yatools-subagent--path-recorded-p path))
         (unless (member path (gptel-yatools-subagent--record-paths record))
           (setf (gptel-yatools-subagent--record-paths record)

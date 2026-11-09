@@ -213,7 +213,7 @@ instead of asking about each file across the connection.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `gptel-yatools-search-skip-directories` | `.git`, `node_modules`, `.venv` and similar | Directory names a search does not descend into, at any depth. |
-| `gptel-yatools-search-max-file-size` | 1 MiB | Largest file whose contents are read.  Bigger files are skipped and named in the reply, and `glob` still finds them. |
+| `gptel-yatools-search-max-file-size` | 512 KiB | Largest file whose contents are read.  Bigger files are skipped and named in the reply, and `glob` still finds them.  One remote transfer carries at most about 900 KiB, so raising this past that changes nothing there; the reply names the limit that applied. |
 | `gptel-yatools-search-file-limit` | 4000 | Files one search may visit before it stops and says so. |
 | `gptel-yatools-search-seconds-limit` | 20 | Seconds one search may spend walking before it stops and says so. |
 | `gptel-yatools-glob-result-limit` | 200 | Paths one `glob` returns, newest first. |
@@ -389,8 +389,9 @@ a failed call and a retry.  `glob` and `grep` answer "where is it?" instead.
 
 `glob` matches file names by a shell wildcard.  A pattern with no slash in it
 matches the name at any depth, so `*.el` finds every Emacs Lisp file in the
-workspace; a pattern with a slash matches the path relative to the root, so
-`src/**/*.c` walks only that subtree.  Results are one path per line with its
+workspace.  A pattern with a slash is matched from the directory being
+searched: `src/**/*.c` from the root, and with `PATH` set to `src` it is
+`**/*.c` that walks that subtree.  Results are one path per line with its
 modification time, newest first, because the file you were just working on is
 usually the one you want.
 
@@ -410,10 +411,12 @@ capped answer must not lose.  The reply names the files it left out, so a
 short answer is never mistaken for a complete one.
 
 A file larger than `gptel-yatools-search-max-file-size` is not read, and the
-reply names it: `glob` still finds it, so a file too big to search can be
-opened deliberately with `execute_command`.  Naming a directory in `PATH`
-searches it even if it is on the skip list, which is how `.git/config` or
-`.github/workflows` is searched on purpose.
+reply names it — with the limit that applied, since a remote transfer carries
+less than a local read does.  `glob` still finds such a file, so one too big
+to search can be opened deliberately with `execute_command`.  Naming a
+directory in `PATH` searches it even if it is on the skip list, which is how
+`.git/config` or `.github/workflows` is searched on purpose, and a symbolic
+link to a directory is not followed, so a link back up a tree cannot loop.
 
 Both search the **VFS as well as disk**, exactly as `read_path` reads it: a
 file you just wrote with `write_file` is found before it is synced, and a line
@@ -429,7 +432,8 @@ POSIX `sh` script walks the host and streams file metadata — and, for `grep`,
 file contents — back through a single process.  The script transports; Emacs
 still does the matching, which is what keeps one regexp dialect and one VFS
 rule on both sides of the connection.  A tree too large for one transfer is
-fetched in several, until the time budget runs out.
+fetched in several, until the time budget runs out, and what it could not
+reach is said out loud rather than dropped.
 
 ### Skills
 

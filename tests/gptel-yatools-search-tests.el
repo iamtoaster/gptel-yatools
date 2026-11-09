@@ -174,10 +174,10 @@ rather than silently matching nothing."
     (gptel-yatools-search-test--tree '(("a.el" . "Needle\nneedle\nNEEDLE\n")))
     (gptel-yatools-test--vfs
       (let ((body (gptel-yatools-search-test--grep "needle")))
-        (should (string-match-p "3 matching line(s) in 1 file(s)" body))
+        (should (string-match-p "Showing 3 matching line(s) from 1 of 1 file(s)" body))
         (should (string-match-p "a\\.el:3:NEEDLE" body)))
       (let ((body (gptel-yatools-search-test--grep "Needle")))
-        (should (string-match-p "1 matching line(s) in 1 file(s)" body))
+        (should (string-match-p "Showing 1 matching line(s) from 1 of 1 file(s)" body))
         (should (string-match-p "a\\.el:1:Needle" body))
         (should-not (string-match-p "a\\.el:2:" body))))))
 
@@ -255,7 +255,7 @@ this is the tree the script sees when it walks \"\"."
           (should (string-match-p "a\\.el:1:needle one" body))
           (should (string-match-p "b\\.el:1:needle two" body))
           (should (string-match-p "c\\.el:1:needle three" body))
-          (should (string-match-p "3 matching line(s) in 3 file(s)" body)))))))
+          (should (string-match-p "Showing 3 matching line(s) from 3 of 3 file(s)" body)))))))
 
 (ert-deftest gptel-yatools-test-glob-walks-a-remote-workspace-in-chunks ()
   "A metadata transfer split into several chunks still lists every file."
@@ -282,5 +282,98 @@ this is the tree the script sees when it walks \"\"."
       (let ((body (gptel-yatools-search-test--glob "*.el")))
         (should (string-match-p "sub/deep/c\\.el\t" body))
         (should (= 1 (length gptel-yatools-test--remote-process-args)))))))
+
+;;;; 4. What the search could not read
+
+(ert-deftest gptel-yatools-test-glob-finds-a-file-too-large-to-grep ()
+  "A file is found by name whatever its size: size is why not to read it."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("big.jsonl" . "0123456789")))
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-search-max-file-size 4))
+        (should (string-match-p "\\`big\\.jsonl\t"
+                                (gptel-yatools-search-test--glob "*.jsonl")))))))
+
+(ert-deftest gptel-yatools-test-grep-names-the-files-it-could-not-read ()
+  "A file skipped for its size is named, not silently dropped."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "needle\n")
+                                       ("big.jsonl" . "0123456789abcdef")))
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-search-max-file-size 8))
+        (let ((body (gptel-yatools-search-test--grep "needle")))
+          (should (string-match-p "a\\.el:1:needle" body))
+          (should (string-match-p "big\\.jsonl" body))
+          (should (string-match-p "larger than" body))
+          (should (string-match-p "execute_command" body)))))))
+
+(ert-deftest gptel-yatools-test-grep-says-nothing-about-size-when-nothing-was-skipped ()
+  "The note appears only when it has something to report."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "needle\n")))
+    (gptel-yatools-test--vfs
+      (should-not (string-match-p "larger than"
+                                  (gptel-yatools-search-test--grep "needle"))))))
+
+(ert-deftest gptel-yatools-test-grep-survives-a-remote-file-too-large-to-read ()
+  "A withheld file on a remote host must not truncate the records after it."
+  (gptel-yatools-test--with-remote
+    (gptel-yatools-search-test--remote-tree '(("a.el" . "needle one\n")
+                                              ("big.jsonl" . "0123456789abcdef")
+                                              ("z.el" . "needle two\n")))
+    (gptel-yatools-test--vfs
+      ;; 12 bytes: the two 11-byte files are read, the 16-byte one is not.
+      (let ((gptel-yatools-search-max-file-size 12))
+        (let ((body (gptel-yatools-search-test--grep "needle")))
+          (should (string-match-p "a\\.el:1:needle one" body))
+          (should (string-match-p "z\\.el:1:needle two" body))
+          (should (string-match-p "big\\.jsonl" body))
+          (should-not (string-match-p "a\\.el (11 bytes)" body)))))))
+
+;;;; 5. What the cap keeps, and what it says it shows
+
+(ert-deftest gptel-yatools-test-grep-shows-exactly-what-it-says-it-shows ()
+  "A reply that reports N lines shows N lines."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree
+     `(("a.el" . ,(mapconcat (lambda (n) (format "hit %d" n))
+                             (number-sequence 1 4) "\n"))
+       ("b.el" . ,(mapconcat (lambda (n) (format "hit %d" n))
+                             (number-sequence 5 8) "\n"))))
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-grep-match-limit 5))
+        (let* ((body (gptel-yatools-search-test--grep "hit"))
+               ;; Everything above the blank line is the page itself.
+               (shown (car (split-string body "\n\n"))))
+          (should (= 5 (length (split-string shown "\n"))))
+          (should (string-match-p "Showing 5 matching line(s) from 2 of 2 file(s)"
+                                  body)))))))
+
+(ert-deftest gptel-yatools-test-grep-keeps-the-densest-files-under-the-cap ()
+  "The cap keeps the files with the most matches, not the first visited."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree
+     `(("aaa.el" . "hit\n")
+       ("bbb.el" . "hit\n")
+       ("zzz.el" . ,(mapconcat (lambda (n) (format "hit %d" n))
+                               (number-sequence 1 30) "\n"))))
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-grep-match-limit 3))
+        (let ((body (gptel-yatools-search-test--grep "hit")))
+          (should (string-match-p "\\`zzz\\.el:1:hit 1" body))
+          (should-not (string-match-p "aaa\\.el" body))
+          (should (string-match-p "from 1 of 3 file(s)" body))
+          (should (string-match-p "The other 2 matching file(s) were left out"
+                                  body)))))))
+
+(ert-deftest gptel-yatools-test-grep-searches-a-skipped-directory-when-named ()
+  "PATH is explicit: naming a skipped directory searches it."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '((".git/config" . "[core] needle\n")
+                                       ("a.el" . "needle\n")))
+    (gptel-yatools-test--vfs
+      (should-not (string-match-p "\\.git" (gptel-yatools-search-test--grep "needle")))
+      (should (string-match-p "\\.git/config:1:"
+                              (gptel-yatools-search-test--grep "needle" ".git"))))))
 
 (provide 'gptel-yatools-search-tests)

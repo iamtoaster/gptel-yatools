@@ -245,10 +245,12 @@ Returns a plist of `:files' (how many were visited), `:stopped' (nil,
 ;; the same tree to the script as the file name means to Emacs, over TRAMP
 ;; and over the stand-in handler the tests use.
 ;;
-;; Records are NUL-separated -- path, size, modification time, contents -- so
-;; no file name, however strange, can forge one.  Contents are read by size
-;; rather than to a delimiter for the same reason: a NUL inside a file is
-;; data, not the end of a record.
+;; Records are NUL-separated -- path, size, modification time, a flag, and
+;; then the contents when the flag is "1" -- so no file name, however
+;; strange, can forge one, and a file whose contents were withheld cannot be
+;; mistaken for one whose contents happen to start with a dash.  Contents are
+;; read by size rather than to a delimiter for the same reason: a NUL inside
+;; a file is data, not the end of a record.
 ;;
 ;; One process cannot carry a whole tree, so a chunk stops at a byte budget
 ;; and the next starts where it stopped.  A chunk that stopped because of the
@@ -281,11 +283,11 @@ walk() {
         stop=1; count=$((count-1)); return
       fi
       used=$((used + cost))
-      printf '%s\\000%s\\000%s\\000' \"$path\" \"$size\" \"$mtime\"
+      printf '%s\\000%s\\000%s\\0001\\000' \"$path\" \"$size\" \"$mtime\"
       head -c \"$size\" \"$path\"
       printf '\\000'
     else
-      printf '%s\\000%s\\000%s\\000-\\000' \"$path\" \"$size\" \"$mtime\"
+      printf '%s\\000%s\\000%s\\0000\\000' \"$path\" \"$size\" \"$mtime\"
     fi
     emitted=$((emitted+1))
   done
@@ -302,9 +304,10 @@ contents are worth sending, the directory names to skip as a space-separated
 list, and 1 when contents are wanted.
 
 Every record is four NUL-terminated fields -- path, size, modification time,
-contents or \"-\" -- and the last record starts with \"#\": the number of
-files consumed by this chunk, and 1 when the walk reached the end of the
-tree.")
+and \"1\" when the contents follow or \"0\" when they do not -- with the
+contents, when they follow, being exactly the size reported.  The last record
+starts with \"#\": the number of files consumed by this chunk, and 1 when the
+walk reached the end of the tree.")
 
 (defun gptel-yatools-search--remote-field (string position)
   "Return the NUL-terminated field of STRING at POSITION, as a cons.
@@ -318,76 +321,83 @@ terminator, or nil at the end of STRING."
           (cons (substring string position end) (1+ end))
         (cons (substring string position) (length string))))))
 
-(defun gptel-yatools-search--remote-parse (output contents base)
+(defun gptel-yatools-search--remote-record (string position base)
+  "Return the record of STRING at POSITION, with BASE as its directory.
+
+The value is a cons of the record and the position just past it, or nil at
+the end of STRING.  A record is a plist of `:path', `:size', `:mtime' and,
+when the transfer carried them, `:text' with `:contents' set."
+  (let ((path-field (gptel-yatools-search--remote-field string position)))
+    (when path-field
+      (let* ((path (car path-field))
+             (position (cdr path-field)))
+        (if (string-prefix-p "#" path)
+            (cons (list :summary t) position)
+          (let* ((size-field (gptel-yatools-search--remote-field string position))
+                 (size (string-to-number (or (car size-field) "0")))
+                 (position (cdr size-field))
+                 (mtime-field (gptel-yatools-search--remote-field string position))
+                 (mtime (string-to-number (or (car mtime-field) "0")))
+                 (position (cdr mtime-field))
+                 (flag-field (gptel-yatools-search--remote-field string position))
+                 (has-contents (equal (car flag-field) "1"))
+                 (position (cdr flag-field))
+                 (full (expand-file-name (string-remove-prefix "./" path) base))
+                 (record (list :path full :size size :mtime mtime)))
+            (cond
+             ((not has-contents) (cons record position))
+             ((> (+ position size) (length string)) nil)
+             (t
+              (let ((text (substring string position (+ position size)))
+                    (after (+ position size)))
+                ;; The byte after the contents is the record's terminator.  A
+                ;; file that grew between the walk and the read has something
+                ;; else there, so the parse resynchronises on the next NUL
+                ;; instead of reading the rest of the chunk as one record.
+                (unless (and (< after (length string))
+                             (eq (aref string after) ?\0))
+                  (let ((next (string-search "\0" string after)))
+                    (setq after (if next (1+ next) (length string)))))
+                (when (and (< after (length string))
+                           (eq (aref string after) ?\0))
+                  (setq after (1+ after)))
+                (cons (plist-put (plist-put record :text text) :contents t)
+                      after))))))))))
+
+(defun gptel-yatools-search--remote-parse (output base)
   "Return the records in OUTPUT, one remote chunk's bytes.
 
-CONTENTS says whether the chunk carried file contents, and BASE is the
-directory the script walked, which is prepended to the relative names it
-reports.  The value is a cons of the candidates -- plists as
-`gptel-yatools-search--candidate' builds them, with `:text' when contents
-were sent -- and a plist of `:total' and `:reached' from the closing
+BASE is the directory the script walked, which is prepended to the relative
+names the script reports.  The value is a cons of the records -- plists of
+`:path', `:size', `:mtime' and, when the transfer carried them, `:text' with
+`:contents' set -- and a plist of `:total' and `:reached' from the closing
 record.
 
 A record that does not parse ends the parse rather than being half read: a
 desynchronised stream is a bug worth seeing, not a record to guess at."
   (let ((position 0)
-        (candidates nil)
+        (records nil)
         (summary nil)
-        (done nil)
         (base (file-name-as-directory base)))
-    (cl-flet ((rebased (path)
-                (expand-file-name (string-remove-prefix "./" path) base)))
-      (while (and (not done) (< position (length output)))
-        (let* ((path-field (gptel-yatools-search--remote-field output position))
-               (path (car path-field)))
-          (setq position (cdr path-field))
-          (cond
-           ((null path-field) (setq done t))
-           ((string-prefix-p "#" path)
-            (let* ((total (gptel-yatools-search--remote-field output position))
-                   (reached (and total
-                                 (progn
-                                   (setq position (cdr total))
-                                   (gptel-yatools-search--remote-field
-                                    output position)))))
-              (when reached (setq position (cdr reached)))
-              (setq summary (list :total (string-to-number (or (car total) "0"))
-                                  :reached (equal (car reached) "1"))))
-            (setq done t))
-           (t
-            (let* ((size-field (gptel-yatools-search--remote-field output position))
-                   (size (string-to-number (or (car size-field) "0"))))
-              (setq position (cdr size-field))
-              (let* ((mtime-field
-                      (gptel-yatools-search--remote-field output position))
-                     (mtime (string-to-number (or (car mtime-field) "0"))))
-                (setq position (cdr mtime-field))
-                (cond
-                 ((not contents)
-                  (let ((placeholder
-                         (gptel-yatools-search--remote-field output position)))
-                    (setq position (cdr placeholder))
-                    (push (list :path (rebased path) :size size :mtime mtime)
-                          candidates)))
-                 ((> (+ position size) (length output))
-                  (setq done t))
-                 (t
-                  (let ((text (substring output position (+ position size))))
-                    (setq position (+ position size))
-                    ;; The byte after the contents is the record's
-                    ;; terminator.  A file that grew between the walk and
-                    ;; the read has something else there, so the parse
-                    ;; resynchronises on the next NUL instead of reading the
-                    ;; rest of the chunk as one record.
-                    (if (and (< position (length output))
-                             (eq (aref output position) ?\0))
-                        (setq position (1+ position))
-                      (let ((next (string-search "\0" output position)))
-                        (setq position (if next (1+ next) (length output)))))
-                    (push (list :path (rebased path) :size size :mtime mtime
-                                :text text)
-                          candidates)))))))))))
-    (cons (nreverse candidates)
+    (while (and (< position (length output)) (not summary))
+      (let ((parsed (gptel-yatools-search--remote-record output position base)))
+        (if (null parsed)
+            (setq position (length output))
+          (let ((record (car parsed)))
+            (setq position (cdr parsed))
+            (if (plist-get record :summary)
+                ;; The closing record: how many files this chunk consumed, and
+                ;; whether the walk reached the end of the tree.
+                (let ((total (gptel-yatools-search--remote-field
+                              output position)))
+                  (let ((reached (and total
+                                      (gptel-yatools-search--remote-field
+                                       output (cdr total)))))
+                    (setq summary (list :total (string-to-number
+                                                (or (car total) "0"))
+                                        :reached (equal (car reached) "1")))))
+              (push record records))))))
+    (cons (nreverse records)
           (or summary (list :total 0 :reached t)))))
 
 (defun gptel-yatools-search--remote-scan (directory start want budget contents)
@@ -411,7 +421,7 @@ CONTENTS whether contents are wanted at all.  The value is what
            :directory directory)))
     (if (eq (plist-get outcome :status) 'exited)
         (gptel-yatools-search--remote-parse
-         (plist-get outcome :output) contents directory)
+         (plist-get outcome :output) directory)
       ;; A walk that could not run is not a tree with nothing in it.
       (cons nil
             (list :total 0
@@ -425,14 +435,20 @@ CONTENTS whether contents are wanted at all.  The value is what
 
 CONTENTS says whether the bytes are wanted.  Chunks are asked for until the
 tree is exhausted or `gptel-yatools-search-seconds-limit' is spent, and the
-value is a plist of `:candidates', `:files', `:stopped' and `:failed' -- the
-same shape a local walk answers in, so that a tool cannot tell a remote
-workspace from a local one except by what it reports when a limit bites."
+value is a plist of `:candidates', `:skipped', `:files', `:stopped' and
+`:failed' -- the same shape a local walk answers in, so that a tool cannot
+tell a remote workspace from a local one except by what it reports when a
+limit bites.
+
+A file whose contents the script withheld arrives without any, which in a
+contents-transfer means one thing: it was larger than
+`gptel-yatools-search-max-file-size'."
   (let* ((timeout (gptel-yatools--call-deadline))
          (start (float-time))
          (deadline (min (+ start gptel-yatools-search-seconds-limit)
                         (- (+ start timeout) 1.0)))
          (candidates nil)
+         (skipped nil)
          (files 0)
          (total 0)
          (stopped nil)
@@ -450,15 +466,22 @@ workspace from a local one except by what it reports when a limit bites."
         (when (plist-get summary :failed)
           (setq failed (plist-get summary :failed)
                 stopped 'failed))
-        (setq candidates (nconc candidates records)
-              files (+ files (length records)))
+        (dolist (record records)
+          (if (or (not contents) (plist-get record :contents))
+              (push record candidates)
+            (push (list :path (plist-get record :path)
+                        :reason :too-large
+                        :size (plist-get record :size))
+                  skipped)))
+        (setq files (+ files (length records)))
         (cond
          (stopped nil)
          ((null records) (setq end (if (plist-get summary :reached) t 'empty)))
          ((plist-get summary :reached) (setq end t))
          ((>= files gptel-yatools-search-file-limit) (setq stopped 'files))
          ((>= (float-time) deadline) (setq stopped 'seconds)))))
-    (list :candidates candidates
+    (list :candidates (nreverse candidates)
+          :skipped (nreverse skipped)
           :files (max files total)
           :stopped stopped
           :failed failed
@@ -580,22 +603,30 @@ file is reached by the walk itself, and marked where it is merged."
 (defun gptel-yatools-search--local-collect (directory contents)
   "Return what lies under DIRECTORY, a local directory, by walking it.
 
-CONTENTS says whether each candidate carries its text."
+CONTENTS says whether each candidate carries its text.  A file whose text
+was wanted but not read -- because it is too large, or not a regular file --
+is reported in `:skipped' with the reason, so that a caller can say so
+instead of dropping it in silence."
   (let* ((candidates nil)
+         (skipped nil)
          (walk (gptel-yatools-search--walk
-               directory
-               (lambda (candidate)
-                 (push (if contents
-                           (let ((text (gptel-yatools-search--text
-                                        (plist-get candidate :path))))
-                             (if text
-                                 (plist-put (copy-sequence candidate)
-                                            :text text)
-                               candidate))
-                         candidate)
-                       candidates)
-                 nil))))
+                directory
+                (lambda (candidate)
+                  (let ((path (plist-get candidate :path)))
+                    (if (not contents)
+                        (push candidate candidates)
+                      (let ((read (gptel-yatools-search--content path)))
+                        (if (eq (plist-get read :kind) :text)
+                            (push (plist-put (copy-sequence candidate)
+                                             :text (plist-get read :text))
+                                  candidates)
+                          (push (list :path path
+                                      :reason (plist-get read :kind)
+                                      :size (or (plist-get read :size)
+                                                (plist-get candidate :size)))
+                                skipped)))))))))
     (list :candidates (nreverse candidates)
+          :skipped (nreverse skipped)
           :files (plist-get walk :files)
           :stopped (plist-get walk :stopped)
           :seconds (plist-get walk :seconds))))
@@ -604,11 +635,44 @@ CONTENTS says whether each candidate carries its text."
   "Return what lies under DIRECTORY, saying how far the search got.
 
 CONTENTS says whether candidates should carry their text.  The value is a
-plist of `:candidates', `:files', `:stopped' (nil, `files', `seconds',
-`failed' or `visit') and `:failed', the reason a remote walk could not run."
+plist of `:candidates', `:skipped', `:files', `:stopped' (nil, `files',
+`seconds' or `failed') and `:failed', the reason a remote walk could not
+run."
   (if (file-remote-p directory)
       (gptel-yatools-search--remote-collect directory contents)
     (gptel-yatools-search--local-collect directory contents)))
+
+(defun gptel-yatools-search--skipped-sentence (skipped)
+  "Return a sentence naming what SKIPPED, or nil when nothing was.
+
+SKIPPED is the list `gptel-yatools-search--collect' reports: plists of
+`:path', `:size' and `:reason'.  Only the largest few are named, since the
+point is to hand the model a decision it can act on, not to list a tree."
+  (when skipped
+    (let* ((large (cl-remove-if-not (lambda (skip)
+                                      (eq (plist-get skip :reason) :too-large))
+                                    skipped))
+           (shown (cl-subseq large 0 (min 5 (length large))))
+           (names (mapconcat (lambda (skip)
+                               (format "%s (%s)"
+                                       (gptel-yatools--display-path
+                                        (plist-get skip :path))
+                                       (gptel-yatools-search--format-size
+                                        (plist-get skip :size))))
+                             shown ", ")))
+      (when large
+        (format "%d file(s) were not searched because they are larger than `gptel-yatools-search-max-file-size' (in bytes): %s%s. Search one deliberately with execute_command, or call fetch_lines_from_file_using_regex on a file you know contains what you want."
+                (length large)
+                names
+                (if (> (length large) (length shown)) ", and more" ""))))))
+
+(defun gptel-yatools-search--format-size (bytes)
+  "Return BYTES as a short human unit, such as \"1.4 MiB\"."
+  (let ((n (or bytes 0)))
+    (cond
+     ((>= n 1048576) (format "%.1f MiB" (/ n 1048576.0)))
+     ((>= n 1024) (format "%.1f KiB" (/ n 1024.0)))
+     (t (format "%d bytes" n)))))
 
 (defun gptel-yatools-search--merge-pending (directory candidates)
   "Return CANDIDATES, gathered under DIRECTORY, with the VFS's answer.
@@ -775,7 +839,7 @@ a directory listing marks one."
   :name "glob"
   :category "filesystem"
   :description
-  "Find files by name. PATTERN is a shell wildcard: `*' matches within one path component, `**' crosses components, `?` one character, `[abc]` a set. A pattern with no slash matches the file name at any depth, so \"*.el\" finds every Emacs Lisp file under the workspace; a pattern with a slash matches the path relative to the workspace root, so \"src/**/*.c\" finds C files under src/. Returns one line per file, newest first: the path relative to the workspace root, a tab, and the modification time. Directories listed in `gptel-yatools-search-skip-directories' are not entered, files larger than `gptel-yatools-search-max-file-size' are ignored, and the call stops at `gptel-yatools-search-file-limit' files or `gptel-yatools-search-seconds-limit' seconds, saying so when it does. Use this instead of guessing a path and calling read_path on it. Pending VFS files exist here too: a file you wrote with write_file is found before it is synced."
+  "Find files by name. PATTERN is a shell wildcard: `*' matches within one path component, `**' crosses components, `?` one character, `[abc]` a set. A pattern with no slash matches the file name at any depth, so \"*.el\" finds every Emacs Lisp file under the workspace; a pattern with a slash matches the path relative to the workspace root, so \"src/**/*.c\" finds C files under src/. Returns one line per file, newest first: the path relative to the workspace root, a tab, and the modification time. No file is too large to be found: only names are read. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, and the call stops at `gptel-yatools-search-file-limit' files or `gptel-yatools-search-seconds-limit' seconds, saying so when it does. Use this instead of guessing a path and calling read_path on it. Pending VFS files exist here too: a file you wrote with write_file is found before it is synced."
   :args '((:name "pattern"
                  :type string
                  :description "Shell wildcard to match file names with, such as \"*.el\", \"src/**/*.c\" or \"Makefile\".")
@@ -802,21 +866,30 @@ what it matches when folding is on."
   (let ((case-fold-search nil))
     (not (string-match-p "[[:upper:]]" regexp))))
 
-(defun gptel-yatools-search--text (path)
-  "Return the text the search should match for PATH, or nil to skip it.
+(defun gptel-yatools-search--content (path)
+  "Return PATH's text as a plist, or say why it was not read.
 
-The VFS answers for a path it holds, as `read_path' does.  Disk content
+The `:kind' is `:text', with the contents under `:text'; or `:too-large',
+with `:size' in bytes; or `:special' for anything that is not a regular
+file; or `:unreadable'.
+
+The VFS answers for a path it holds, as `read_path' does, and a pending
+entry is never refused for its size: it is already in memory.  Disk content
 comes only from a regular file no larger than
-`gptel-yatools-search-max-file-size', and a file with a NUL byte in its
-first block is binary: it is skipped, not searched."
+`gptel-yatools-search-max-file-size', so that a search reads a tree rather
+than one enormous log."
   (let ((entry (gptel-yatools-vfs-entry path)))
     (cond
-     (entry (plist-get entry :content))
-     ((not (file-regular-p path)) nil)
-     ((> (or (file-attribute-size (file-attributes path)) 0)
-         gptel-yatools-search-max-file-size)
-      nil)
-     (t (gptel-yatools-vfs--disk-content path)))))
+     (entry (list :kind :text :text (plist-get entry :content)))
+     ((not (file-regular-p path)) (list :kind :special))
+     (t
+      (let ((size (file-attribute-size (file-attributes path))))
+        (if (and (numberp size) (> size gptel-yatools-search-max-file-size))
+            (list :kind :too-large :size size)
+          (let ((text (gptel-yatools-vfs--disk-content path)))
+            (if text
+                (list :kind :text :text text)
+              (list :kind :unreadable)))))))))
 
 (defun gptel-yatools-search--binary-p (text)
   "Return non-nil when TEXT holds a NUL byte."
@@ -863,25 +936,78 @@ whether more were left is reported separately by
         (forward-line 1)))
     more))
 
-(defun gptel-yatools-search--grep-result (path text regexp pending)
-  "Return the reply lines for PATH's TEXT that match REGEXP.
+(defun gptel-yatools-search--grep-collect (regexp candidates)
+  "Return the per-file matches for REGEXP over CANDIDATES, densest first.
 
-PENDING non-nil marks every line as not yet on disk.  The value is a cons
-of the lines, each \"PATH:LINE:TEXT\", and a boolean saying the file holds
-more matches than those.  A pending entry's lines end in a tab and
-\"(pending)\", as a directory listing marks one."
-  (let* ((matches (gptel-yatools-search--line-matches text regexp))
-         (more (and matches
-                    (= (length matches) gptel-yatools-grep-matches-per-file-limit)
-                    (gptel-yatools-search--more-lines-p
-                     text regexp (length matches))))
-         (shown (gptel-yatools--display-path path))
-         (lines (mapcar (lambda (match)
-                          (concat (format "%s:%d:%s"
-                                          shown (car match) (cdr match))
-                                  (when pending "\t(pending)")))
-                        matches)))
-    (cons lines more)))
+Each value is a plist of `:path', `:lines' (the match conses),
+`:line-count', `:more' (the file holds more than were kept) and `:pending'.
+Files with no match are left out.
+
+The order is by kept lines, descending, with the path breaking ties.  The
+walk visits files in whatever order the filesystem reports, which is not an
+order at all: ranking by density is what lets a capped reply keep the files
+most likely to answer the question, rather than whichever ones happened to
+be visited before the cap was reached."
+  (let ((found nil))
+    (dolist (candidate candidates)
+      (let ((text (plist-get candidate :text)))
+        (when text
+          (let* ((path (plist-get candidate :path))
+                 (matches (gptel-yatools-search--line-matches text regexp)))
+            (when matches
+              (let ((more (and (= (length matches)
+                                  gptel-yatools-grep-matches-per-file-limit)
+                               (gptel-yatools-search--more-lines-p
+                                text regexp (length matches)))))
+                (push (list :path path
+                            :lines matches
+                            :line-count (length matches)
+                            :more more
+                            :pending (plist-get candidate :pending))
+                      found)))))))
+    (sort found
+          (lambda (a b)
+            (let ((na (plist-get a :line-count))
+                  (nb (plist-get b :line-count)))
+              (if (= na nb)
+                  (string-lessp (plist-get a :path) (plist-get b :path))
+                (> na nb)))))))
+
+(defun gptel-yatools-search--grep-lines (files limit)
+  "Return the reply lines of FILES, keeping exactly LIMIT of them.
+
+FILES is what `gptel-yatools-search--grep-collect' returns.  A file is cut
+in the middle rather than dropped whole when the limit falls inside it,
+which is what makes the page land exactly on LIMIT: a reply that says it
+shows 200 lines has to show 200.
+
+The value is a plist of `:lines', `:files' (how many contributed one),
+`:matched-files' (how many had any) and `:partial' (the file the page cut
+short, or nil)."
+  (let ((lines nil)
+        (shown nil)
+        (partial nil))
+    (catch 'done
+      (dolist (file files)
+        (let ((room (- limit (length lines))))
+          (when (<= room 0) (throw 'done nil))
+          (let* ((all (plist-get file :lines))
+                 (kept (cl-subseq all 0 (min room (length all))))
+                 (path (plist-get file :path))
+                 (pending (plist-get file :pending)))
+            (dolist (match kept)
+              (push (concat (format "%s:%d:%s"
+                                    (gptel-yatools--display-path path)
+                                    (car match) (cdr match))
+                            (when pending "\t(pending)"))
+                    lines))
+            (push path shown)
+            (when (< (length kept) (length all))
+              (setq partial path))))))
+    (list :lines (nreverse lines)
+          :files (length shown)
+          :matched-files (length files)
+          :partial partial)))
 
 (defun gptel-yatools-search--grep (regexp path)
   "Return the Result for the `grep' tool, matching REGEXP under PATH."
@@ -897,86 +1023,84 @@ more matches than those.  A pending entry's lines end in a tab and
       (let* ((collected (gptel-yatools-search--collect directory t))
              (candidates (gptel-yatools-search--merge-pending
                           directory (plist-get collected :candidates)))
-             (limit gptel-yatools-grep-match-limit)
-             (lines nil)
-             (capped nil)
-             (any-pending nil)
-             (per-file nil))
-        (catch 'enough
-          (dolist (candidate candidates)
-            (let ((text (plist-get candidate :text)))
-              (when text
-                (let ((result (gptel-yatools-search--grep-result
-                               (plist-get candidate :path)
-                               text regexp
-                               (plist-get candidate :pending))))
-                  (when (car result)
-                    (when (plist-get candidate :pending)
-                      (setq any-pending t))
-                    (setq lines (nconc lines (car result)))
-                    (when (cdr result)
-                      (push (plist-get candidate :path) per-file)))
-                  (when (>= (length lines) limit)
-                    (setq capped t)
-                    (throw 'enough nil)))))))
+             (files (gptel-yatools-search--grep-collect regexp candidates))
+             (page (gptel-yatools-search--grep-lines
+                    files gptel-yatools-grep-match-limit))
+             (any-pending (cl-some (lambda (file)
+                                     (and (plist-get file :pending) t))
+                                   files)))
         (gptel-yatools-ok
          (gptel-yatools-search--grep-body
-          regexp directory lines capped per-file
+          regexp directory page files
           (list :stopped (plist-get collected :stopped)
                 :files (plist-get collected :files)
                 :seconds (plist-get collected :seconds)
-                :failed (plist-get collected :failed)))
+                :failed (plist-get collected :failed)
+                :skipped (plist-get collected :skipped)))
          :provenance (if any-pending :mixed :disk)
          :comment (when any-pending
                     "This reply mixes pending virtual-filesystem changes with disk content: lines marked (pending) are not on disk yet. Run the file_sync tool to persist them."))))))
 
-(defun gptel-yatools-search--grep-body (regexp directory lines capped
-                                               per-file walk)
-  "Return the body of a `grep' reply.
+(defun gptel-yatools-search--grep-body (regexp directory page files walk)
+  "Return the body of a `grep' reply, given what the search found.
 
-REGEXP is what was asked for, DIRECTORY where the walk started, LINES the
-matches as assembled, CAPPED whether the tool's own limit was reached,
-PER-FILE the files that had more matches than a file may contribute, and
-WALK what `gptel-yatools-search--walk' reported."
-  (let ((limit gptel-yatools-grep-match-limit)
-        (files (delete-dups (mapcar (lambda (line)
-                                      (car (split-string line ":")))
-                                    lines))))
+REGEXP is what was asked for, DIRECTORY where the walk started, PAGE what
+`gptel-yatools-search--grep-lines' kept, FILES every file that matched as
+`gptel-yatools-search--grep-collect' ordered them, and WALK what
+`gptel-yatools-search--collect' reported.
+
+Every count in the summary is the page's own.  A reply that shows 200 lines
+and then calls them 202, or that says the cap applies only to this call while
+silently dropping the files it never reached, answers a question nobody
+asked."
+  (let ((lines (plist-get page :lines))
+        (skipped (gptel-yatools-search--skipped-sentence
+                  (plist-get walk :skipped)))
+        (left-out (- (plist-get page :matched-files) (plist-get page :files))))
     (if (null lines)
-        (format "No line under %s matches %S. Check the expression, or call glob to see what files are there."
+        (format "No line under %s matches %S. Check the expression, or call glob to see what files are there.%s"
                 (gptel-yatools--display-path directory)
-                regexp)
+                regexp
+                (if skipped (concat "\n\n" skipped) ""))
       (concat
-       (mapconcat #'identity (cl-subseq lines 0 (min limit (length lines))) "\n")
+       (mapconcat #'identity lines "\n")
        "\n\n"
        (mapconcat
         #'identity
         (delq nil
-              (append
-               (list (format "%d matching line(s) in %d file(s)."
-                             (length lines) (length files)))
-               (mapcar (lambda (path)
-                         (format "%s: more than %d matching lines, only the first %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
-                                 (gptel-yatools--display-path path)
-                                 gptel-yatools-grep-matches-per-file-limit
-                                 gptel-yatools-grep-matches-per-file-limit))
-                       (nreverse per-file))
-               (list (when capped
-                       (format "Stopped at %d matching lines, the `gptel-yatools-grep-match-limit'. Make the expression more specific, or pass PATH, to see the rest."
-                               limit)))
-               (list (gptel-yatools-search--failure-sentence
-                      (plist-get walk :failed)))
-               (list (gptel-yatools-search--stop-sentence
-                      (plist-get walk :stopped)
-                      (plist-get walk :files)
-                      (plist-get walk :seconds)))))
+              (list
+               (format "Showing %d matching line(s) from %d of %d file(s) that matched."
+                       (length lines) (plist-get page :files)
+                       (plist-get page :matched-files))
+               (when (plist-get page :partial)
+                 (format "%s has more matching lines than fit in this reply: %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
+                         (gptel-yatools--display-path (plist-get page :partial))
+                         gptel-yatools-grep-matches-per-file-limit))
+               (when (> left-out 0)
+                 (format "The other %d matching file(s) were left out to stay within `gptel-yatools-grep-match-limit'. The files shown are the ones with the most matches; make the expression more specific, or pass PATH, to search a smaller part of the tree."
+                         left-out))
+               (mapconcat
+                (lambda (file)
+                  (format "%s: more than %d matching lines, only the first %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
+                          (gptel-yatools--display-path (plist-get file :path))
+                          gptel-yatools-grep-matches-per-file-limit
+                          gptel-yatools-grep-matches-per-file-limit))
+                (cl-remove-if-not (lambda (file) (plist-get file :more)) files)
+                "\n")
+               skipped
+               (gptel-yatools-search--failure-sentence
+                (plist-get walk :failed))
+               (gptel-yatools-search--stop-sentence
+                (plist-get walk :stopped)
+                (plist-get walk :files)
+                (plist-get walk :seconds))))
         "\n")))))
 
 (gptel-yatools-define-tool gptel-yatools-grep
   :name "grep"
   :category "filesystem"
   :description
-  "Find lines by content. REGEX is an Emacs regular expression, matched case-insensitively unless it contains an uppercase letter. Searches every file under PATH, returning one line per match: the path relative to the workspace root, a colon, the 1-based line number, a colon, and the line. Directories listed in `gptel-yatools-search-skip-directories' are not entered, binary files and files larger than `gptel-yatools-search-max-file-size' are skipped, and one file contributes at most `gptel-yatools-grep-matches-per-file-limit' lines so that it cannot crowd out every other file. The reply says how many lines and files matched, and says when a limit stopped it early. Pending VFS text is what is searched for a file the VFS holds, so a line you just wrote with write_file is found before it is synced; such a line is marked (pending). Use glob first when the tree is large, and fetch_lines_from_file_using_regex when you already know the file: this tool's answer is a summary of where to look, not every line of a file."
+  "Find lines by content. REGEX is an Emacs regular expression, matched case-insensitively unless it contains an uppercase letter. Searches every file under PATH, returning one line per match: the path relative to the workspace root, a colon, the 1-based line number, a colon, and the line. Directories listed in `gptel-yatools-search-skip-directories' are not entered unless PATH names one, which is how a deliberate search of `.git' or `.github' works. Binary files are skipped, a file larger than `gptel-yatools-search-max-file-size' is skipped and named in the reply, and one file contributes at most `gptel-yatools-grep-matches-per-file-limit' lines so that it cannot crowd out every other file. The reply says how many lines it shows, out of how many files matched, and says which files it left out when the limit bit: the files shown are the ones with the most matches, so a cap keeps what is likely to answer you rather than whatever the tree listed first. Pending VFS text is what is searched for a file the VFS holds, so a line you just wrote with write_file is found before it is synced; such a line is marked (pending). Use glob first when the tree is large, and fetch_lines_from_file_using_regex when you already know the file: this tool's answer is a summary of where to look, not every line of a file."
   :args '((:name "regex"
                  :type string
                  :description "Emacs regular expression to match against each line, such as \"defun gptel-yatools-\" or \"TODO\\(\\.org\\)?\".")

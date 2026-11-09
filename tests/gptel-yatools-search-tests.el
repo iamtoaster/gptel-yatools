@@ -376,4 +376,16 @@ this is the tree the script sees when it walks \"\"."
       (should (string-match-p "\\.git/config:1:"
                               (gptel-yatools-search-test--grep "needle" ".git"))))))
 
+(ert-deftest gptel-yatools-test-grep-does-not-explain-one-cut-twice ()
+  "A file cut by the page and by its own cap is explained once."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree
+     `(("busy.el" . ,(mapconcat (lambda (n) (format "hit %d" n))
+                                (number-sequence 1 30) "\n"))))
+    (gptel-yatools-test--vfs
+      (let ((gptel-yatools-grep-match-limit 3))
+        (let ((body (gptel-yatools-search-test--grep "hit")))
+          (should (string-match-p "more than 20 matching lines" body))
+          (should-not (string-match-p "than fit in this reply" body)))))))
+
 (provide 'gptel-yatools-search-tests)

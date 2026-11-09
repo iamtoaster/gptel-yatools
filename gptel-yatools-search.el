@@ -982,8 +982,8 @@ which is what makes the page land exactly on LIMIT: a reply that says it
 shows 200 lines has to show 200.
 
 The value is a plist of `:lines', `:files' (how many contributed one),
-`:matched-files' (how many had any) and `:partial' (the file the page cut
-short, or nil)."
+`:matched-files' (how many had any) and `:partial' -- the file the page cut
+short and how many of its lines it kept, or nil."
   (let ((lines nil)
         (shown nil)
         (partial nil))
@@ -1003,7 +1003,7 @@ short, or nil)."
                     lines))
             (push path shown)
             (when (< (length kept) (length all))
-              (setq partial path))))))
+              (setq partial (cons path (length kept))))))))
     (list :lines (nreverse lines)
           :files (length shown)
           :matched-files (length files)
@@ -1072,10 +1072,18 @@ asked."
                (format "Showing %d matching line(s) from %d of %d file(s) that matched."
                        (length lines) (plist-get page :files)
                        (plist-get page :matched-files))
-               (when (plist-get page :partial)
+               ;; A file cut by the page is only worth a note of its own
+               ;; when the per-file cap is not already explaining it.
+               (when (and (plist-get page :partial)
+                          (not (plist-get (cl-find (car (plist-get page :partial))
+                                                   files
+                                                   :key (lambda (file)
+                                                          (plist-get file :path))
+                                                   :test #'equal)
+                                          :more)))
                  (format "%s has more matching lines than fit in this reply: %d are shown. Use fetch_lines_from_file_using_regex on it to see them all."
-                         (gptel-yatools--display-path (plist-get page :partial))
-                         gptel-yatools-grep-matches-per-file-limit))
+                         (gptel-yatools--display-path (car (plist-get page :partial)))
+                         (cdr (plist-get page :partial))))
                (when (> left-out 0)
                  (format "The other %d matching file(s) were left out to stay within `gptel-yatools-grep-match-limit'. The files shown are the ones with the most matches; make the expression more specific, or pass PATH, to search a smaller part of the tree."
                          left-out))

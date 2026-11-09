@@ -245,6 +245,25 @@ Of the form \"ssh:a|sudo:root@b\", built from
              (and port (concat "#" port))))
     (`(,prefix) (string-remove-suffix ":" prefix))))
 
+(defun gptel-yatools--connection-phrase (path)
+  "Return the machine PATH lives on as a phrase for a sentence."
+  (let ((label (gptel-yatools--connection-label path)))
+    (if label
+        (format "the remote host %s" label)
+      "this machine")))
+
+(defun gptel-yatools--elsewhere-sentence (root target verb)
+  "Return why TARGET is not on the same machine as ROOT, or nil.
+
+VERB completes \"so the ... where the workspace is\", and is either
+\"tool acts\" or \"command runs\"."
+  (unless (equal (gptel-yatools--connection root)
+                 (gptel-yatools--connection target))
+    (let ((here (gptel-yatools--connection-phrase root))
+          (there (gptel-yatools--connection-phrase target)))
+      (format "Error: the workspace is on %s, but %s is on %s. Give a path relative to the workspace root, or an absolute path on %s, so the %s where the workspace is."
+              here (gptel-yatools--display-path target) there here verb))))
+
 (defun gptel-yatools--remote-shell (directory)
   "Return the shell to run a remote command with on DIRECTORY's host.
 
@@ -466,8 +485,8 @@ Commands first, then subagents, then anything else alphabetically."
 (defun gptel-yatools--abort-request (&optional buffer)
   "Move BUFFER's gptel request to its abort state, when it has one.
 
-The state machine is held in the chat buffer in `gptel--fsm-last', by
-`gptel--update-tool-call', before the tool runs."
+The state machine is held in the chat buffer in the variable
+`gptel--fsm-last', by `gptel--update-tool-call', before the tool runs."
   (with-current-buffer (or buffer (current-buffer))
     (let ((fsm (bound-and-true-p gptel--fsm-last)))
       (when (gptel-fsm-p fsm)
@@ -697,13 +716,13 @@ there would leave the command running on the host."
     (when (process-live-p process)
       (ignore-errors (delete-process process)))))
 
-(cl-defun gptel-yatools--spawn-process (argv &key directory timeout
-                                            result description coding)
-  "Start ARGV in the background and return a `gptel-yatools-job'.
+(cl-defun gptel-yatools--spawn-process (command &key directory timeout
+                                                result description coding)
+  "Start COMMAND in the background and return a `gptel-yatools-job'.
 
-ARGV is a list of strings: the program and its arguments, not a shell
-command.  stderr is merged into stdout, stdin is closed at once, and a
-remote DIRECTORY gets the host's own shell through a handler-built process.
+COMMAND is a shell command line, run by this machine's shell, or by the
+host's own when DIRECTORY is remote.  stderr is merged into stdout, stdin
+is closed at once, and a remote DIRECTORY gets a handler-built process.
 
 DIRECTORY defaults to `default-directory'; a caller working on a remote
 tree passes that tree's directory (ADR 0006).
@@ -723,6 +742,8 @@ timer kills a process that does not finish."
          (timeout (or timeout (gptel-yatools--call-deadline)))
          (remote (file-remote-p directory))
          (default-directory directory)
+         ;; This machine's shell, or the host's own.  The one place the
+         ;; choice is made: a caller hands over a command line, not a shell.
          (program (if remote
                       (gptel-yatools--remote-shell directory)
                     shell-file-name))
@@ -747,9 +768,7 @@ timer kills a process that does not finish."
                 :name "gptel-job"
                 :buffer output
                 :command (list program switch
-                               (concat "exec 2>&1; exec "
-                                       (mapconcat #'shell-quote-argument
-                                                  argv " ")))
+                               (concat "exec 2>&1; " command))
                 ;; Only a handler-built process runs on the host.  Without
                 ;; this flag the command starts here, in "~".
                 :file-handler (and remote t)
@@ -825,8 +844,9 @@ remote host that is the remote one, killed through TRAMP.
 
 Starts the process with `gptel-yatools--spawn-process' and waits for it."
   (gptel-yatools--await-job
-   (gptel-yatools--spawn-process argv :directory directory :timeout timeout
-                                 :coding coding)))
+   (gptel-yatools--spawn-process
+    (mapconcat #'shell-quote-argument argv " ")
+    :directory directory :timeout timeout :coding coding)))
 
 (defmacro gptel-yatools--with-deadline-suspended (&rest body)
   "Run BODY without counting its time against the call's deadline.
@@ -930,13 +950,10 @@ different machine is refused."
          (prefix (gptel-yatools--remote-prefix root)))
     (cond
      ((file-remote-p path)
-      (unless (equal (gptel-yatools--connection root)
-                     (gptel-yatools--connection path))
-        (error "Error: the workspace is on %s, but %s is on %s.  Give a path relative to the workspace root, or an absolute path on %s, so the tool acts where the workspace is"
-               (gptel-yatools--connection-label root)
-               (gptel-yatools--display-path path)
-               (gptel-yatools--connection-label path)
-               (gptel-yatools--connection-label root)))
+      ;; Asked before anything reads PATH: that would open a connection to
+      ;; a host the user never named.
+      (let ((elsewhere (gptel-yatools--elsewhere-sentence root path "tool acts")))
+        (when elsewhere (error "%s" elsewhere)))
       path)
      ((and prefix (file-name-absolute-p path))
       (concat prefix path))
@@ -1509,8 +1526,8 @@ NAME, when given, is the tool that ran out of time."
 
 Called after registration and whenever a timeout option changes, so the
 number the model is told is the one in force.  Reads this package's own
-tool list, not `gptel-tools', since a tool not yet enabled still needs a
-correct argument."
+tool list, not the variable `gptel-tools', since a tool not yet enabled
+still needs a correct argument."
   (dolist (tool gptel-yatools--tools)
     (let* ((default (gptel-yatools--tool-timeout-default tool))
            (args (gptel-tool-args tool)))
@@ -2308,7 +2325,7 @@ synchronously.
 
 The tool is registered in gptel's registry, which is what `gptel-menu'
 lists, and in `gptel-yatools--tools'.  Nothing is sent to the model until
-`gptel-yatools-enable' adds it to `gptel-tools'."
+`gptel-yatools-enable' adds it to the variable `gptel-tools'."
   (declare (indent 1))
   (let* ((rest spec)
          (plist nil))

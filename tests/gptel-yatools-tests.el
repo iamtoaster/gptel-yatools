@@ -795,6 +795,21 @@ a path means half way through the call."
       ;; Nothing leaks out of the call.
       (should-not gptel-yatools--call))))
 
+(ert-deftest gptel-yatools-test-a-command-reaches-the-shell-once ()
+  "The tool hands over a command line, not a shell to run a shell with."
+  (gptel-yatools-test--in-dir
+    (with-temp-buffer
+      (gptel-yatools-test--vfs
+        (let ((seen nil)
+              (real (symbol-function 'gptel-yatools--spawn-process)))
+          (cl-letf (((symbol-function 'gptel-yatools--spawn-process)
+                     (lambda (command &rest args)
+                       (setq seen command)
+                       (apply real command args))))
+            (funcall (gptel-yatools-test--tool "execute_command")
+                     "echo one; echo two" nil 5))
+          (should (equal seen "echo one; echo two")))))))
+
 (ert-deftest gptel-yatools-test-timeout-kills-command ()
   "A command that outlives the timeout must be killed, keeping its output."
   (let ((start (float-time))
@@ -946,7 +961,7 @@ that is actually running."
   (gptel-yatools-test--in-dir
     (with-temp-buffer
       (let* ((shell-file-name "/nonexistent/sh")
-             (job (gptel-yatools--spawn-process (list "true")))
+             (job (gptel-yatools--spawn-process "true"))
              (outcome (gptel-yatools--await-job job)))
         (should (gptel-yatools-job-start-error job))
         (should (eq (plist-get outcome :status) 'start-error))
@@ -1093,7 +1108,7 @@ I get wrong\" is the only question the message has to answer."
                                             ":" gptel-yatools-test--remote-prefix)))
                      result))
             (should (string-match-p
-                     (regexp-quote (format "which is on the remote host %s"
+                     (regexp-quote (format "elsewhere:/srv is on the remote host %s"
                                            (string-remove-suffix ":" other)))
                      result))
             ;; Nothing ran on either machine.

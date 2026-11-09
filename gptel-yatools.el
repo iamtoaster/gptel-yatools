@@ -68,9 +68,9 @@
   "Return the buffer the tool call in OVERLAY belongs to.
 
 OVERLAY, the dispatch overlay, lives in the buffer the model's request came
-from.  Otherwise the buffer recorded in `gptel--fsm-last', which is what
-the `*gptel-tool-calls*' inspection buffer carries.  Falls back on the
-current buffer, so direct calls work.
+from.  Otherwise the buffer recorded in the variable `gptel--fsm-last',
+which is what the `*gptel-tool-calls*' inspection buffer carries.  Falls
+back on the current buffer, so direct calls work.
 
 The result can be a killed buffer; callers check `buffer-live-p'."
   (let ((fsm (bound-and-true-p gptel--fsm-last)))
@@ -515,8 +515,8 @@ way."
 (defun gptel-yatools--extend-header-line (&rest _)
   "Put this package's labels in gptel's right-hand indicator group.
 
-`gptel-use-header-line' makes `header-line-format' hold (BACKEND STATUS
-INFO); element 2, the INFO segment, is replaced by
+The variable `gptel-use-header-line' makes `header-line-format' hold a
+backend, a status and an info segment; the third is replaced by
 `gptel-yatools--header-line-segment'.  Replacing in place rather than
 appending makes a second run harmless."
   (when (and gptel-use-header-line (consp header-line-format))

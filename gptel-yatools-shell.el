@@ -64,38 +64,6 @@ the host, as `gptel-yatools--connection-label' reports it."
                 label)
       (gptel-yatools--display-path directory))))
 
-(defun gptel-yatools-shell--shell (directory)
-  "Return the shell a command in DIRECTORY is handed to, as (PROGRAM . SWITCH).
-
-`shell-file-name' and `shell-command-switch' describe this machine's shell;
-a remote workspace has its own."
-  (if (file-remote-p directory)
-      (cons (gptel-yatools--remote-shell directory) "-c")
-    (cons shell-file-name shell-command-switch)))
-
-(defun gptel-yatools-shell--machine (path)
-  "Return PATH's machine as a phrase fit for a sentence."
-  (let ((label (gptel-yatools--connection-label path)))
-    (if label
-        (format "the remote host %s" label)
-      "this machine")))
-
-(defun gptel-yatools-shell--elsewhere (root target)
-  "Return why TARGET is not on the same machine as ROOT, or nil.
-
-Two paths are on the same machine when `gptel-yatools--connection' reports
-the same connection for both.  Asked before anything tests whether TARGET
-exists, since that would open a connection to a host the user never named."
-  (unless (equal (gptel-yatools--connection root)
-                 (gptel-yatools--connection target))
-    (let ((here (gptel-yatools-shell--machine root))
-          (there (gptel-yatools-shell--machine target)))
-      (format "Error: the workspace is on %s, but DIRECTORY resolves to %s, which is on %s. Give DIRECTORY relative to the workspace root, or as a path on %s, so the command runs where the workspace is."
-              here
-              (gptel-yatools--display-path target)
-              there
-              here))))
-
 (defun gptel-yatools-shell--run-command (command directory)
   "Start COMMAND in DIRECTORY and return a job for it.
 
@@ -113,7 +81,10 @@ job goes back to the boundary."
                                (expand-file-name directory root)
                              root))
          (shown-directory (gptel-yatools-shell--where target-directory))
-         (elsewhere (gptel-yatools-shell--elsewhere root target-directory)))
+         ;; Asked before anything tests whether the target exists, since
+         ;; that would open a connection to a host the user never named.
+         (elsewhere (gptel-yatools--elsewhere-sentence
+                     root target-directory "command runs")))
     (cond
      (elsewhere
       (gptel-yatools-shell--refusal elsewhere))
@@ -124,23 +95,22 @@ job goes back to the boundary."
      ((string-empty-p (string-trim command))
       (gptel-yatools-shell--refusal "Error: command is empty."))
      (t
-      (let ((shell (gptel-yatools-shell--shell target-directory)))
-        (gptel-yatools--spawn-process
-         (list (car shell) (cdr shell) command)
-         :directory target-directory
-         :timeout timeout
-         :description "command"
-         :result
-         (lambda (outcome)
-           ;; Runs when the command has finished, in the buffer that owns
-           ;; the call.  The pending-VFS warning is computed now, because
-           ;; it explains the output the model is about to read.
-           ;;
-           ;; The command may have changed files on disk, so the cached
-           ;; header-line count must not outlive it.
-           (gptel-yatools-vfs-disk-moved-externally)
-           (gptel-yatools-shell--command-result
-            (gptel-yatools-shell--outcome-text outcome shown-directory timeout)))))))))
+      (gptel-yatools--spawn-process
+       command
+       :directory target-directory
+       :timeout timeout
+       :description "command"
+       :result
+       (lambda (outcome)
+         ;; Runs when the command has finished, in the buffer that owns
+         ;; the call.  The pending-VFS warning is computed now, because
+         ;; it explains the output the model is about to read.
+         ;;
+         ;; The command may have changed files on disk, so the cached
+         ;; header-line count must not outlive it.
+         (gptel-yatools-vfs-disk-moved-externally)
+         (gptel-yatools-shell--command-result
+          (gptel-yatools-shell--outcome-text outcome shown-directory timeout))))))))
 
 (defun gptel-yatools-shell--outcome-text (outcome shown-directory timeout)
   "Return the model-facing text for a finished command's OUTCOME.

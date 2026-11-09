@@ -652,13 +652,19 @@ A tool with something more useful to say branches on `:kind' itself."
      (format "Error: %s is not readable (%s)."
              (gptel-yatools--display-path (plist-get read :path))
              (or (plist-get read :why) "permission denied or I/O error")))
+    (:too-large
+     (format "Error: %s is %s bytes, larger than the %s-byte ceiling this read accepts.  Use execute_command, or read it in parts"
+             (gptel-yatools--display-path (plist-get read :path))
+             (or (plist-get read :size) "an unknown number of")
+             (or (plist-get read :max-size) "unstated")))
     (_ nil)))
 
-(defun gptel-yatools-vfs-read (path &optional disk-only)
+(defun gptel-yatools-vfs-read (path &optional disk-only max-size)
   "Return the text at PATH, and say what kind of answer it is.
 
 PATH must be absolute.  DISK-ONLY non-nil ignores a pending entry and
-answers from disk.
+answers from disk.  MAX-SIZE, when non-nil, is the most bytes of disk
+content to read.
 
 The value is a plist carrying `:path' and a `:kind':
 
@@ -666,14 +672,19 @@ The value is a plist carrying `:path' and a `:kind':
                from (`:disk' or `:vfs').
   :binary      `:text' holds the raw bytes, `:size' their count,
                `:provenance' where they came from.
+  :too-large   disk content is over MAX-SIZE and was not read; `:size' is
+               its size and `:max-size' the ceiling that applied.
   :missing     nothing exists at PATH.
   :directory   PATH is a directory.
   :special     PATH is not a regular file.
   :unreadable  PATH is a regular file that could not be read; `:why'
                says why.
 
-A pending entry wins over disk.  Ordinary outcomes do not signal; render
-them with `gptel-yatools-vfs--read-problem' or branch on `:kind'."
+A pending entry wins over disk and is never refused for its size; MAX-SIZE
+bounds disk content only.
+
+Ordinary outcomes do not signal; render them with
+`gptel-yatools-vfs--read-problem' or branch on `:kind'."
   (let* ((full (gptel-yatools-vfs--key path))
          (entry (and (not disk-only) (gptel-yatools-vfs-pending full)))
          (vfs (plist-get entry :content)))
@@ -684,18 +695,18 @@ them with `gptel-yatools-vfs--read-problem' or branch on `:kind'."
                 :size (gptel-yatools-vfs--text-size vfs))
         (list :kind :text :path full :text vfs :provenance :vfs)))
      (t
-      (gptel-yatools-vfs--read-from-disk full)))))
+      (gptel-yatools-vfs--read-from-disk full max-size)))))
 
-(defun gptel-yatools-vfs--read-from-disk (full)
+(defun gptel-yatools-vfs--read-from-disk (full &optional max-size)
   "Return the attributes of the file at FULL in one round trip.
 
 The value is the plist `gptel-yatools-vfs-read' documents, minus any
 `:text': one `:kind', the `:path', and `:text', `:size', `:provenance' or
-`:why' where that kind carries one.
+`:why' where that kind carries one.  MAX-SIZE is passed on as that
+function's ceiling.
 
-One `file-attributes' call answers existence, directory-ness and
-regularity at once, which matters over TRAMP where each question is a
-command and a wait.  A symlink is asked about again, since
+One `file-attributes' call answers existence, directory-ness, regularity
+and size at once.  A symlink is asked about again, since
 `file-attributes' does not follow it."
   (let* ((attrs (condition-case nil (file-attributes full) (file-error nil)))
          (type (and attrs (file-attribute-type attrs))))
@@ -704,24 +715,36 @@ command and a wait.  A symlink is asked about again, since
      ((eq type t) (list :kind :directory :path full))
      ((stringp type)
       ;; A link: `file-directory-p' follows it, so a link to a directory
-      ;; is listed rather than reported unreadable.
+      ;; is listed rather than reported unreadable.  Its own size is the
+      ;; length of the name it holds, so the size is asked for again.
       (if (file-directory-p full)
           (list :kind :directory :path full)
-        (gptel-yatools-vfs--read-regular full)))
-     ((file-regular-p full) (gptel-yatools-vfs--read-regular full))
+        (gptel-yatools-vfs--read-regular full max-size)))
+     ((file-regular-p full)
+      (gptel-yatools-vfs--read-regular full max-size (file-attribute-size attrs)))
      (t (list :kind :special :path full)))))
 
-(defun gptel-yatools-vfs--read-regular (full)
-  "Return the answer for the regular file FULL, reading it once."
-  (let ((content (gptel-yatools-vfs--disk-content full)))
-    (cond
-     ((null content)
-      (list :kind :unreadable :path full
-            :why "permission denied or I/O error"))
-     ((gptel-yatools-vfs--binary-p content)
-      (list :kind :binary :path full :text content :provenance :disk
-            :size (gptel-yatools-vfs--text-size content)))
-     (t (list :kind :text :path full :text content :provenance :disk)))))
+(defun gptel-yatools-vfs--read-regular (full max-size &optional size)
+  "Return the answer for the regular file FULL, reading it once.
+
+MAX-SIZE, when non-nil, is the most bytes that may be read from it: a
+larger file answers `:too-large' and is not read.  SIZE is that file's size
+when the caller has already asked for it."
+  (let ((size (or size
+                  (ignore-errors
+                    (file-attribute-size (file-attributes full))))))
+    (if (and max-size (numberp size) (> size max-size))
+        (list :kind :too-large :path full :size size :max-size max-size
+              :provenance :disk)
+      (let ((content (gptel-yatools-vfs--disk-content full)))
+        (cond
+         ((null content)
+          (list :kind :unreadable :path full
+                :why "permission denied or I/O error"))
+         ((gptel-yatools-vfs--binary-p content)
+          (list :kind :binary :path full :text content :provenance :disk
+                :size (gptel-yatools-vfs--text-size content)))
+         (t (list :kind :text :path full :text content :provenance :disk)))))))
 
 (defun gptel-yatools-vfs--read-refusal (read)
   "Return READ's reason as a Result, keeping READ's provenance.

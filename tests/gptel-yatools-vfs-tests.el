@@ -489,6 +489,25 @@ The kinds are the interface: a caller that can act on one branches on it."
           (gptel-yatools-vfs-put file "pending\n")
           (should (eq (plist-get (gptel-yatools-vfs-read file) :provenance) :vfs)))))))
 
+(ert-deftest gptel-yatools-test-read-refuses-content-over-its-ceiling ()
+  "A MAX-SIZE read answers `:too-large' and reads nothing."
+  (gptel-yatools-test--in-dir
+    (let ((big (gptel-yatools-test--root-file "big.txt"))
+          (small (gptel-yatools-test--root-file "small.txt")))
+      (gptel-yatools-test--write big "0123456789abcdef")
+      (gptel-yatools-test--write small "0123")
+      (gptel-yatools-test--vfs
+        (let ((read (gptel-yatools-vfs-read big nil 8)))
+          (should (eq (plist-get read :kind) :too-large))
+          (should (equal (plist-get read :size) 16))
+          (should (equal (plist-get read :max-size) 8))
+          ;; Nothing was read, so no text travels with the answer.
+          (should-not (plist-get read :text)))
+        (should (eq (plist-get (gptel-yatools-vfs-read small nil 8) :kind) :text))
+        ;; A pending entry is already in memory and is never refused.
+        (gptel-yatools-vfs-put big "short\n")
+        (should (eq (plist-get (gptel-yatools-vfs-read big nil 8) :kind) :text))))))
+
 (ert-deftest gptel-yatools-test-read-tools-share-one-binary-voice ()
   "Every read tool must refuse binary content in the same words.
 

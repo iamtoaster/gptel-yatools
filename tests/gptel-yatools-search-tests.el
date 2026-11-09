@@ -207,7 +207,7 @@ rather than silently matching nothing."
         (should-not (string-match-p "a\\.el" body))))))
 
 (ert-deftest gptel-yatools-test-grep-leaves-binary-files-alone ()
-  "A file with a NUL byte is skipped rather than searched."
+  "A file with a NUL byte is skipped rather than searched, and counted."
   (gptel-yatools-test--in-dir
     (gptel-yatools-search-test--tree '(("a.txt" . "needle\n")))
     (gptel-yatools-test--write (gptel-yatools-test--root-file "bin.dat")
@@ -215,7 +215,25 @@ rather than silently matching nothing."
     (gptel-yatools-test--vfs
       (let ((body (gptel-yatools-search-test--grep "needle")))
         (should (string-match-p "a\\.txt:1:" body))
-        (should-not (string-match-p "bin\\.dat" body))))))
+        (should-not (string-match-p "bin\\.dat" body))
+        (should (string-match-p "1 binary file" body))))))
+
+(ert-deftest gptel-yatools-test-grep-counts-a-file-that-is-not-regular ()
+  "A file the reader will not call text is reported, not dropped in silence."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.txt" . "needle\n")
+                                       ("b.dat" . "needle\n")))
+    (gptel-yatools-test--vfs
+      (cl-letf (((symbol-function 'gptel-yatools-vfs-read)
+                 (lambda (path &optional _disk-only _max-size)
+                   (if (string-match-p "a\\.txt\\'" path)
+                       (list :kind :text :path path :text "needle\n"
+                             :provenance :disk)
+                     (list :kind :special :path path)))))
+        (let ((body (gptel-yatools-search-test--grep "needle")))
+          (should (string-match-p "a\\.txt:1:needle" body))
+          (should (string-match-p "were not searched because they are not regular files"
+                                  body)))))))
 
 ;;;; 3. A workspace on another machine
 

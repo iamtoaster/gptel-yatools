@@ -670,10 +670,10 @@ file is reached by the walk itself, and marked where it is merged."
 (defun gptel-yatools-search--local-collect (directory contents)
   "Return what lies under DIRECTORY, a local directory, by walking it.
 
-CONTENTS says whether each candidate carries its text.  A file whose text
-was wanted but not read -- because it is too large, or not a regular file --
-is reported in `:skipped' with the reason, so that a caller can say so
-instead of dropping it in silence."
+CONTENTS says whether each candidate carries its text.  The text is
+`gptel-yatools-vfs-read''s answer under `gptel-yatools-search-max-file-size';
+a file it does not answer with text is reported in `:skipped', with its
+`:reason' and `:size'.  A file the VFS shadows is read from disk twice."
   (let* ((candidates nil)
          (skipped nil)
          (walk (gptel-yatools-search--walk
@@ -682,13 +682,15 @@ instead of dropping it in silence."
                   (let ((path (plist-get candidate :path)))
                     (if (not contents)
                         (push candidate candidates)
-                      (let ((read (gptel-yatools-search--content path)))
-                        (if (eq (plist-get read :kind) :text)
+                      (let* ((read (gptel-yatools-vfs-read
+                                    path nil gptel-yatools-search-max-file-size))
+                             (kind (plist-get read :kind)))
+                        (if (eq kind :text)
                             (push (plist-put (copy-sequence candidate)
                                              :text (plist-get read :text))
                                   candidates)
                           (push (list :path path
-                                      :reason (plist-get read :kind)
+                                      :reason kind
                                       :size (or (plist-get read :size)
                                                 (plist-get candidate :size)))
                                 skipped)))))))))
@@ -714,17 +716,26 @@ run."
   "Return a sentence naming what SKIPPED, or nil when nothing was.
 
 SKIPPED is the list `gptel-yatools-search--collect' reports: plists of
-`:path', `:size' and `:reason'.  CEILING is the size that applied.  At most
-five files are named."
+`:path', `:size' and `:reason', and the remote host's aggregate of `:count'
+and `:reason' with no `:path'.  CEILING is the size that applied.  At most
+five size skips are named; the other reasons are counted."
   (when skipped
-    (let* ((unreadable (cl-remove-if-not (lambda (skip)
-                                           (and (null (plist-get skip :path))
-                                                (eq (plist-get skip :reason)
-                                                    :unreadable)))
-                                         skipped))
+    (let* ((unreadable (cl-remove-if-not
+                        (lambda (skip)
+                          (eq (plist-get skip :reason) :unreadable))
+                        skipped))
            (large (cl-remove-if-not (lambda (skip)
                                       (eq (plist-get skip :reason) :too-large))
                                     skipped))
+           (binary (cl-remove-if-not (lambda (skip)
+                                       (eq (plist-get skip :reason) :binary))
+                                     skipped))
+           ;; Not a regular file, a directory, or gone.
+           (other (cl-remove-if-not
+                   (lambda (skip)
+                     (memq (plist-get skip :reason)
+                           '(:special :directory :missing)))
+                   skipped))
            (shown (cl-subseq large 0 (min 5 (length large))))
            (names (mapconcat (lambda (skip)
                                (format "%s (%s)"
@@ -743,11 +754,18 @@ five files are named."
                         (gptel-yatools-search--format-size ceiling)
                         names
                         (if (> (length large) (length shown)) ", and more" "")))
+              (when binary
+                (format "%d binary file(s) hold no text to search and were skipped."
+                        (length binary)))
               (when unreadable
                 (format "%d file(s) could not be read and were skipped."
-                        (apply #'+ (mapcar (lambda (skip)
-                                             (plist-get skip :count))
-                                           unreadable))))))
+                        (apply #'+
+                               (mapcar (lambda (skip)
+                                         (or (plist-get skip :count) 1))
+                                       unreadable))))
+              (when other
+                (format "%d file(s) were not searched because they are not regular files, or were gone by the time they were read."
+                        (length other)))))
        "\n"))))
 
 (defun gptel-yatools-search--format-size (bytes)
@@ -953,41 +971,12 @@ what it matches when folding is on."
   (let ((case-fold-search nil))
     (not (string-match-p "[[:upper:]]" regexp))))
 
-(defun gptel-yatools-search--content (path)
-  "Return PATH's text as a plist, or say why it was not read.
-
-The `:kind' is `:text', with the contents under `:text'; or `:too-large',
-with `:size' in bytes; or `:special' for anything that is not a regular
-file; or `:unreadable'.
-
-The VFS answers for a path it holds, as `read_path' does, and a pending
-entry is never refused for its size: it is already in memory.  Disk content
-comes only from a regular file no larger than
-`gptel-yatools-search-max-file-size', so that a search reads a tree rather
-than one enormous log."
-  (let ((entry (gptel-yatools-vfs-entry path)))
-    (cond
-     (entry (list :kind :text :text (plist-get entry :content)))
-     ((not (file-regular-p path)) (list :kind :special))
-     (t
-      (let ((size (file-attribute-size (file-attributes path))))
-        (if (and (numberp size) (> size gptel-yatools-search-max-file-size))
-            (list :kind :too-large :size size)
-          (let ((text (gptel-yatools-vfs--disk-content path)))
-            (if text
-                (list :kind :text :text text)
-              (list :kind :unreadable)))))))))
-
-(defun gptel-yatools-search--binary-p (text)
-  "Return non-nil when TEXT holds a NUL byte."
-  (and (stringp text) (string-match-p "\0" text)))
-
 (defun gptel-yatools-search--line-matches (text regexp)
   "Return the lines of TEXT that match REGEXP, as (KEPT . TOTAL).
 
 KEPT is at most `gptel-yatools-grep-matches-per-file-limit' conses of
 LINE-NUMBER and LINE-TEXT; TOTAL counts past that cap."
-  (if (gptel-yatools-search--binary-p text)
+  (if (gptel-yatools-vfs--binary-p text)
       (cons nil 0)
     (let ((case-fold-search (gptel-yatools-search--smart-case-p regexp))
           (total 0)

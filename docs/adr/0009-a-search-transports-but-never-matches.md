@@ -74,7 +74,20 @@ budget to bound each.
    above that — matching, ranking, marking, reporting — is shared. A tool
    cannot tell where the files live except by what it is told when a limit
    bites.
-7. **Nothing writes.** A search has no spill file, no cache, no index. ADR
+7. **A cap keeps the densest files, and the reply counts only what it
+   shows.** Matches are ranked by how many a file holds before the line limit
+   is applied, because `readdir` order is not an order: a cap applied to it
+   drops an arbitrary subset, and the file with the most matches is exactly
+   what a capped answer must not lose. The page is cut to exactly the limit,
+   in the middle of a file if need be, so the number of lines shown and the
+   number reported are the same number. What was left out is named.
+8. **A skipped file is reported, never dropped.** A file over
+   `-max-file-size`, or one that is not a regular file, contributes a skip
+   reason, which the reply turns into a sentence naming the largest few and
+   what to do about them. `glob` has no skip reasons at all: it reads names,
+   so no file is too large to be found, and a file too big to search can be
+   opened deliberately.
+9. **Nothing writes.** A search has no spill file, no cache, no index. ADR
    0003 allows a tool an opaque directory only for output that is derived,
    disposable and unreviewable as text; search results are exactly the text a
    user would want to review, and a locator for them would be a second way to
@@ -97,6 +110,9 @@ budget to bound each.
 - The skip list is explicit rather than `.gitignore`-aware. Honouring ignore
   files means parsing them at every level and getting nested precedence and
   negation right in Elisp, for a benefit a defcustom already covers.
+- Ranking by density costs a full walk before anything is shown, bounded by
+  the same seconds and file budgets. That is the price of a cap that is a
+  selection rather than an accident.
 - Every budget is a defcustom and every budget ends in a sentence the model
   is told. A search that stops silently is worse than one that fails: it
   teaches the model that a file does not exist.

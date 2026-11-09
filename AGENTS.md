@@ -210,9 +210,10 @@ changing the rule.
   text where the VFS holds it and find files the VFS alone holds, marking
   both; a reply that used either is `:mixed`.  A search that read disk only
   would tell the model its own file does not exist (ADR 0009).
-- **A budget is reported, never silent.**  Every search limit ends in a
-  sentence the model reads.  Truncating quietly teaches it that a file it
-  needs is not there, which is the failure those tools exist to end.
+- **A budget is reported, never silent, and keeps the densest files.**  Every
+  search limit ends in a sentence the model reads, and a `grep` cap is applied
+  after ranking by match count rather than to `readdir` order, so the file
+  most likely to answer is never the one dropped.
 - **Skills are read from disk only.**  A pending `SKILL.md` is invisible
   to discovery, so the model cannot author instructions that are
   authoritative before review.  `allowed-tools` is advisory and stays

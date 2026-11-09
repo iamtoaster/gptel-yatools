@@ -293,6 +293,46 @@ whose depth the model does not know."
                                             time))))
 
 ;;-------------------------------------------------------------------------
+;; Pending entries, seen by a search
+;;
+;; A search that read disk alone would tell the model its own file does not
+;; exist.  So the VFS answers for a path it holds -- preferring its text, the
+;; same choice `read_path' makes -- and a path it alone holds is a file the
+;; search finds, marked, before it is synced.
+;;
+;; The cheap question is asked: is there an entry, not does it still differ
+;; (ADR 0001).  `gptel-yatools-vfs-put' drops an entry that matches disk, so
+;; an entry that exists is nearly always a pending change, and the one case
+;; it is not -- disk changed to meet the VFS afterwards -- costs a stale
+;; "(pending)" note rather than a wrong answer.
+;;-------------------------------------------------------------------------
+(defun gptel-yatools-search--pending-p (path)
+  "Return non-nil when the VFS, not disk, answers for PATH."
+  (and (gptel-yatools-vfs-entry path) t))
+
+(defun gptel-yatools-search--vfs-candidates (directory)
+  "Return candidates for the VFS entries under DIRECTORY that disk lacks.
+
+Each is a candidate plist with `:pending' set, in path order.  Only entries
+with no file on disk need this pass: one that shadows a disk file is reached
+by the walk itself, and marked there."
+  (let ((full-dir (file-name-as-directory (expand-file-name directory)))
+        (now (current-time))
+        (found nil))
+    (maphash (lambda (path entry)
+               (when (and (string-prefix-p full-dir path)
+                          (> (length path) (length full-dir))
+                          (not (file-exists-p path)))
+                 (push (list :path path
+                             :size (length (or (plist-get entry :content) ""))
+                             :mtime now
+                             :pending t)
+                       found)))
+             (gptel-yatools-vfs--table))
+    (sort found (lambda (a b) (string-lessp (plist-get a :path)
+                                            (plist-get b :path))))))
+
+;;-------------------------------------------------------------------------
 ;; The tools
 ;;-------------------------------------------------------------------------
 (defun gptel-yatools-search--stop-sentence (stopped files seconds)
@@ -311,33 +351,73 @@ visited and SECONDS how long it took."
              seconds files))
     (_ nil)))
 
+(defun gptel-yatools-search--relative (path root)
+  "Return PATH relative to ROOT, a directory with a trailing slash.
+
+A plain prefix removal: unlike `file-relative-name' it asks the filesystem
+nothing, which matters for a path that has no file -- a pending entry."
+  (if (string-prefix-p root path)
+      (substring path (length root))
+    path))
+
+(defun gptel-yatools-search--glob-subject (path root anchored)
+  "Return the part of PATH a `glob' pattern is matched against.
+
+ROOT is the workspace root and ANCHORED says whether the pattern names a
+position in the tree: then the whole relative path, else just the file
+name, which is what makes \"*.el\" work at every depth."
+  (if anchored
+      (gptel-yatools-search--relative path root)
+    (file-name-nondirectory path)))
+
 (defun gptel-yatools-search--glob (pattern path)
   "Return the Result for the `glob' tool, matching PATTERN under PATH."
   (gptel-yatools--require-string pattern "pattern")
   (when (string-empty-p pattern)
     (error "Error: pattern must not be empty. Pass a shell wildcard such as \"*.el\" or \"src/**/*.c\""))
-  (let ((root (gptel-yatools--workspace-root))
-        (directory (gptel-yatools--resolve-path (or path ""))))
+  (let* ((root (gptel-yatools--workspace-root))
+         (directory (gptel-yatools--resolve-path (or path "")))
+         (regexp (gptel-yatools-search--glob-regexp pattern))
+         (anchored (gptel-yatools-search--glob-anchored-p pattern))
+         (match (lambda (full)
+                  (string-match-p
+                   regexp (gptel-yatools-search--glob-subject
+                           full root anchored)))))
     (if (not (file-directory-p directory))
         (gptel-yatools-ok
          (format "Error: %s is not a directory. Give PATH as a directory to search under, and PATTERN as the file names wanted."
                  (gptel-yatools--display-path directory))
          :comment "Nothing was searched.")
-      (let* ((regexp (gptel-yatools-search--glob-regexp pattern))
-             (anchored (gptel-yatools-search--glob-anchored-p pattern))
-             (hits nil)
+      (let* ((hits nil)
              (walk (gptel-yatools-search--walk
                     directory
                     (lambda (candidate)
-                      (let* ((full (plist-get candidate :path))
-                             (subject (if anchored
-                                          (file-relative-name full root)
-                                        (file-name-nondirectory full))))
-                        (when (string-match-p regexp subject)
-                          (push (cons full candidate) hits))
-                        (>= (length hits) gptel-yatools-glob-result-limit))))))
+                      (when (funcall match (plist-get candidate :path))
+                        (push (cons (plist-get candidate :path) candidate) hits))
+                      (>= (length hits) gptel-yatools-glob-result-limit))))
+             ;; A file the VFS holds and disk does not is a file this search
+             ;; must find: the model wrote it, so it exists.  One that disk
+             ;; holds too was already reached by the walk, below.
+             (pending
+              (cl-loop for candidate in (gptel-yatools-search--vfs-candidates directory)
+                       when (funcall match (plist-get candidate :path))
+                       collect (cons (plist-get candidate :path) candidate)))
+             (hits (append
+                    (mapcar (lambda (hit)
+                              (if (gptel-yatools-search--pending-p (car hit))
+                                  (cons (car hit)
+                                        (plist-put (copy-sequence (cdr hit))
+                                                   :pending t))
+                                hit))
+                            hits)
+                    pending))
+             (any-pending (cl-some (lambda (hit) (plist-get (cdr hit) :pending))
+                                   hits)))
         (gptel-yatools-ok
-         (gptel-yatools-search--glob-body hits pattern directory walk))))))
+         (gptel-yatools-search--glob-body hits pattern directory walk)
+         :provenance (if any-pending :mixed :disk)
+         :comment (when any-pending
+                    "This reply mixes pending virtual-filesystem changes with disk content: entries marked (pending) exist only in the VFS. Run the file_sync tool to persist them."))))))
 
 (defun gptel-yatools-search--glob-sort (hits)
   "Return HITS, an alist of path to candidate, newest first.
@@ -356,15 +436,19 @@ Ties are broken by path, so two calls a second apart agree with each other."
 
 HITS is an alist of absolute path to candidate, PATTERN what was asked for,
 DIRECTORY where the walk started and WALK what `gptel-yatools-search--walk'
-reported."
+reported.  A candidate with `:pending' set is marked as such in its line, as
+a directory listing marks one."
   (let* ((sorted (gptel-yatools-search--glob-sort hits))
          (limit gptel-yatools-glob-result-limit)
          (shown (cl-subseq sorted 0 (min limit (length sorted))))
          (lines (mapcar (lambda (hit)
-                          (format "%s\t%s"
-                                  (gptel-yatools--display-path (car hit))
+                          (concat (gptel-yatools--display-path (car hit))
+                                  "\t"
                                   (gptel-yatools-search--format-time
-                                   (plist-get (cdr hit) :mtime))))
+                                   (plist-get (cdr hit) :mtime))
+                                  (if (plist-get (cdr hit) :pending)
+                                      "\t(pending)"
+                                    "")))
                         shown))
          (notes (delq nil
                       (list

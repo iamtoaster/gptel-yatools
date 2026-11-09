@@ -76,8 +76,10 @@ rather than silently matching nothing."
                                        ("notes.txt" . "n")
                                        ("sub/deep/b.el" . "b")))
     (gptel-yatools-test--vfs
+      ;; Order is a separate question (`-orders-newest-first' settles it),
+      ;; so these assertions name the lines and not their positions.
       (let ((body (gptel-yatools-search-test--glob "*.el")))
-        (should (string-match-p "\\`a\\.el\t" body))
+        (should (string-match-p "\\(?:\\`\\|\n\\)a\\.el\t" body))
         (should (string-match-p "\nsub/deep/b\\.el\t" body))
         (should-not (string-match-p "notes\\.txt" body))))))
 
@@ -132,6 +134,25 @@ rather than silently matching nothing."
     (gptel-yatools-test--vfs
       (should (string-match-p "\\`No files under"
                               (gptel-yatools-search-test--glob "*.zig"))))))
+
+(ert-deftest gptel-yatools-test-glob-finds-a-file-that-exists-only-in-the-vfs ()
+  "A file written but not yet synced is found, and marked as pending."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-test--vfs
+      (let ((file (gptel-yatools-test--root-file "fresh.el")))
+        (gptel-yatools-vfs-put file "(provide 'fresh)")
+        (let ((body (gptel-yatools-search-test--glob "*.el")))
+          (should (string-match-p "\\`fresh\\.el\t.*(pending)" body)))))))
+
+(ert-deftest gptel-yatools-test-glob-marks-a-pending-change-to-a-disk-file ()
+  "A file on disk whose content is pending appears once, marked."
+  (gptel-yatools-test--in-dir
+    (gptel-yatools-search-test--tree '(("a.el" . "old")))
+    (gptel-yatools-test--vfs
+      (gptel-yatools-vfs-put (gptel-yatools-test--root-file "a.el") "new")
+      (let ((body (gptel-yatools-search-test--glob "*.el")))
+        (should (= 1 (length (split-string body "\n"))))
+        (should (string-match-p "\\`a\\.el\t.*(pending)" body))))))
 
 (provide 'gptel-yatools-search-tests)
 ;;; gptel-yatools-search-tests.el ends here
